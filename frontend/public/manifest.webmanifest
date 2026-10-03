@@ -1,0 +1,14 @@
+{
+  "id": "/",
+  "name": "YouTube Live Archiver",
+  "short_name": "Live Archiver",
+  "description": "YouTube 配信の録画アーカイブを管理",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#171d22",
+  "theme_color": "#171d22",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

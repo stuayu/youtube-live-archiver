@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>viewport frame</title>
+<style>html,body{margin:0;background:#888}iframe{border:0;display:block}</style>
+<script>
+// ?w=390&h=844&tab=配信予定 で、指定幅の iframe に本体を読み込む。
+const p = new URLSearchParams(location.search);
+const w = p.get('w') || '390', h = p.get('h') || '844', tab = p.get('tab');
+const f = document.createElement('iframe');
+f.style.width = w + 'px';
+f.style.height = h + 'px';
+f.src = tab ? '/?tab=' + encodeURIComponent(tab) : '/';
+document.addEventListener('DOMContentLoaded', () => document.body.appendChild(f));
+</script>
