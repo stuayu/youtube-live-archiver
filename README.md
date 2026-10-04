@@ -56,7 +56,7 @@ Windows 10 / 11 に新しく導入し、Windows サービスとして常駐さ�
 
 既に運用している環境を新しい版に上げる場合は、先に「[11. 旧版から更新する場合](#11-旧版から更新する場合)」を読んでください。
 
-> **検証状況**: この節は、スクリプトとコードの動作に合わせて書いていますが、2026-10 の改修では Windows 実機で通し実行していません（同じ流れは macOS で確認済みです）。未確認の点は「[14. Windows での検証状況](#14-windows-での検証状況)」にまとめています。最初は「5. 起動して確認する」まで進め、手動起動で問題が無いことを確かめてからサービス化してください。
+> **検証状況**: 2026-10-05 に、Windows 11 の 2 台で新規導入（組み込み PostgreSQL + サービス）と旧版からの更新を実行して確認しました。未確認の点（ファイアウォール設定スクリプト、録画の手動停止、文字起こしなど）は「[14. Windows での検証状況](#14-windows-での検証状況)」にまとめています。最初は「5. 起動して確認する」まで進め、手動起動で問題が無いことを確かめてからサービス化してください。
 
 #### 1. 用意するもの
 
@@ -391,6 +391,7 @@ Remove-NetFirewallRule -DisplayName 'YouTube Live Archiver TCP 8000 Tailscale' -
 | ポートが使用中（エラー `10048`）で起動しない | 手動起動したアプリやサービスが既に動いていないか確認します。`Get-NetTCPConnection -LocalPort 8000 -State Listen` で使用中のプロセス ID を調べるか、`APP_PORT` を変更します。 |
 | サービス登録で `依存パッケージ入りの python.exe が見つかりません` | 手順 4 が完了しているか確認します。Microsoft Store 版 Python で作った仮想環境は使えません。別の場所の Python を使う場合は `-PythonPath` で指定します。 |
 | サービスが起動しない、すぐ止まる | `C:\yla\logs\service-stderr.log` と `service-stdout.log` の末尾を確認します。サービスを止めた状態で手順 5 の手動起動を行うと、同じエラーを画面で確認できます。 |
+| 文字起こしが `open() got an unexpected keyword argument 'metadata_errors'` で失敗する | PyAV 19 以降は faster-whisper 1.2 と互換性がありません。`python -m pip install "av<19"`（サービスが使う Python で実行）のあと、サービスを再起動します。`requirements.txt` は `av<19` に固定済みです。 |
 | この PC では開けるが、他の端末から開けない | `APP_HOST` が `127.0.0.1` になっていないか、手順 9 のスクリプトを実行したか、ネットワークが「プライベート」かを確認します。手動起動時の警告で「キャンセル」を選んだ場合は、「セキュリティが強化された Windows Defender ファイアウォール」の「受信の規則」から、python.exe に対するブロック規則を削除します。 |
 | 登録したチャンネルや録画が消えたように見える | 別のデータベースで起動しています。`backend\.env` の `DATABASE_URL` と、起動ログの 1 行目を確認します（手順 7 の注意）。 |
 | 夜間に録画が止まっている | PC のスリープ・休止状態を無効にします（手順 8 の注意）。 |
@@ -399,10 +400,24 @@ Remove-NetFirewallRule -DisplayName 'YouTube Live Archiver TCP 8000 Tailscale' -
 
 #### 14. Windows での検証状況
 
-- 2026-10 の改修（監視・録画・画面の作り直し、組み込み PostgreSQL、自動マイグレーション）は macOS 上で行い、Windows 実機では実行していません。
-- Windows で未確認のもの: この節の手順の通し実行、組み込み PostgreSQL（`pgserver` の Windows 版）での動作、サービス（`LocalSystem`）配下での組み込み PostgreSQL、NSSM の停止待ち時間、`CTRL_BREAK` による録画停止と部分録画の救出。
-- `scripts\install-windows-service.ps1` と `scripts\setup-firewall.ps1` は今回修正しました（仮想環境の Python を優先、組み込み PostgreSQL では依存サービスを設定しない、`backend\.env` のポートを読む）。構文と判定ロジックは macOS 上の PowerShell 7 で確認しましたが、Windows PowerShell 5.1 での実行、NSSM・サービス・ファイアウォールの操作は未確認です。
-- 改修前の版は、Windows サービス + PostgreSQL 17 の構成で運用されていました。確実さを優先する場合は、手順 7 の B（外部の PostgreSQL）を選んでください。
+2026-10-05 に、Windows 11（x64）の 2 台で次を実行して確認しました。
+
+- **新規導入**（Python 3.11.9、組み込み PostgreSQL、NSSM）: 手順 3〜5 と 8 の内容（コードの取得、仮想環境、依存パッケージ、画面のビルド、`scripts\install-windows-service.ps1` によるサービス登録）。サービス（`LocalSystem`）配下で組み込み PostgreSQL の初期化・全マイグレーション・起動（約 6 秒）、`/api/status` の正常応答、サービスの停止（約 1 秒、PostgreSQL も正常停止）と再起動を確認。
+- **旧版からの更新**（Python 3.13、PostgreSQL 17、既存のサービス）: 手順 10・11 の内容（`pg_dump` によるバックアップ、依存パッケージの追加、画面のビルド、マイグレーション 0015〜0018、サービスの再開）。停止時間は 16 秒。更新後、チャンネルの確認、失敗していた録画（5.6 GB）の再取得と完了処理、コメントのリプレイ取得が動作することを確認。
+- `scripts\install-windows-service.ps1` は Windows PowerShell 5.1 で実行して確認（仮想環境の Python の検出、組み込み PostgreSQL では依存サービスなし、停止待ち 30 秒の設定）。
+
+Windows で未確認のもの:
+
+- `scripts\setup-firewall.ps1` の実行、`-UseScheduledTask`（タスク スケジューラ）での登録。
+- ライブ録画の手動停止（`CTRL_BREAK`）と部分録画の救出、録画中のサービス停止からの復帰。
+- 文字起こし（faster-whisper）の実行。
+- 外部の PostgreSQL を使う新規導入（手順 7 の B）の通し実行。更新した環境はこの構成です。
+
+確認の中で分かった注意点:
+
+- `py` ランチャーが無い環境（pyenv-win など）では、手順 4 の `py -3.11` の代わりに、Python 3.11 / 3.12 の `python.exe` を絶対パスで指定して仮想環境を作ります。
+- PowerShell から `http://localhost:8000/` を呼ぶと、応答まで約 2 秒かかります（IPv6 を先に試すため）。確認コマンドは `http://127.0.0.1:8000/` にすると速くなります。ブラウザーでは問題になりません。
+- SSH で接続したシェルでは、Windows の資格情報マネージャーを使えないため、認証が必要なリポジトリの `git pull` が `could not read Username` で失敗します。リモートデスクトップなど対話ログオンのシェルで実行するか、別の PC で `git bundle create` したファイルを転送して `git fetch <bundle>` で取り込みます。
 
 ### ローカル実行の設定
 
@@ -636,13 +651,14 @@ E2E と shots は一時 PostgreSQL・backend・frontend を起動します。詳
 - URL を指定した追加のプレビュー: 配信中・配信予定・配信終了の実 URL（`youtu.be`、`/live/`、ID のみ）を正しく判定。プレビュー画像を含め、ブラウザーから YouTube への直接リクエストは 0 件。実際の追加（録画・ダウンロードの開始）は fake を使う自動テストでのみ確認。
 - 配信予定のサムネイル: 実データの配信予定でサムネイルがアプリ経由で表示される。
 - アプリ再起動時のライブ録画: 録画中 2 本が中断され、起動直後に別区間として自動再開。
+- Windows 11 での新規導入（組み込み PostgreSQL + サービス）と、旧版（PostgreSQL 17 + サービス、Python 3.13）からの更新。詳細は「14. Windows での検証状況」。
 - 実録画の WebKit での再生（Playwright の WebKit 26.6。macOS 実機の Safari ではありません）: H.264 + AAC の MKV（2時間4分）を自動リマックスして再生・シーク・弾幕表示。AV1 + Opus の MKV（64分）で変換の案内 → 「変換して再生」→ 進捗表示 → H.264 で再生・シーク。再生用ファイルが準備済みの場合は、一覧を開いた直後に再生しても約0.5〜1秒で読み込み完了（チャット 26,555 件の DB。修正前は絵文字画像の取得が1件40〜50秒かかり、動画の読み込みが30秒以上待たされていた）。
 
 ### 自動テスト
 
 最終のローカル実行結果（2026-10-05、macOS）は次のとおりです。
 
-- backend pytest: 386 passed（指定 PostgreSQL URL）
+- backend pytest: 388 passed（指定 PostgreSQL URL）
 - frontend format:check: 成功
 - frontend lint: 成功
 - frontend build: 成功
@@ -655,7 +671,7 @@ E2E と shots は一時 PostgreSQL・backend・frontend を起動します。詳
 
 ### 未検証（理由）
 
-- Windows 実行: Windows 環境を今回使っていないため。導入手順の通し実行、組み込み PostgreSQL、CTRL_BREAK による停止、部分録画救出、サービス運用、修正した PowerShell スクリプトの実行を含みます（「Windows（導入から常駐運用まで）」の「14. Windows での検証状況」）。
+- Windows での一部の動作: ライブ録画の手動停止（CTRL_BREAK）と部分録画の救出、ファイアウォール設定スクリプト、文字起こしは Windows で未確認です（「Windows（導入から常駐運用まで）」の「14. Windows での検証状況」）。
 - 監視間隔の時間帯学習の効果: 実データでは開始時刻の分かる配信が各チャンネル 0〜3 本で、全チャンネルが学習不足（30〜60 分間隔）。開始時刻の段階的な取得と、学習後の間隔の変化は自動テストでのみ確認。
 - macOS / iOS 実機の Safari での再生: Playwright の WebKit で確認した範囲です。実機の自動再生制限は、再生を拒否される状況を模した E2E で確認しています。
 - 先頭から録画した配信の自然終了までの一連動作: 実機確認はユーザー停止までの範囲です。
