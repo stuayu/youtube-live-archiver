@@ -1,0 +1,14 @@
+{
+  "printWidth": 110,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "semi": false,
+  "overrides": [
+    {
+      "files": ["*.vue", "*.ts", "*.mjs", "*.css"],
+      "options": {
+        "printWidth": 110
+      }
+    }
+  ]
+}

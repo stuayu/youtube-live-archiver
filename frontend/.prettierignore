@@ -1,0 +1,6 @@
+dist/
+node_modules/
+shots/
+test-results/
+coverage/
+package-lock.json
