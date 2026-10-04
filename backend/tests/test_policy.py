@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import pytest
 from app.services.policy import (classify_remote, may_delete, initial_retention_decision,
     compare_fingerprints, has_prior_successful_check)
@@ -77,6 +78,15 @@ def test_fingerprint_differences_and_failures_fail_safe():
     assert compare_fingerprints("strong", local, [{"position": .05, "video_hash": "0", "audio_hash": None}]).status == "PROTECTION_PENDING"
 
 
+def test_shifted_fingerprint_candidates_use_minimum_distance():
+    local = [{"position": .05, "video_hash": "00000000", "audio_hash": "0000"}]
+    aligned = [{"position": .05, "video_hashes": ["ffffffff", "00000000"], "audio_hashes": ["ffff", "0000"]}]
+    assert compare_fingerprints("strong", local, aligned).status == "DELETE_ELIGIBLE"
+    changed = [{"position": .05, "video_hashes": ["ffffffff", "eeeeeeee"], "audio_hashes": ["ffff"]}]
+    assert compare_fingerprints("standard", local, changed).reason == "REMOTE_CONTENT_CHANGED"
+    assert compare_fingerprints("standard", local, [{"position": .05, "video_hashes": []}]).status == "PROTECTION_PENDING"
+
+
 def test_grace_and_final_confirmation_require_two_successful_remote_checks():
     checks = [dict(id=1, remote_status="PUBLIC", error=None, edit_detected=False),
               dict(id=2, remote_status="PUBLIC", error=None, edit_detected=False)]
@@ -87,3 +97,26 @@ def test_grace_and_final_confirmation_require_two_successful_remote_checks():
                 check_succeeded=True, retention_expires_at=NOW-timedelta(days=4), grace_until=NOW-timedelta(days=1), now=NOW)
     assert may_delete(**args) and has_prior_successful_check(checks, 2)
     assert not may_delete(**{**args, "grace_until": NOW+timedelta(seconds=1)})
+
+
+@pytest.mark.parametrize(("include_audio", "expected_format"), [(False, "wv*/w"), (True, "wv*+wa/w")])
+def test_remote_fingerprint_samples_use_lowest_format(monkeypatch, tmp_path, include_audio, expected_format):
+    from types import SimpleNamespace
+    from app import workers
+
+    calls = []
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        output = Path(args[args.index("-o") + 1].replace("%(ext)s", "mkv"))
+        output.write_bytes(b"remote sample")
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(workers, "run_ytdlp", fake_run)
+    monkeypatch.setattr(workers, "video_phash", lambda *args: "abcd")
+    monkeypatch.setattr(workers, "audio_fingerprint", lambda *args: "1234")
+    video = SimpleNamespace(youtube_video_id="abcdefghijk", channel=SimpleNamespace(cookie_profile=None))
+    samples = workers._remote_samples(video, 100, include_audio)
+    assert len(samples) == 6
+    assert len(calls) == 6
+    assert all(args[args.index("-f") + 1] == expected_format for args in calls)
+    assert all("--force-keyframes-at-cuts" in args for args in calls)

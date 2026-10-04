@@ -1,9 +1,10 @@
 from pathlib import Path
 from datetime import datetime, timezone
+import json
 import tempfile
 import shutil
 import pytest
-from app.services.backfill import eligible_backfill_ids, parse_byte_range, registered_video_directory
+from app.services.backfill import eligible_backfill_ids, media_file, parse_byte_range, registered_video_directory
 
 
 def test_backfill_limit_chooses_newest_completed_only():
@@ -38,3 +39,23 @@ def test_registered_video_path_must_be_inside_storage():
         with pytest.raises(ValueError): registered_video_directory(str(root), str(root))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_media_file_selection_prefers_playback_then_primary_then_largest_and_partial(tmp_path):
+    primary = tmp_path / "video-part-2.mkv"
+    largest = tmp_path / "video.mkv"
+    playback = tmp_path / "video.playable.mp4"
+    partial = tmp_path / "video.partial.mkv"
+    primary.write_bytes(b"p" * 20)
+    largest.write_bytes(b"l" * 100)
+    playback.write_bytes(b"b" * 5)
+    (tmp_path / "recording.json").write_text(json.dumps({"primary_media": primary.name}), encoding="utf-8")
+    assert media_file(tmp_path) == playback.resolve()
+    playback.unlink()
+    assert media_file(tmp_path) == primary.resolve()
+    (tmp_path / "recording.json").unlink()
+    assert media_file(tmp_path) == largest.resolve()
+    largest.unlink()
+    primary.unlink()
+    partial.write_bytes(b"x" * 10)
+    assert media_file(tmp_path) == partial.resolve()
