@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 import re
 
+from ..config import settings
+
 
 BACKOFF_MINUTES = (1, 5, 15, 60, 360)
 
@@ -89,11 +91,11 @@ def choose_recording_stem(directory, profile: str, used_live_stems: set[str] | N
     return f"video-part-{number}"
 
 
-def probe_duration(path, ffprobe_path: str = "ffprobe") -> float | None:
+def probe_duration(path, ffprobe_path: str | None = None) -> float | None:
     import json
     import subprocess
     try:
-        result = subprocess.run([ffprobe_path, "-v", "error", "-show_entries", "format=duration",
+        result = subprocess.run([ffprobe_path or settings.ffprobe_path, "-v", "error", "-show_entries", "format=duration",
                                  "-of", "json", str(path)], capture_output=True, timeout=30, check=False)
         if result.returncode:
             return None
@@ -103,13 +105,13 @@ def probe_duration(path, ffprobe_path: str = "ffprobe") -> float | None:
         return None
 
 
-def probe_start_time(path, ffprobe_path: str = "ffprobe") -> float | None:
+def probe_start_time(path, ffprobe_path: str | None = None) -> float | None:
     """Return media timeline start_time when ffprobe can read it."""
     import json
     import subprocess
     try:
         result = subprocess.run(
-            [ffprobe_path, "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(path)],
+            [ffprobe_path or settings.ffprobe_path, "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(path)],
             capture_output=True,
             timeout=30,
             check=False,

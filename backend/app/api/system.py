@@ -35,7 +35,7 @@ def api_status(db: Session = Depends(get_db)):
         except Exception as exc:
             tools = {"yt_dlp_available": False, "yt_dlp_version": None, "yt_dlp_error": str(exc)[:500]}
         tools.update(ffmpeg_available=bool(shutil.which(settings.ffmpeg_path) or Path(settings.ffmpeg_path).is_file()),
-                     ffprobe_available=bool(shutil.which("ffprobe")))
+                     ffprobe_available=bool(shutil.which(settings.ffprobe_path) or Path(settings.ffprobe_path).is_file()))
         main_module._tool_cache = tools
     active_channels = db.scalar(select(func.count(Channel.id)).where(Channel.enabled.is_(True), Channel.archived.is_(False))) or 0
     error_channels = db.scalar(select(func.count(Channel.id)).where(Channel.enabled.is_(True), Channel.consecutive_failures > 0)) or 0

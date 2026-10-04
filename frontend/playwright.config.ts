@@ -16,6 +16,10 @@ export default defineConfig({
   },
   projects: [
     { name: 'desktop', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 1000 } } },
+    {
+      name: 'webkit',
+      use: { ...devices['Desktop Safari'], browserName: 'webkit', viewport: { width: 1440, height: 1000 } },
+    },
     { name: 'tablet', use: { ...devices['Desktop Chrome'], viewport: { width: 820, height: 1120 } } },
     {
       name: 'mobile',

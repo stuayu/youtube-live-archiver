@@ -1,4 +1,4 @@
-import { chromium } from '@playwright/test'
+import { chromium, webkit } from '@playwright/test'
 import { mkdir } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
 import { startE2E, stopE2E } from './e2e-env.mjs'
@@ -124,6 +124,57 @@ try {
       await page.close()
     }
   }
+  await browser.close()
+  browser = await webkit.launch({ headless: true })
+  const safariPage = await browser.newPage({
+    viewport: { width: 1440, height: 1000 },
+    locale: 'ja-JP',
+    timezoneId: 'Asia/Tokyo',
+  })
+  await safariPage.route('**/api/chat-assets/**', (route) =>
+    route.fulfill({ status: 200, contentType: 'image/svg+xml', body: '<svg/>' }),
+  )
+  await safariPage.goto(`${context.baseURL}/?tab=videos`, { waitUntil: 'networkidle' })
+  const mkvRow = safariPage.locator('.video-row').filter({ hasText: '歌枠 / Singing Stream' })
+  if (await mkvRow.count()) {
+    await mkvRow.getByRole('button', { name: '再生', exact: true }).click()
+    await safariPage.locator('.playback-status').waitFor({ state: 'visible', timeout: 10000 })
+    await safariPage.screenshot({ path: join(output, 'webkit-player-preparing.png') })
+    await safariPage.waitForFunction(
+      () => {
+        const video = document.querySelector('.dplayer-mount video')
+        return video instanceof HTMLVideoElement && video.currentTime > 0.5
+      },
+      { timeout: 30000 },
+    )
+    await safariPage.locator('.playback-status').waitFor({ state: 'hidden', timeout: 10000 })
+    await safariPage.screenshot({ path: join(output, 'webkit-player-playing.png') })
+    await safariPage.keyboard.press('Escape')
+  }
+  const av1Row = safariPage
+    .locator('.video-row')
+    .filter({ hasText: 'AV1 / Opus browser compatibility fixture' })
+  await safariPage.getByPlaceholder('タイトル・説明').fill('AV1 / Opus browser compatibility fixture')
+  await av1Row.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+  if (await av1Row.count()) {
+    await av1Row.getByRole('button', { name: '再生', exact: true }).click()
+    await safariPage.getByRole('button', { name: '変換して再生' }).waitFor({ timeout: 10000 })
+    await safariPage.screenshot({ path: join(output, 'webkit-player-conversion-notice.png') })
+    await safariPage.keyboard.press('Escape')
+  }
+  const brokenRow = safariPage.locator('.video-row').filter({ hasText: '壊れたメディア timeout 案内確認' })
+  await safariPage.getByPlaceholder('タイトル・説明').fill('壊れたメディア')
+  await brokenRow.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+  if (await brokenRow.count()) {
+    await brokenRow.getByRole('button', { name: '再生', exact: true }).click()
+    await safariPage
+      .locator('.playback-status')
+      .getByRole('button', { name: '再試行' })
+      .waitFor({ timeout: 20000 })
+    await safariPage.screenshot({ path: join(output, 'webkit-player-load-failure.png') })
+    await safariPage.keyboard.press('Escape')
+  }
+  await safariPage.close()
   console.log(`Screenshots written to ${output}`)
 } finally {
   await browser?.close()

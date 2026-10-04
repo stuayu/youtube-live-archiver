@@ -341,6 +341,41 @@ def retention_worker():
                 log.warning("retention failed for video %s: %s", video_id, exc)
 
 
+def derived_cleanup_worker():
+    if settings.playable_cache_days <= 0:
+        return
+    from .services.media import source_media
+    cutoff = (now() - timedelta(days=settings.playable_cache_days)).timestamp()
+    with SessionLocal() as db:
+        rows = db.execute(select(Video.id, Video.file_path).where(Video.file_path.is_not(None))).all()
+    # Walk the storage without an open transaction; a slow share must not hit the idle timeout.
+    removed: list[tuple[int, str, int]] = []
+    for video_id, file_path in rows:
+        try:
+            directory = Path(file_path)
+            source = source_media(directory)
+            if not source or not source.is_file() or source.stat().st_size <= 0:
+                continue
+            for suffix in (".playable.mp4", ".h264.mp4"):
+                for derived in directory.glob(f"*{suffix}"):
+                    if not derived.is_file() or derived.stat().st_atime >= cutoff:
+                        continue
+                    size = derived.stat().st_size
+                    derived.unlink()
+                    removed.append((video_id, derived.name, size))
+        except OSError:
+            continue
+    if not removed:
+        return
+    with SessionLocal() as db:
+        db.add_all([
+            AuditLog(video_id=video_id, action="DERIVED_CLEANUP", reason="PLAYABLE_CACHE_EXPIRED",
+                     details={"path": name, "size": size})
+            for video_id, name, size in removed
+        ])
+        db.commit()
+
+
 def protection_worker():
     with SessionLocal() as db:
         ids = db.scalars(select(Video.id).where(Video.protected.is_(False), Video.status == "PROTECTION_PENDING")).all()

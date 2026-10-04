@@ -30,6 +30,7 @@ const props = defineProps<{
   playbackSeconds: number
   following: boolean
   storageName?: string
+  conversionNote?: string
 }>()
 const emit = defineEmits<{
   'update:tab': [value: 'chat' | 'transcript' | 'summary' | 'timeline' | 'info']
@@ -442,6 +443,7 @@ watch(
           {{ video.protected ? '保護解除' : '保護' }}
         </button>
       </div>
+      <p v-if="conversionNote" class="meta" role="status">{{ conversionNote }}</p>
     </section>
   </aside>
 </template>

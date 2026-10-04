@@ -7,9 +7,6 @@ MEDIA_EXTENSIONS = {".mkv", ".mp4", ".webm", ".ts", ".m4v", ".mov", ".flv", ".av
 
 def media_file(directory: Path) -> Path | None:
     files = [p for p in directory.iterdir() if p.is_file()]
-    playable = sorted((p for p in files if p.name.endswith(".playable.mp4")), key=lambda p: p.name)
-    if playable:
-        return playable[0].resolve()
     try:
         recording = json.loads((directory / "recording.json").read_text(encoding="utf-8"))
         primary = directory / str(recording.get("primary_media") or "")

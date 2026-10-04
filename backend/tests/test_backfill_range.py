@@ -41,7 +41,7 @@ def test_registered_video_path_must_be_inside_storage():
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def test_media_file_selection_prefers_playback_then_primary_then_largest_and_partial(tmp_path):
+def test_media_file_selection_ignores_derived_playback_files(tmp_path):
     primary = tmp_path / "video-part-2.mkv"
     largest = tmp_path / "video.mkv"
     playback = tmp_path / "video.playable.mp4"
@@ -50,7 +50,7 @@ def test_media_file_selection_prefers_playback_then_primary_then_largest_and_par
     largest.write_bytes(b"l" * 100)
     playback.write_bytes(b"b" * 5)
     (tmp_path / "recording.json").write_text(json.dumps({"primary_media": primary.name}), encoding="utf-8")
-    assert media_file(tmp_path) == playback.resolve()
+    assert media_file(tmp_path) == primary.resolve()
     playback.unlink()
     assert media_file(tmp_path) == primary.resolve()
     (tmp_path / "recording.json").unlink()

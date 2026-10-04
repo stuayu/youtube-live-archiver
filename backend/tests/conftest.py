@@ -135,6 +135,9 @@ def _truncate_test_database():
         with monitor._cooldown_lock:
             monitor._cooldown_until = None
             monitor._rate_limit_streak = 0
+        # An app lifespan that ended inside the test leaves conversions stopped.
+        from app.services import transcode
+        transcode.resume()
     except ImportError:
         pass
     if not _TEST_URL:

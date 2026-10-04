@@ -19,7 +19,8 @@ import PlayerDialog from './components/PlayerDialog.vue'
 import { useWorkspace } from './composables/useWorkspace'
 import { workspaceKey } from './composables/workspaceContext'
 import type { Tab } from './composables/useQueryState'
-import { databaseUnavailable } from './api/client'
+import { databaseUnavailable, request } from './api/client'
+import type { Video } from './api/types'
 
 const workspace = useWorkspace()
 provide(workspaceKey, workspace)
@@ -41,9 +42,20 @@ function selectMoreTab(id: Tab) {
   ctx.setTab(id)
   moreMenuOpen.value = false
 }
-function playerUpdated() {
-  ctx.playerVideo = null
-  ctx.load(true)
+async function playerUpdated() {
+  const id = ctx.playerVideo?.id
+  await ctx.load(true)
+  if (!id || ctx.playerVideo?.id !== id) return
+  try {
+    ctx.playerVideo = await request<Video>(`/videos/${id}`)
+  } catch {
+    /* keep the open player on its current data */
+  }
+}
+function playerFinished(latest: Video) {
+  if (latest.has_file) ctx.openVideo(latest, false)
+  else ctx.playerVideo = null
+  void ctx.load(true)
 }
 </script>
 
@@ -125,6 +137,7 @@ function playerUpdated() {
       :initial-time="ctx.playerStart"
       @close="ctx.playerVideo = null"
       @updated="playerUpdated"
+      @finished="playerFinished"
     />
     <ConfirmDialog
       v-if="ctx.confirmState"

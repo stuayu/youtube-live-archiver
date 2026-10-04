@@ -8,7 +8,7 @@ interface DanmakuApi {
   unlimit(value: boolean): void
   reload(options: {
     id: string
-    api: string
+    address: string
     token: string
     maximum: number
     addition: unknown[]

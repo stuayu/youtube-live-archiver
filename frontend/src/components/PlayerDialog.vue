@@ -6,6 +6,7 @@ import { installDPlayerSettings } from '../lib/dplayerSettings'
 import type { DPlayerSettingsHandle } from '../lib/dplayerSettings'
 import { readDanmakuPreferences, writeDanmakuPreferences } from '../lib/playerSettings'
 import { chatReplayRange } from '../lib/playerPlayback'
+import { choosePlayback, type PlaybackRendition } from '../lib/playback'
 import PlayerHeader from './player/PlayerHeader.vue'
 import PlayerPanels from './player/PlayerPanels.vue'
 import PlayerVideoInfo from './player/PlayerVideoInfo.vue'
@@ -55,6 +56,11 @@ const followingChat = ref(true)
 const busy = ref(false)
 const error = ref('')
 const notice = ref('')
+const playbackMessage = ref('')
+const playbackProgress = ref(0)
+const playbackActionRequired = ref(false)
+const playbackFailed = ref(false)
+const conversionNote = ref('')
 const delay = ref<number | null>(null)
 let player: import('dplayer').default | undefined
 let hls: import('hls.js').default | undefined
@@ -65,6 +71,9 @@ let playbackTimer = 0
 let monitorTimer = 0
 let initialized = false
 let focusBefore: HTMLElement | null = null
+let metadataTimer = 0
+let prepareSequence = 0
+let backgroundSequence = 0
 async function loadChat() {
   const p = new URLSearchParams({
     offset: String((chatQuery.value || chatKind.value ? chatPage.value : 0) * 200),
@@ -166,13 +175,42 @@ function seek(seconds: number) {
   if (el.readyState >= 1) setTime()
   else el.addEventListener('loadedmetadata', setTime, { once: true })
 }
-async function makePlayer() {
+async function makePlayer(renditionName?: PlaybackRendition['name'], startTime = 0) {
   if (!mount.value) return
+  window.clearTimeout(metadataTimer)
+  playbackFailed.value = false
+  playbackActionRequired.value = false
+  if (!props.live && !renditionName) {
+    const decision = choosePlayback(props.video.media, props.video.renditions || [], (type) =>
+      document.createElement('video').canPlayType(type),
+    )
+    if (decision.rendition === 'h264') {
+      const available = props.video.renditions?.find((item) => item.name === 'h264')?.available
+      if (!available) {
+        const codecs = `${props.video.media?.video_codec || '不明'} / ${props.video.media?.audio_codec || '不明'}`
+        playbackMessage.value =
+          `このブラウザでは再生できない形式です（${codecs}）。` +
+          'H.264 に変換すると再生できます（時間が掛かります）'
+        playbackActionRequired.value = true
+        return
+      }
+    }
+    if (decision.rendition === 'remux') {
+      const remux = props.video.renditions?.find((item) => item.name === 'remux')
+      if (!remux?.available) {
+        await prepareRendition('remux')
+        return
+      }
+    }
+    renditionName = decision.rendition
+  }
   const [{ default: DPlayer }, hlsModule] = await Promise.all([import('dplayer'), import('hls.js')])
   const Hls = hlsModule.default
+  const rendition = props.video.renditions?.find((item) => item.name === renditionName)
   const url = props.live
     ? apiUrl(`/videos/${props.video.id}/live/index.m3u8`)
-    : apiUrl(`/videos/${props.video.id}/file${props.video.playable ? '?playable=true' : ''}`)
+    : apiUrl(rendition?.url || `/videos/${props.video.id}/file`)
+  playbackMessage.value = ''
   player = new DPlayer({
     container: mount.value,
     lang: 'ja',
@@ -187,11 +225,13 @@ async function makePlayer() {
         ? {
             customHls: (element) => {
               videoEl.value = element
-              if (Hls.isSupported()) {
+              if (element.canPlayType('application/vnd.apple.mpegurl')) {
+                element.src = url
+              } else if (Hls.isSupported()) {
                 hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 2 })
                 hls.loadSource(url)
                 hls.attachMedia(element)
-              } else if (element.canPlayType('application/vnd.apple.mpegurl')) element.src = url
+              }
             },
           }
         : undefined,
@@ -253,7 +293,8 @@ async function makePlayer() {
       liveFollow.value = value.liveFollow
     },
   })
-  if (props.initialTime && props.initialTime > 0) seek(props.initialTime)
+  const seekTime = startTime || props.initialTime || 0
+  if (seekTime > 0) seek(seekTime)
   const update = () => {
     const el = videoEl.value
     if (el) playbackSeconds.value = el.currentTime
@@ -262,6 +303,17 @@ async function makePlayer() {
     playerSettings?.setLiveDelay(delay.value)
   }
   videoEl.value.addEventListener('timeupdate', update)
+  videoEl.value.addEventListener(
+    'error',
+    () => {
+      if (!props.live) showPlaybackFailure()
+    },
+    { once: true },
+  )
+  if (!props.live) {
+    watchLoading(videoEl.value)
+    void videoEl.value.play().catch(() => {})
+  }
   playbackTimer = window.setInterval(() => {
     update()
     if (props.live && liveFollow.value && delay.value !== null && delay.value > 3) followLive()
@@ -280,6 +332,119 @@ async function makePlayer() {
       }
     }, 5000)
   }
+}
+// A paused video is not a failure: browsers may block autoplay after the conversion wait.
+function watchLoading(element: HTMLVideoElement) {
+  if (element.readyState >= 1) return
+  element.addEventListener(
+    'loadedmetadata',
+    () => {
+      if (element !== videoEl.value) return
+      window.clearTimeout(metadataTimer)
+      if (!playbackFailed.value) return
+      playbackFailed.value = false
+      playbackMessage.value = ''
+    },
+    { once: true },
+  )
+  metadataTimer = window.setTimeout(() => {
+    if (element === videoEl.value && element.readyState < 1) showPlaybackFailure()
+  }, 12000)
+}
+async function waitForConversion(
+  name: 'remux' | 'h264',
+  active: () => boolean,
+  onProgress: (percent: number) => void,
+) {
+  const start = () => request(`/videos/${props.video.id}/convert/${name}`, { method: 'POST', body: '{}' })
+  await start()
+  let restarts = 0
+  for (;;) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+    if (!active()) return false
+    const status = await request<{ status: string; progress?: number }>(
+      `/videos/${props.video.id}/convert/${name}`,
+    )
+    onProgress(Math.round((status.progress || 0) * 100))
+    if (status.status === 'failed') throw new Error('動画変換に失敗しました')
+    if (status.status === 'completed') return true
+    // The job is gone (for example the backend restarted): start it again instead of waiting forever.
+    if (status.status === 'idle') {
+      if (++restarts > 3) throw new Error('動画変換を開始できません')
+      await start()
+    }
+  }
+}
+async function prepareRendition(name: 'remux' | 'h264') {
+  const sequence = ++prepareSequence
+  window.clearTimeout(metadataTimer)
+  const codecNames =
+    [props.video.media?.video_codec, props.video.media?.audio_codec].filter(Boolean).join(' / ') ||
+    '不明なコーデック'
+  playbackActionRequired.value = false
+  playbackFailed.value = false
+  playbackProgress.value = 0
+  playbackMessage.value =
+    name === 'remux'
+      ? '再生用ファイルを準備しています… 0%'
+      : `このブラウザでは再生できない形式です（${codecNames}）。H.264 に変換中です… 0%`
+  try {
+    const ready = await waitForConversion(
+      name,
+      () => sequence === prepareSequence,
+      (percent) => {
+        playbackProgress.value = percent
+        playbackMessage.value =
+          name === 'remux' ? `再生用ファイルを準備しています… ${percent}%` : `H.264 に変換中です… ${percent}%`
+      },
+    )
+    if (!ready) return
+    playbackMessage.value = ''
+    playbackProgress.value = 0
+    const position = videoEl.value?.currentTime || 0
+    destroy()
+    await nextTick()
+    await makePlayer(name, position)
+  } catch (cause) {
+    if (sequence !== prepareSequence) return
+    playbackProgress.value = 0
+    playbackMessage.value = cause instanceof Error ? cause.message : '再生用ファイルを準備できません'
+    playbackFailed.value = true
+  }
+}
+async function convertInBackground(name: 'remux' | 'h264') {
+  const label = name === 'remux' ? 'MP4 リマックス' : 'H.264 変換'
+  const sequence = ++backgroundSequence
+  conversionNote.value = `${label}を開始しました`
+  try {
+    const done = await waitForConversion(
+      name,
+      () => sequence === backgroundSequence,
+      (percent) => {
+        conversionNote.value = `${label}中… ${percent}%`
+      },
+    )
+    if (!done) return
+    conversionNote.value = `${label}が完了しました`
+    emit('updated')
+  } catch (cause) {
+    if (sequence !== backgroundSequence) return
+    conversionNote.value = cause instanceof Error ? cause.message : `${label}に失敗しました`
+  }
+}
+function showPlaybackFailure() {
+  window.clearTimeout(metadataTimer)
+  playbackProgress.value = 0
+  playbackActionRequired.value = false
+  playbackMessage.value = '動画を読み込めません。別の形式を選ぶか、再試行してください。'
+  playbackFailed.value = true
+}
+function retryPlayback() {
+  playbackMessage.value = ''
+  playbackFailed.value = false
+  const position = videoEl.value?.currentTime || 0
+  destroy()
+  void nextTick().then(() => makePlayer(undefined, position))
 }
 async function retrieveChat() {
   busy.value = true
@@ -328,6 +493,12 @@ async function runSummary(mode: 'all' | 'final') {
   }
 }
 async function runVideoAction(path: string, method = 'POST') {
+  if (method === 'POST' && (path === 'convert/remux' || path === 'convert/h264')) {
+    const name = path === 'convert/remux' ? 'remux' : 'h264'
+    if (player && !playbackFailed.value) await convertInBackground(name)
+    else await prepareRendition(name)
+    return
+  }
   busy.value = true
   error.value = ''
   notice.value = ''
@@ -342,6 +513,8 @@ async function runVideoAction(path: string, method = 'POST') {
   }
 }
 function destroy() {
+  prepareSequence += 1
+  window.clearTimeout(metadataTimer)
   window.clearInterval(chatTimer)
   window.clearInterval(playbackTimer)
   window.clearInterval(monitorTimer)
@@ -357,6 +530,8 @@ watch(
   [() => props.video.id, () => props.live],
   async () => {
     if (!initialized) return
+    backgroundSequence += 1
+    conversionNote.value = ''
     destroy()
     await nextTick()
     await makePlayer()
@@ -381,7 +556,7 @@ function reloadDanmaku() {
   try {
     player?.danmaku.reload({
       id: props.video.id,
-      api: apiUrl(
+      address: apiUrl(
         `/videos/${props.video.id}/chat/danmaku/${chatKind.value || 'all'}-${includeDeleted.value ? '1' : '0'}/`,
       ),
       token: '',
@@ -461,6 +636,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.body.classList.remove('dialog-open')
   document.removeEventListener('keydown', onKey)
+  backgroundSequence += 1
   destroy()
   focusBefore?.focus()
 })
@@ -482,8 +658,31 @@ onBeforeUnmount(() => {
                 '--danmaku-size': `${font}px`,
               }"
             ></div>
+            <div v-if="playbackMessage" class="playback-status">
+              <p role="status">{{ playbackMessage }}</p>
+              <progress v-if="playbackProgress > 0" :value="playbackProgress" max="100"></progress>
+              <div v-if="playbackActionRequired" class="playback-actions">
+                <button class="button primary small" @click="prepareRendition('h264')">変換して再生</button>
+              </div>
+              <div v-else-if="playbackFailed" class="playback-actions">
+                <button class="button secondary small" @click="prepareRendition('remux')">
+                  別の形式で再生
+                </button>
+                <button class="button primary small" @click="prepareRendition('h264')">変換して再生</button>
+                <a class="button secondary small" :href="apiUrl(`/videos/${video.id}/file?download=true`)">
+                  ダウンロード
+                </a>
+                <button class="button secondary small" @click="retryPlayback">再試行</button>
+              </div>
+            </div>
           </div>
-          <PlayerVideoInfo class="player-desktop-info" :video="video" :busy="busy" @action="runVideoAction" />
+          <PlayerVideoInfo
+            class="player-desktop-info"
+            :video="video"
+            :busy="busy"
+            :note="conversionNote"
+            @action="runVideoAction"
+          />
         </div>
         <PlayerPanels
           v-model:tab="tab"
@@ -504,6 +703,7 @@ onBeforeUnmount(() => {
           :playback-seconds="playbackSeconds"
           :following="followingChat"
           :storage-name="video.storage_name || ''"
+          :conversion-note="conversionNote"
           @search-chat="searchChat"
           @retrieve-chat="retrieveChat"
           @reparse-chat="reparseChat"

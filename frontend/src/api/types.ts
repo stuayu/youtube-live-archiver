@@ -134,6 +134,24 @@ export interface Video {
   storage_name: string | null
   media_extension: string | null
   playable?: boolean
+  media?: {
+    container: string
+    video_codec: string | null
+    audio_codec: string | null
+    width: number | null
+    height: number | null
+  } | null
+  renditions?: Array<{
+    name: 'source' | 'remux' | 'h264'
+    url: string
+    container: string
+    video_codec: string | null
+    audio_codec: string | null
+    available: boolean
+    size: number | null
+    status?: string
+    progress?: number
+  }>
 }
 export interface Page<T> {
   items: T[]

@@ -1,4 +1,6 @@
 declare module 'dplayer' {
+  // The constructor takes the endpoint as `api`; DPlayer keeps it as `api.address`,
+  // and `danmaku.reload()` replaces that internal object.
   interface DanmakuOptions {
     id: string
     api: string
@@ -11,6 +13,7 @@ declare module 'dplayer' {
     mutex: boolean
     speedRate: number
   }
+  type DanmakuReloadOptions = Omit<DanmakuOptions, 'api'> & { address: string }
   interface DPlayerOptions {
     container: HTMLElement
     lang: string
@@ -27,7 +30,7 @@ declare module 'dplayer' {
     constructor(options: DPlayerOptions)
     readonly video: HTMLVideoElement
     readonly danmaku: {
-      reload(options: DanmakuOptions): void
+      reload(options: DanmakuReloadOptions): void
       speed(rate: number): void
       show(): void
       hide(): void

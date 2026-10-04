@@ -1,5 +1,25 @@
 from .common import *
 
+from ..db import SessionLocal
+from ..services.media import inspect_media, source_media, video_playback_metadata
+
+
+def _ensure_media_info(video_id: int, directory: Path | None, metadata: dict) -> dict | None:
+    current = metadata.get("media_info")
+    if isinstance(current, dict):
+        return current
+    source = source_media(directory) if directory else None
+    if source is None:
+        return None
+    info = inspect_media(source, settings.ffprobe_path)
+    if info:
+        with SessionLocal() as session:
+            video = session.get(Video, video_id)
+            if video:
+                video.raw_metadata = {**(video.raw_metadata or {}), "media_info": info}
+                session.commit()
+    return info
+
 @router.post("/videos/{video_id}/schedule/{enabled}")
 def set_video_schedule(video_id: int, enabled: str, db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
@@ -70,7 +90,19 @@ def videos(offset: int = 0, limit: int = 50, status: str | None = None,
     else:
         query = query.order_by(sort_col.asc() if direction == "asc" else sort_col.desc(), Video.id.desc())
     result_rows = db.scalars(query.offset(max(0, offset)).limit(min(100, max(1, limit)))).all()
+    probe_candidates = [
+        (video.id, Path(video.file_path) if video.file_path else None, dict(video.raw_metadata or {}))
+        for video in result_rows
+    ]
     db.commit()
+    media_info_by_id: dict[int, dict | None] = {}
+    probes = 0
+    for video_id, directory, metadata in probe_candidates:
+        info = metadata.get("media_info")
+        if not isinstance(info, dict) and probes < 5:
+            info = _ensure_media_info(video_id, directory, metadata)
+            probes += 1
+        media_info_by_id[video_id] = info if isinstance(info, dict) else None
     result = []
     for v in result_rows:
         item = VideoOut.model_validate(v).model_dump()
@@ -96,6 +128,9 @@ def videos(offset: int = 0, limit: int = 50, status: str | None = None,
             except OSError: item["last_error"] = None
         media = media_file(directory) if directory else None
         item["media_extension"] = media.suffix.lower() if media else None
+        source = source_media(directory) if directory else None
+        item.update(video_playback_metadata(v.id, source, media_info_by_id.get(v.id))
+                    if source else {"media": media_info_by_id.get(v.id), "renditions": []})
         item["has_thumbnail"] = bool(directory and any(p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} for p in directory.iterdir()))
         result.append(item)
     return result
@@ -103,6 +138,11 @@ def videos(offset: int = 0, limit: int = 50, status: str | None = None,
 @router.get("/videos/{video_id}", response_model=VideoOut)
 def video_detail(video_id: int, db: Session = Depends(get_db)):
     video = _video_or_404(db, video_id)
+    directory = Path(video.file_path) if video.file_path and Path(video.file_path).is_dir() else None
+    metadata = dict(video.raw_metadata or {})
+    source = source_media(directory) if directory else None
+    db.commit()
+    info = _ensure_media_info(video.id, directory, metadata) if source else None
     db.commit()
     item = VideoOut.model_validate(video).model_dump()
     item.update(channel_name=video.channel.name if video.channel else "", storage_name=video.storage.name if video.storage else None,
@@ -118,9 +158,9 @@ def video_detail(video_id: int, db: Session = Depends(get_db)):
                 missed_live=bool(metadata.get("missed_live")), schedule_enabled=metadata.get("schedule_enabled", True),
                 live_status=metadata.get("live_status"), recording_start_offset_ms=metadata.get("recording_start_offset_ms", 0),
                 live_from_start=metadata.get("live_from_start"))
-    directory = Path(video.file_path) if video.file_path and Path(video.file_path).is_dir() else None
     media = media_file(directory) if directory else None
     item["media_extension"] = media.suffix.lower() if media else None
+    item.update(video_playback_metadata(video.id, source, info) if source else {"media": info, "renditions": []})
     item["has_thumbnail"] = bool(directory and any(path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} for path in directory.iterdir()))
     if video.status in ("RECORDING_FAILED", "WAITING_FOR_STORAGE") and video.file_path:
         try: item["last_error"] = (Path(video.file_path).parent / f"{video.youtube_video_id}-recording-error.log").read_text(encoding="utf-8", errors="replace")[-2000:]
@@ -449,19 +489,27 @@ def retrieve_chat(video_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "messages_seen": count, "chat_replay": (current.raw_metadata or {}).get("chat_replay", "unavailable")}
 
 @router.get("/videos/{video_id}/file")
-def video_file(video_id: int, request: Request, download: bool = False, playable: bool = False, db: Session = Depends(get_db)):
+def video_file(video_id: int, request: Request, download: bool = False, playable: bool = False,
+               rendition: str = "source", db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
     if not video or not video.file_path: raise HTTPException(404, "録画ファイルがありません")
     try: candidate = registered_video_directory(video.file_path, video.storage.root_path if video.storage else None)
     except (ValueError, OSError): raise HTTPException(404, "録画ファイルがありません")
-    media = media_file(candidate)
-    if not playable and media and media.name.endswith(".playable.mp4"):
-        media = next((p.resolve() for p in candidate.iterdir() if p.is_file() and p.suffix.lower() in {".mkv", ".mp4", ".webm", ".ts", ".m4v", ".mov", ".flv", ".avi"} and not p.name.endswith((".playable.mp4", ".h264.mp4"))), None)
-    if playable:
-        media = next((p.resolve() for p in candidate.iterdir() if p.is_file() and p.name.endswith(".playable.mp4")), None) or media
+    source = source_media(candidate)
+    selected = "remux" if playable and rendition == "source" else rendition
+    if selected not in ("source", "remux", "h264"):
+        raise HTTPException(422, "rendition が不正です")
+    media = source if selected == "source" else output_path(source, selected) if source else None
+    if selected != "source" and (media is None or not media.is_file() or media.stat().st_size <= 0):
+        raise HTTPException(404, "再生用ファイルがありません")
     if media is None or candidate not in media.parents: raise HTTPException(404, "録画ファイルがありません")
     size = media.stat().st_size
     mime = mimetypes.guess_type(media.name)[0] or "application/octet-stream"
+    if selected != "source":
+        try:
+            os.utime(media, (datetime.now().timestamp(), media.stat().st_mtime))
+        except OSError:
+            pass
     # The file body can remain open for the duration of a browser playback or
     # download. Do not retain the session or its pooled connection during that stream.
     db.close()
@@ -492,15 +540,27 @@ def convert_video(video_id: int, mode: str, db: Session = Depends(get_db)):
     if not video or not video.file_path or not video.storage: raise HTTPException(404, "録画ファイルがありません")
     try:
         folder = registered_video_directory(video.file_path, video.storage.root_path)
-        source = next((p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in {".mkv", ".mp4", ".webm", ".ts", ".m4v", ".mov", ".flv", ".avi"} and not p.name.endswith((".playable.mp4", ".h264.mp4"))), None)
+        # Same source as the renditions and /file: the primary media, not whichever file is listed first.
+        source = source_media(folder)
         if source is None: raise HTTPException(404, "変換元がありません")
         db.commit()
         return enqueue_conversion(video_id, source, mode, settings.ffmpeg_path)
     except ValueError as exc: raise HTTPException(400, str(exc))
 
 @router.get("/videos/{video_id}/convert/{mode}")
-def get_conversion_status(video_id: int, mode: str):
+def get_conversion_status(video_id: int, mode: str, db: Session = Depends(get_db)):
     if mode not in ("remux", "h264"): raise HTTPException(404, "変換形式がありません")
+    video = db.get(Video, video_id)
+    if video and video.file_path:
+        try:
+            directory = registered_video_directory(video.file_path, video.storage.root_path if video.storage else None)
+            source = source_media(directory)
+            if source:
+                dest = output_path(source, mode)
+                if dest.is_file() and dest.stat().st_size > 0:
+                    return {"status": "completed", "path": str(dest), "error": None, "progress": 1.0}
+        except (ValueError, OSError):
+            pass
     return conversion_status(video_id, mode)
 
 @router.get("/videos/{video_id}/thumbnail")

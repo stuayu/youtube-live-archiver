@@ -30,6 +30,7 @@ const state = {
 function child(command, args, options = {}) {
   const p = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], ...options })
   state.children.push(p)
+  p.stdout?.resume()
   p.stderr?.on('data', (chunk) => process.stderr.write(chunk))
   return p
 }
@@ -125,7 +126,7 @@ export async function startE2E() {
     await import('node:fs/promises').then((fs) => fs.mkdir(storageRoot, { recursive: true }))
     const fakeState = join(state.tmpDir, 'fake-ytdlp.json')
     const fakeChannels = Object.fromEntries(
-      ['desktop', 'tablet', 'mobile'].flatMap((name) => {
+      ['desktop', 'webkit', 'tablet', 'mobile'].flatMap((name) => {
         const config = {
           channel: `E2E チャンネル ${name}`,
           channel_id: `UC${name.padEnd(22, 'a')}`,

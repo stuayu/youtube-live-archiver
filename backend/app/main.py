@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 from .api import router
-from .workers import channel_monitor, recorder_worker, retention_worker, protection_worker, recovery_worker, integrity_worker
+from .workers import (channel_monitor, recorder_worker, retention_worker, protection_worker,
+                      recovery_worker, integrity_worker, derived_cleanup_worker)
 from .services.processing import processing_worker
 
 scheduler = BackgroundScheduler(timezone="UTC")
@@ -56,6 +57,17 @@ def _tracked_job(job_id: str, callback):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from .config import settings
+    try:
+        from .db import SessionLocal
+        from .models import Video
+        from .services.transcode import cleanup_temporary_files, resume as resume_conversions
+        from sqlalchemy import select
+        resume_conversions()
+        with SessionLocal() as db:
+            paths = db.scalars(select(Video.file_path).where(Video.file_path.is_not(None))).all()
+        cleanup_temporary_files([Path(value) for value in paths if value])
+    except Exception:
+        logging.getLogger(__name__).exception("derived temp cleanup failed")
     if settings.scheduler_enabled:
         try:
             from .services.recorder import cleanup_orphan_processes
@@ -72,6 +84,8 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(_tracked_job("channel-monitor", channel_monitor), "interval", seconds=5, id="channel-monitor", max_instances=1, coalesce=True)
         scheduler.add_job(_tracked_job("recorder", recorder_worker), "interval", seconds=5, id="recorder", max_instances=1)
         scheduler.add_job(_tracked_job("retention", retention_worker), "interval", minutes=15, id="retention", max_instances=1)
+        scheduler.add_job(_tracked_job("derived-cleanup", derived_cleanup_worker), "interval", hours=24,
+                          id="derived-cleanup", max_instances=1)
         scheduler.add_job(_tracked_job("protection", protection_worker), "interval", hours=6, id="protection", max_instances=1)
         scheduler.add_job(_tracked_job("recording-recovery", recovery_worker), "interval", minutes=1, id="recording-recovery", max_instances=1, coalesce=True,
                           next_run_time=datetime.now(timezone.utc))
@@ -80,6 +94,8 @@ async def lifespan(app: FastAPI):
         scheduler.start()
     yield
     try:
+        from .services.transcode import shutdown as shutdown_conversions
+        shutdown_conversions()
         if not settings.scheduler_enabled:
             return
         if scheduler.running:
@@ -191,7 +207,8 @@ async def integrity_error(request: Request, exc: IntegrityError):
 
 @app.exception_handler(SQLAlchemyError)
 async def database_unavailable(request: Request, exc: SQLAlchemyError):
-    logging.getLogger(__name__).warning("database request failed: %s", exc.__class__.__name__)
+    reason = (str(getattr(exc, "orig", None) or exc).splitlines() or [""])[0][:300]
+    logging.getLogger(__name__).warning("database request failed: %s: %s", exc.__class__.__name__, reason)
     return JSONResponse(status_code=503, content={"error": "データベースに接続できません"})
 
 

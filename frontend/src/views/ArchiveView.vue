@@ -245,6 +245,11 @@ function hasFilter(key: QueryKey) {
             <summary>直近のエラー</summary>
             {{ video.last_error }}
           </details>
+          <label v-if="ctx.conversionProgress[video.id]" class="meta conversion-progress">
+            {{ ctx.conversionProgress[video.id].mode === 'remux' ? 'MP4 リマックス' : 'H.264 変換' }}
+            {{ ctx.conversionProgress[video.id].progress }}%
+            <progress :value="ctx.conversionProgress[video.id].progress" max="100"></progress>
+          </label>
         </div>
         <div class="actions">
           <button
@@ -262,7 +267,7 @@ function hasFilter(key: QueryKey) {
             {{ ctx.pendingStops.has(video.id) ? '停止中…' : '停止' }}
           </button>
           <button v-else-if="video.has_file" class="button primary small" @click="ctx.openVideo(video)">
-            {{ ['.mkv'].includes(video.media_extension || '') ? '変換して再生' : '再生' }}
+            再生
           </button>
           <button
             v-else-if="video.live_playback_available"

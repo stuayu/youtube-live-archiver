@@ -13,7 +13,10 @@ export class HttpError extends Error implements ApiError {
   }
 }
 export function apiUrl(path: string): string {
-  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`
+  const base = API_BASE.replace(/\/$/, '')
+  const normalized = path.startsWith('/') ? path : `/${path}`
+  if (base.endsWith('/api') && normalized.startsWith('/api/')) return `${base.slice(0, -4)}${normalized}`
+  return `${base}${normalized}`
 }
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response

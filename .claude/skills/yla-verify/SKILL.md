@@ -53,7 +53,7 @@ npm run test:e2e
 **`npx vue-tsc -b` だけでは不十分。** 型チェックは通るのに Vite のテンプレート
 パーサで落ちるケースが実際にあった（未終端文字列 `:'}}`）。必ず `npm run build` まで回す。
 
-macOS / Linux は `cd /Users/ayumu/prog/youtube-live-archiver/frontend` から同じ npm commands を実行する。`test:e2e` は desktop 1440 / tablet 820 / mobile 390 の Playwright project を使う。
+macOS / Linux は `cd /Users/ayumu/prog/youtube-live-archiver/frontend` から同じ npm commands を実行する。`test:e2e` は desktop 1440 / tablet 820 / mobile 390（Chromium）と webkit 1440（Desktop Safari 相当）の Playwright project を使う。初回は `npx playwright install chromium webkit` を実行する。WebKit の結果は自動検証であり、macOS 実機 Safari の確認結果とは分けて報告する。Chromium は MKV を直接再生できてしまうため、再生まわりの変更は必ず webkit project でも確認する。
 
 ## 4. 全画面キャプチャ
 

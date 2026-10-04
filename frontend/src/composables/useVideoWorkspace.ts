@@ -101,8 +101,44 @@ export function useVideoWorkspace(
     try {
       await api.action(video.id, `convert/${mode}`)
       state.push(mode === 'remux' ? 'MP4 リマックスを開始しました' : 'H.264 変換を開始しました')
+      void watchConversion(video.id, mode)
     } catch (error) {
       state.push(error instanceof Error ? error.message : '変換を開始できません', 'error')
+    }
+  }
+
+  async function watchConversion(videoId: string, mode: 'remux' | 'h264') {
+    state.conversionProgress.value[videoId] = { mode, progress: 0 }
+    try {
+      for (;;) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000))
+        const status = await request<{ status: string; progress?: number }>(
+          `/videos/${videoId}/convert/${mode}`,
+        )
+        state.conversionProgress.value[videoId] = {
+          mode,
+          progress: Math.round((status.progress || 0) * 100),
+        }
+        if (status.status === 'completed') {
+          delete state.conversionProgress.value[videoId]
+          state.push(mode === 'remux' ? 'MP4 リマックスが完了しました' : 'H.264 変換が完了しました')
+          await load(true)
+          return
+        }
+        if (status.status === 'failed' || status.status === 'idle') {
+          delete state.conversionProgress.value[videoId]
+          state.push(
+            status.status === 'idle'
+              ? '変換が中断されました。もう一度実行してください'
+              : '動画変換に失敗しました',
+            'error',
+          )
+          return
+        }
+      }
+    } catch (error) {
+      delete state.conversionProgress.value[videoId]
+      state.push(error instanceof Error ? error.message : '変換状態を取得できません', 'error')
     }
   }
 

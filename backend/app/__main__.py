@@ -86,7 +86,7 @@ def _check_optional_tools() -> None:
     except (OSError, subprocess.SubprocessError):
         print("警告: yt-dlp が見つからないか、起動できません", flush=True)
     for name in ("ffmpeg", "ffprobe"):
-        path = settings.ffmpeg_path if name == "ffmpeg" else name
+        path = settings.ffmpeg_path if name == "ffmpeg" else settings.ffprobe_path
         if not (shutil.which(path) or Path(path).is_file()):
             print(f"警告: {name} が見つかりません", flush=True)
 

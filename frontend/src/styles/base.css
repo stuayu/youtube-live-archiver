@@ -715,6 +715,34 @@ legend {
   background: #000;
   border-radius: 8px;
 }
+.playback-status {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 24px;
+  color: #fff;
+  text-align: center;
+  background: rgb(0 0 0 / 82%);
+}
+.playback-status p {
+  max-width: 44rem;
+  margin: 0;
+  line-height: 1.6;
+}
+.playback-status progress {
+  width: min(70%, 360px);
+  accent-color: var(--accent);
+}
+.playback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
 .player-stage:fullscreen {
   width: 100vw;
   height: 100vh;

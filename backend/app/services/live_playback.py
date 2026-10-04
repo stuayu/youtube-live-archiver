@@ -4,6 +4,8 @@ import re
 import shutil
 import subprocess
 
+from ..config import settings
+
 SAFE_ASSET = re.compile(r"^(?:index\.m3u8|segment_[0-9]{6,}\.ts)$")
 
 def fallback_to_direct(error, return_code, direct_start, record_fallback):
@@ -75,18 +77,18 @@ def safe_hls_asset(video, asset: str) -> Path:
         raise ValueError("HLS asset unavailable")
     return target
 
-def archive_is_complete(media: Path, ffprobe_path: str = "ffprobe") -> bool:
+def archive_is_complete(media: Path, ffprobe_path: str | None = None) -> bool:
     try:
         if not media.is_file() or media.stat().st_size <= 0:
             return False
         result = subprocess.run(
-            [ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(media)],
+            [ffprobe_path or settings.ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(media)],
             capture_output=True, text=True, timeout=30, check=False)
         return result.returncode == 0 and float(result.stdout.strip()) > 0
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
-def cleanup_hls(video, media: Path, ffprobe_path: str = "ffprobe") -> bool:
+def cleanup_hls(video, media: Path, ffprobe_path: str | None = None) -> bool:
     """Delete sidecars only after the durable archive independently probes cleanly."""
     if not video.live_hls_path or not archive_is_complete(media, ffprobe_path):
         return False

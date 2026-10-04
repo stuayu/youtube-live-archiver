@@ -58,6 +58,7 @@ export function useWorkspaceState() {
   } | null>(null)
   const pendingStops = ref(new Set<string>())
   const metrics = ref<Record<string, Record<string, unknown>>>({})
+  const conversionProgress = ref<Record<string, { mode: 'remux' | 'h264'; progress: number }>>({})
   const storageForm = ref({ name: '', root_path: '', minimumGb: 0, warningGb: 0, enabled: true })
   const analysisChannel = ref('')
   const analysisPeriod = ref('90')
@@ -153,6 +154,7 @@ export function useWorkspaceState() {
     confirmState,
     pendingStops,
     metrics,
+    conversionProgress,
     storageForm,
     analysisChannel,
     analysisPeriod,

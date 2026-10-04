@@ -38,9 +38,36 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 
 DPlayer の歯車メニューを拡張するときは `src/lib/dplayerSettings.ts` に項目と反映処理を追加し、設定の永続化・既定値は `src/lib/playerSettings.ts`、プレイヤーとの接続は `src/components/PlayerDialog.vue` に合わせます。DPlayer 内部 DOM を使う拡張は依存バージョンと unit test を合わせて確認します。
 
+録画後の primary media を ffprobe し、結果を `raw_metadata.media_info` に保持します。
+一覧は未解析レコードを1リクエスト最大5件まで、詳細は1件だけ解析します。
+ffprobe 実行中に DB transaction を保持しません。Video API は `source` / `remux` /
+`h264` rendition を返します。`/file?rendition=source|remux|h264` は指定ファイルだけを
+配信し、未生成の派生物は404です。旧 `playable=true` は remux と同じ扱いです。
+
+プレイヤー選択は `src/lib/playback.ts` の純粋関数で行います。
+MP4 / WebM のブラウザ対応ソースを優先し、MKV は常に MP4 リマックスします。
+リマックスも非対応なら利用者操作で H.264 + AAC に変換します。
+変換は FFmpeg `-progress` を読み、再起動時に完成済み派生物を completed として返します。
+変換元・配信・rendition・掃除は、いずれも `services/media.py` の `source_media()`
+（`recording.json` の `primary_media`、無ければ最大のメディア、それも無ければ救出済みの
+`.partial.mkv`）で同じファイルを選びます。変換の失敗時は ffmpeg のエラー出力を状態に残し、
+アプリ終了時は実行中の変換プロセスを止めて待ち行列の変換を破棄します（一時ファイルは削除）。
+画面側は、変換の状態が `idle` に戻った場合（backend の再起動など）に変換を開始し直します。
+起動時に残存 `*.tmp.mp4` を消し、`PLAYABLE_CACHE_DAYS` のアクセス期限を過ぎた
+派生物だけを監査ログ付きで掃除します。録画の file_size、容量、Retention、
+整合性確認は元メディアだけを対象にします。読み込み失敗の判定は `<video>` のメタデータ読み込み（12秒）と `error` で行い、
+再生位置の進行では判定しません（自動再生の拒否を失敗と誤認しないため）。
+DPlayer の弾幕は、初期化オプションでは `danmaku.api`、`danmaku.reload()` では `address` に
+エンドポイントを渡します（1.27.1 の実装に合わせています）。ライブ HLS は Safari のネイティブ経路と
+他ブラウザの hls.js 経路を使います。E2E に WebKit project を含め、実行前に
+`npx playwright install webkit` が必要です。
+
 ## Scheduler と監視
 
-Scheduler は有効時、channel monitor / recorder を5秒間隔、recovery を1分間隔、integrity を30分間隔、Retention を15分間隔、protection を6時間間隔、processing queue を10秒間隔で登録します。起動時に stale recording recovery も実行します。
+Scheduler は有効時、channel monitor / recorder を5秒間隔、recovery を1分間隔、
+integrity を30分間隔、Retention を15分間隔、派生物掃除を24時間間隔、
+protection を6時間間隔、processing queue を10秒間隔で登録します。
+起動時に stale recording recovery も実行します。
 
 監視は初回スキャンでチャンネル一覧を取得し、baseline を確定します。`next_check_at` が未設定または期限到来した有効チャンネルを batch 単位で処理します。予定配信時刻は動画 inspect から更新します。開始までの時間に応じて通常確認より短い interval を採用し、数値指定の polling interval は上限として働きます。スキャン失敗はチャンネルの `last_error` と `consecutive_failures` を更新し、指数 backoff を適用します。Rate limit はグローバル cooldown とし、連続時に10分から最大60分へ延長します。成功後に cooldown streak をリセットします。
 

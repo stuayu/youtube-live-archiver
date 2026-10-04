@@ -421,6 +421,175 @@ def test_video_delete_conversion_storage_boundary_and_hls_sidecar(client, monkey
 
 
 @pytest.mark.integration
+def test_video_media_renditions_and_strict_file_selection(client, tmp_path):
+    channel_id = add_channel()
+    root = tmp_path / "renditions"
+    directory = root / "recording"
+    directory.mkdir(parents=True)
+    source = directory / "video.mkv"
+    remux = directory / "video.playable.mp4"
+    source.write_bytes(b"source-mkv")
+    remux.write_bytes(b"derived-mp4")
+    storage = client.post("/api/storages", json={"name": "renditions", "root_path": str(root)}).json()
+    video_id = add_video(channel_id, file_path=str(directory))
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        video.storage_id = int(storage["id"])
+        video.raw_metadata = {"media_info": {
+            "container": "matroska", "video_codec": "h264", "audio_codec": "aac",
+            "width": 1920, "height": 1080,
+        }}
+        db.commit()
+    listed = client.get("/api/videos", params={"scope": "all"}).json()
+    row = next(item for item in listed if item["id"] == str(video_id))
+    assert row["media"]["container"] == "matroska"
+    assert {item["name"] for item in row["renditions"]} == {"source", "remux", "h264"}
+    assert next(item for item in row["renditions"] if item["name"] == "remux")["available"]
+    assert client.get(f"/api/videos/{video_id}/file?rendition=source").content == b"source-mkv"
+    assert client.get(f"/api/videos/{video_id}/file?rendition=remux").content == b"derived-mp4"
+    assert client.get(f"/api/videos/{video_id}/file?playable=true").content == b"derived-mp4"
+    assert client.get(f"/api/videos/{video_id}/file?rendition=h264").status_code == 404
+    assert client.get(f"/api/videos/{video_id}/convert/remux").json()["status"] == "completed"
+
+
+@pytest.mark.integration
+def test_conversion_uses_primary_media_when_recording_has_several_files(client, monkeypatch, tmp_path):
+    """Live segment + archive backfill: convert, status, renditions and /file must agree on the primary."""
+    import json
+    from app.api import videos as video_api
+    channel_id = add_channel()
+    root = tmp_path / "multi"
+    directory = root / "recording"
+    directory.mkdir(parents=True)
+    # Names sort so that a naive directory listing would pick a non-primary file first.
+    (directory / "video.mkv").write_bytes(b"live-segment")
+    (directory / "video-part-2.mkv").write_bytes(b"second-live-segment-that-is-larger")
+    (directory / "video-archive.mkv").write_bytes(b"archive")
+    (directory / "video.playable.mp4").write_bytes(b"stale copy of the live segment")
+    (directory / "recording.json").write_text(json.dumps({"primary_media": "video-archive.mkv"}), encoding="utf-8")
+    storage = client.post("/api/storages", json={"name": "multi", "root_path": str(root)}).json()
+    video_id = add_video(channel_id, file_path=str(directory))
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        video.storage_id = int(storage["id"])
+        video.raw_metadata = {"media_info": {
+            "container": "matroska", "video_codec": "h264", "audio_codec": "aac", "width": 640, "height": 360,
+        }}
+        db.commit()
+    enqueued = []
+
+    def enqueue(video, source, mode, _ffmpeg):
+        enqueued.append((video, source.name, mode))
+        return {"status": "queued", "path": None, "error": None, "progress": 0.0}
+
+    monkeypatch.setattr(video_api, "enqueue_conversion", enqueue)
+    assert client.post(f"/api/videos/{video_id}/convert/remux").json()["status"] == "queued"
+    assert enqueued == [(video_id, "video-archive.mkv", "remux")]
+    # The copy made from another file must not make the primary look converted.
+    assert client.get(f"/api/videos/{video_id}/convert/remux").json()["status"] == "idle"
+    detail = client.get(f"/api/videos/{video_id}").json()
+    assert not next(item for item in detail["renditions"] if item["name"] == "remux")["available"]
+    assert client.get(f"/api/videos/{video_id}/file?rendition=remux").status_code == 404
+    assert client.get(f"/api/videos/{video_id}/file").content == b"archive"
+    (directory / "video-archive.playable.mp4").write_bytes(b"remuxed-archive")
+    assert client.get(f"/api/videos/{video_id}/convert/remux").json()["status"] == "completed"
+    assert client.get(f"/api/videos/{video_id}/file?rendition=remux").content == b"remuxed-archive"
+
+
+@pytest.mark.integration
+def test_salvaged_partial_recording_is_served_and_convertible(client, monkeypatch, tmp_path):
+    from app.api import videos as video_api
+    channel_id = add_channel()
+    root = tmp_path / "partial"
+    directory = root / "recording"
+    directory.mkdir(parents=True)
+    (directory / "video.partial.mkv").write_bytes(b"salvaged")
+    storage = client.post("/api/storages", json={"name": "partial", "root_path": str(root)}).json()
+    video_id = add_video(channel_id, file_path=str(directory))
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        video.storage_id = int(storage["id"])
+        video.raw_metadata = {"media_info": {
+            "container": "matroska", "video_codec": "h264", "audio_codec": "aac", "width": 640, "height": 360,
+        }}
+        db.commit()
+    detail = client.get(f"/api/videos/{video_id}").json()
+    source = next(item for item in detail["renditions"] if item["name"] == "source")
+    assert source["available"] and source["size"] == len(b"salvaged")
+    assert client.get(f"/api/videos/{video_id}/file").content == b"salvaged"
+    assert client.get(f"/api/videos/{video_id}/file?download=true").content == b"salvaged"
+    enqueued = []
+    monkeypatch.setattr(video_api, "enqueue_conversion", lambda video, source, mode, _ffmpeg: (
+        enqueued.append(source.name) or {"status": "queued", "path": None, "error": None, "progress": 0.0}))
+    assert client.post(f"/api/videos/{video_id}/convert/remux").json()["status"] == "queued"
+    assert enqueued == ["video.partial.mkv"]
+    (directory / "video.partial.playable.mp4").write_bytes(b"remuxed-partial")
+    assert client.get(f"/api/videos/{video_id}/file?rendition=remux").content == b"remuxed-partial"
+    assert client.get(f"/api/videos/{video_id}/file").content == b"salvaged"
+
+
+@pytest.mark.integration
+def test_video_list_lazily_probes_at_most_five_records(client, monkeypatch, tmp_path):
+    from app.api import videos as video_api
+    channel_id = add_channel()
+    ids = []
+    for index in range(7):
+        directory = tmp_path / f"probe-{index}"
+        directory.mkdir()
+        (directory / "video.mkv").write_bytes(b"media")
+        ids.append(add_video(channel_id, file_path=str(directory)))
+    probed = []
+
+    def inspect(path, _ffprobe):
+        probed.append(path)
+        return {"container": "matroska", "video_codec": "h264", "audio_codec": "aac",
+                "width": 640, "height": 360}
+
+    monkeypatch.setattr(video_api, "inspect_media", inspect)
+    response = client.get("/api/videos", params={"scope": "all", "limit": 100})
+    assert response.status_code == 200
+    assert len(probed) == 5
+    detail_dir = tmp_path / "detail"
+    detail_dir.mkdir()
+    (detail_dir / "video.mkv").write_bytes(b"detail")
+    detail_id = add_video(channel_id, file_path=str(detail_dir))
+    assert client.get(f"/api/videos/{detail_id}").json()["media"]["container"] == "matroska"
+    assert len(probed) == 6
+
+
+@pytest.mark.integration
+def test_derived_cleanup_respects_access_time_and_never_deletes_source(monkeypatch, tmp_path):
+    import os
+    from app.config import settings
+    from app.workers import derived_cleanup_worker
+    channel_id = add_channel()
+    directory = tmp_path / "cleanup"
+    directory.mkdir()
+    source = directory / "video.mkv"
+    expired = directory / "video.playable.mp4"
+    accessed = directory / "video.h264.mp4"
+    source.write_bytes(b"original")
+    expired.write_bytes(b"expired")
+    accessed.write_bytes(b"accessed")
+    old = (now() - timedelta(days=30)).timestamp()
+    os.utime(expired, (old, old))
+    os.utime(accessed, (now().timestamp(), now().timestamp()))
+    video_id = add_video(channel_id, file_path=str(directory), protected=True)
+    monkeypatch.setattr(settings, "playable_cache_days", 14)
+    derived_cleanup_worker()
+    assert not expired.exists()
+    assert accessed.read_bytes() == b"accessed"
+    assert source.read_bytes() == b"original"
+    with SessionLocal() as db:
+        assert db.query(AuditLog).filter_by(video_id=video_id, action="DERIVED_CLEANUP").count() == 1
+    monkeypatch.setattr(settings, "playable_cache_days", 0)
+    accessed_time = (now() - timedelta(days=30)).timestamp()
+    os.utime(accessed, (accessed_time, accessed_time))
+    derived_cleanup_worker()
+    assert accessed.exists()
+
+
+@pytest.mark.integration
 def test_protection_state_rules_and_automatic_protection_cannot_be_removed(client):
     channel_id = add_channel()
     for status in ("RECORDING", "RECORDING_FAILED"):

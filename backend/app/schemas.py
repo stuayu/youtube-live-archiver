@@ -187,6 +187,8 @@ class VideoOut(BaseModel):
     channel_name: str = ""
     storage_name: str | None = None
     media_extension: str | None = None
+    media: dict | None = None
+    renditions: list[dict] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)
 
 

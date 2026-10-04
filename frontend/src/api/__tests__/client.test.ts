@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { databaseUnavailable, request } from '../client'
+import { apiUrl, databaseUnavailable, request } from '../client'
 describe('API client', () => {
   afterEach(() => vi.unstubAllGlobals())
+  it('accepts both API-relative and API-rooted rendition URLs', () => {
+    expect(apiUrl('/videos/3/file')).toBe('/api/videos/3/file')
+    expect(apiUrl('/api/videos/3/file')).toBe('/api/videos/3/file')
+  })
   it('normalizes backend Japanese error and field errors', async () => {
     vi.stubGlobal(
       'fetch',

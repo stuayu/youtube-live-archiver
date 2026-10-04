@@ -4,7 +4,7 @@ import type { Video } from '../../api/types'
 import { formatBytes, formatDate, formatDuration } from '../../lib/format'
 import { videoStatus } from '../../lib/status'
 
-defineProps<{ video: Video; busy: boolean }>()
+defineProps<{ video: Video; busy: boolean; note?: string }>()
 const emit = defineEmits<{ action: [path: string, method?: string] }>()
 </script>
 
@@ -64,5 +64,6 @@ const emit = defineEmits<{ action: [path: string, method?: string] }>()
         {{ video.protected ? '保護解除' : '保護' }}
       </button>
     </div>
+    <p v-if="note" class="meta" role="status">{{ note }}</p>
   </section>
 </template>

@@ -1044,6 +1044,14 @@ def _complete_recording(db: Session, v: Video, ch: Channel, target: Path, output
         _recording_media_inventory(v, target, profile, media))
     v.file_size = sum(path.stat().st_size for path in original_media)
     v.raw_metadata = {**(v.raw_metadata or {}), "primary_media": primary.name}
+    db.commit()
+    try:
+        from .media import inspect_media
+        media_info = inspect_media(primary, settings.ffprobe_path)
+        if media_info:
+            v.raw_metadata = {**(v.raw_metadata or {}), "media_info": media_info}
+    except Exception:
+        log.exception("media probe failed for %s", v.youtube_video_id)
     archive_primary_completed = (
         _archive_backfill_completed(v.raw_metadata or {}, profile)
         and not incomplete_archive

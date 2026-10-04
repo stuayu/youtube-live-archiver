@@ -13,6 +13,9 @@ from app.models import (AuditLog, Channel, ChannelStat, ChatMessage, RecordingRu
 from app.services.chat import ingest_records  # noqa: E402
 
 root = Path(os.environ["STORAGE_ROOT"])
+for pattern in ("*.playable.mp4", "*.h264.mp4", "*.tmp.mp4"):
+    for derived in root.rglob(pattern):
+        derived.unlink(missing_ok=True)
 db = SessionLocal()
 from sqlalchemy import text
 db.execute(text("TRUNCATE chat_messages, transcript_segments, audit_logs, recording_rules, channel_stats, "
@@ -81,6 +84,26 @@ rows = [
     ("vid00000007", "確認保留の配信", "PROTECTION_PENDING", "mp4", dict(protection_reason="REMOTE_CHECK_FAILED")),
     ("vid00000008", "録画中の配信 LIVE NOW", "RECORDING", "mp4", dict(recording_heartbeat_at=now())),
 ]
+av1_target = None
+try:
+    encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True,
+                              text=True, timeout=15, check=False).stdout
+    encoder = "libsvtav1" if "libsvtav1" in encoders else "libaom-av1" if "libaom-av1" in encoders else None
+    if encoder:
+        av1_target = root / channels[0].youtube_channel_id / "2026" / "av100000001"
+        av1_target.mkdir(parents=True, exist_ok=True)
+        av1_path = av1_target / "video.mkv"
+        if not av1_path.is_file():
+            av1_options = ["-preset", "10"] if encoder == "libsvtav1" else ["-cpu-used", "8"]
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                "testsrc=size=320x180:rate=10:duration=8", "-f", "lavfi", "-i",
+                "sine=frequency=440:duration=8", "-c:v", encoder, "-crf", "40",
+                *av1_options, "-pix_fmt", "yuv420p",
+                "-c:a", "libopus", "-shortest", str(av1_path),
+            ], check=True, timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except (OSError, subprocess.SubprocessError):
+    av1_target = None
 for i, (vid, title, status, ext, extra) in enumerate(rows):
     target = media(vid, ext=ext)
     if status == "RECORDING":
@@ -137,6 +160,25 @@ for i, (vid, title, status, ext, extra) in enumerate(rows):
             ingest_records(db, v.id, [record], complete_snapshot=False)
             if n == 4:
                 db.query(ChatMessage).filter_by(video_id=v.id, message_id=f"m{n}").one().is_deleted = True
+if av1_target:
+    av1_path = av1_target / "video.mkv"
+    db.add(Video(
+        youtube_video_id="av100000001", channel_id=channels[0].id, storage_id=storage.id,
+        title="AV1 / Opus browser compatibility fixture", status="ACTIVE",
+        file_path=str(av1_target), file_size=av1_path.stat().st_size,
+        original_duration=8, recorded_at=now() - timedelta(days=50),
+        recording_finished_at=now() - timedelta(days=50), retention_days=30,
+    ))
+broken_target = root / channels[0].youtube_channel_id / "2026" / "broken00001"
+broken_target.mkdir(parents=True, exist_ok=True)
+(broken_target / "video.mkv").write_bytes(b"not a media container")
+db.add(Video(
+    youtube_video_id="broken00001", channel_id=channels[0].id, storage_id=storage.id,
+    title="壊れたメディア timeout 案内確認", status="ACTIVE",
+    file_path=str(broken_target), file_size=(broken_target / "video.mkv").stat().st_size,
+    original_duration=8, recorded_at=now() - timedelta(days=51),
+    recording_finished_at=now() - timedelta(days=51), retention_days=30,
+))
 legacy_target = media("legacy00001")
 legacy_video = Video(
     youtube_video_id="legacy00001",
