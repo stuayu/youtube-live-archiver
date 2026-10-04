@@ -1,21 +1,22 @@
 """Media probing and browser rendition metadata."""
 import json
+import re
 import subprocess
 from pathlib import Path
 
 from ..config import settings
-from .backfill import media_file
+from .backfill import MEDIA_EXTENSIONS, media_file
 from .transcode import output_path, status as conversion_status
 
 
 
-def inspect_media(path: Path, ffprobe: str | None = None) -> dict | None:
+def inspect_media(path: Path, ffprobe: str | None = None, timeout: float = 30) -> dict | None:
     if not path.is_file() or path.stat().st_size <= 0:
         return None
     try:
         result = subprocess.run(
             [ffprobe or settings.ffprobe_path, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, timeout=timeout, check=False,
         )
         if result.returncode:
             return None
@@ -77,9 +78,23 @@ def video_playback_metadata(video_id: int, source: Path, info: dict | None) -> d
     }
 
 
+# yt-dlp per-format downloads (video.f299.mp4, video-part-2.f140.m4a) before they are merged.
+_INTERMEDIATE = re.compile(r"\.f\d+\.[A-Za-z0-9]+$")
+
+
 def source_media(directory: Path) -> Path | None:
     """Original media the renditions derive from: primary, else largest, else a salvaged partial."""
     try:
-        return media_file(directory)
+        media = media_file(directory)
+        if media is None or not _INTERMEDIATE.search(media.name):
+            return media
+        # A failed recording can leave a huge single-stream fragment file; it is not playable media.
+        merged = [path for path in directory.iterdir()
+                  if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS
+                  and not _INTERMEDIATE.search(path.name)
+                  and not path.name.endswith((".h264.mp4", ".playable.mp4"))]
+        if not merged:
+            return None
+        return sorted(merged, key=lambda path: (-path.stat().st_size, path.name))[0].resolve()
     except OSError:
         return None

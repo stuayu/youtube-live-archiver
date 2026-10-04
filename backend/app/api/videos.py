@@ -144,20 +144,38 @@ def add_manual_video(body: ManualVideoIn, db: Session = Depends(get_db)):
     return {"video": out, "action": action, "created": True, "channel_created": channel_created}
 
 
+# The lazy probe runs inside list/detail requests: keep it short and remember failures,
+# otherwise one unreadable file delays every page load by the full ffprobe timeout.
+LAZY_PROBE_TIMEOUT_SECONDS = 8
+LAZY_PROBE_RETRY_SECONDS = 6 * 3600
+
+
 def _ensure_media_info(video_id: int, directory: Path | None, metadata: dict) -> dict | None:
     current = metadata.get("media_info")
     if isinstance(current, dict):
         return current
+    failed_at = metadata.get("media_probe_failed_at")
+    if failed_at:
+        try:
+            if (now() - datetime.fromisoformat(failed_at)).total_seconds() < LAZY_PROBE_RETRY_SECONDS:
+                return None
+        except (TypeError, ValueError):
+            pass
     source = source_media(directory) if directory else None
     if source is None:
         return None
-    info = inspect_media(source, settings.ffprobe_path)
-    if info:
-        with SessionLocal() as session:
-            video = session.get(Video, video_id)
-            if video:
-                video.raw_metadata = {**(video.raw_metadata or {}), "media_info": info}
-                session.commit()
+    info = inspect_media(source, settings.ffprobe_path, timeout=LAZY_PROBE_TIMEOUT_SECONDS)
+    with SessionLocal() as session:
+        video = session.get(Video, video_id)
+        if video:
+            current_metadata = {key: value for key, value in (video.raw_metadata or {}).items()
+                                if key != "media_probe_failed_at"}
+            if info:
+                current_metadata["media_info"] = info
+            else:
+                current_metadata["media_probe_failed_at"] = now().isoformat()
+            video.raw_metadata = current_metadata
+            session.commit()
     return info
 
 @router.post("/videos/{video_id}/schedule/{enabled}")

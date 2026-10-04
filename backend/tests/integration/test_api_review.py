@@ -574,7 +574,7 @@ def test_video_list_lazily_probes_at_most_five_records(client, monkeypatch, tmp_
         ids.append(add_video(channel_id, file_path=str(directory)))
     probed = []
 
-    def inspect(path, _ffprobe):
+    def inspect(path, _ffprobe, **_kwargs):
         probed.append(path)
         return {"container": "matroska", "video_codec": "h264", "audio_codec": "aac",
                 "width": 640, "height": 360}
@@ -589,6 +589,67 @@ def test_video_list_lazily_probes_at_most_five_records(client, monkeypatch, tmp_
     detail_id = add_video(channel_id, file_path=str(detail_dir))
     assert client.get(f"/api/videos/{detail_id}").json()["media"]["container"] == "matroska"
     assert len(probed) == 6
+
+
+@pytest.mark.integration
+def test_lazy_probe_failure_is_remembered_and_uses_a_short_timeout(client, monkeypatch, tmp_path):
+    """An unreadable file must not delay every list request by the ffprobe timeout."""
+    from app.api import videos as video_api
+    channel_id = add_channel()
+    directory = tmp_path / "unreadable"
+    directory.mkdir()
+    (directory / "video.mkv").write_bytes(b"media")
+    video_id = add_video(channel_id, file_path=str(directory))
+    calls = []
+    result = {"value": None}
+
+    def inspect(path, _ffprobe, timeout=30):
+        calls.append(timeout)
+        return result["value"]
+
+    monkeypatch.setattr(video_api, "inspect_media", inspect)
+    for _ in range(3):
+        assert client.get("/api/videos", params={"scope": "all"}).status_code == 200
+        assert client.get(f"/api/videos/{video_id}").status_code == 200
+    assert calls == [video_api.LAZY_PROBE_TIMEOUT_SECONDS]
+    assert video_api.LAZY_PROBE_TIMEOUT_SECONDS <= 10
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        assert "media_info" not in video.raw_metadata
+        stale = (now() - timedelta(seconds=video_api.LAZY_PROBE_RETRY_SECONDS + 60)).isoformat()
+        video.raw_metadata = {**video.raw_metadata, "media_probe_failed_at": stale}
+        db.commit()
+    result["value"] = {"container": "matroska", "video_codec": "h264", "audio_codec": "aac",
+                       "width": 640, "height": 360}
+    assert client.get(f"/api/videos/{video_id}").json()["media"]["video_codec"] == "h264"
+    assert len(calls) == 2
+    with SessionLocal() as db:
+        metadata = db.get(Video, video_id).raw_metadata
+        assert metadata["media_info"]["container"] == "matroska"
+        assert "media_probe_failed_at" not in metadata
+
+
+def test_source_media_ignores_unmerged_format_downloads(tmp_path):
+    import json
+    from app.services.media import source_media
+    failed = tmp_path / "failed"
+    failed.mkdir()
+    (failed / "video-part-2.f299.mp4").write_bytes(b"x" * 900)
+    (failed / "video-part-2.f140.m4a").write_bytes(b"x" * 100)
+    (failed / "video-part-6.mkv").write_bytes(b"x" * 300)
+    (failed / "video.mkv").write_bytes(b"x" * 200)
+    assert source_media(failed).name == "video-part-6.mkv"
+    only_fragments = tmp_path / "fragments"
+    only_fragments.mkdir()
+    (only_fragments / "video.f299.mp4").write_bytes(b"x" * 900)
+    assert source_media(only_fragments) is None
+    completed = tmp_path / "completed"
+    completed.mkdir()
+    (completed / "video.mkv").write_bytes(b"x" * 100)
+    (completed / "video-archive.mkv").write_bytes(b"x" * 50)
+    (completed / "recording.json").write_text(json.dumps({"primary_media": "video-archive.mkv"}), encoding="utf-8")
+    assert source_media(completed).name == "video-archive.mkv"
+    assert source_media(tmp_path / "missing") is None
 
 
 @pytest.mark.integration
