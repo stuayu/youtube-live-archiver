@@ -15,6 +15,11 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 | `app/api/` | `common.py` の `/api` router を `__init__.py` で集約。`channels.py`、`storages.py`、`videos.py`、`settings.py`、`rules.py`、`system.py` が各 endpoint を提供します。 |
 | `app/workers.py` | scheduler の監視、録画 dispatch、Retention、protection、復旧、整合性確認。 |
 | `app/services/monitor.py` | チャンネルスキャン、初回 baseline、予定時刻更新、ポーリング間隔、エラー状態。 |
+| `app/services/manual_video.py` | 手動動画 URL の安全な YouTube 動画 ID 解釈と正規 URL 生成。 |
+| `app/services/chat.py` | チャット取り込み、リプレイ専用 worker、手動優先 queue、コメント画像処理。 |
+| `app/services/image_cache.py` | 外部サムネイルの host 制限、取得、キャッシュ、失敗 cooldown。 |
+| `app/services/chat.py` | チャット取り込み、リプレイ専用 worker、手動優先 queue、コメント画像処理。 |
+| `app/services/image_cache.py` | 外部サムネイルの host 制限、取得、キャッシュ、失敗 cooldown。 |
 | `app/services/recorder.py` | 録画枠、プロセス管理、yt-dlp / ffmpeg tee、chat subprocess、成果物救出、完了 commit。 |
 | `app/services/recovery.py` | Remote 状態に基づく復旧判断、`.part` 救出、中間ファイル整理、stem 採番。 |
 | `app/services/backfill.py` | `recording.json` と成果物を使う既存録画の補完・再構築処理。 |
@@ -69,9 +74,13 @@ integrity を30分間隔、Retention を15分間隔、派生物掃除を24時間
 protection を6時間間隔、processing queue を10秒間隔で登録します。
 起動時に stale recording recovery も実行します。
 
-監視は初回スキャンでチャンネル一覧を取得し、baseline を確定します。`next_check_at` が未設定または期限到来した有効チャンネルを batch 単位で処理します。予定配信時刻は動画 inspect から更新します。開始までの時間に応じて通常確認より短い interval を採用し、数値指定の polling interval は上限として働きます。スキャン失敗はチャンネルの `last_error` と `consecutive_failures` を更新し、指数 backoff を適用します。Rate limit はグローバル cooldown とし、連続時に10分から最大60分へ延長します。成功後に cooldown streak をリセットします。
+監視は初回スキャンでチャンネル一覧を取得し、baseline を確定します。`next_check_at` が未設定または期限到来した有効チャンネルを batch 単位で処理します。`AUTO` は既定で、過去90日の開始時刻から UTC の時間帯（24区分）または曜日×時間帯（168区分）を学習し、hot / warm / cold / 履歴不足に応じて15〜30分 / 30〜60分 / 2〜4時間 / 30〜60分で確認します。開始時刻のある学習サンプルが12本未満なら、inspect 枠とクールダウンを確認し、スキャンごとに開始時刻不明の過去配信を1本だけ調べます。試行済み動画は `start_probe_attempted` で記録し再試行しません。固定値は30 / 45 / 60 / 90 / 120 / 180 / 240 / 360分の±10%です。次の hot 時間帯を越す場合は確認間隔を切り詰めます。`WAITING_LIVE` は予定の30分前までに確認し、30〜5分前は2〜4分、5分前〜10分後は20〜40秒、10〜60分後は1〜2分、1〜6時間後は5〜10分、時刻不明は10〜20分で確認します。予定による短縮は固定値でも有効です。スキャン失敗はチャンネルの `last_error` と `consecutive_failures` を更新し、指数 backoff を適用します。Rate limit はグローバル cooldown とし、連続時に10分から最大60分へ延長します。成功後に cooldown streak をリセットします。
 
 システム API と画面は scheduler の job 実行時刻・失敗、監視中チャンネル数、チャンネルの前回成功・失敗、次回確認時刻を表示します。モニターの process 内 cooldown は複数 backend instance 間で共有されません。
+
+`chat_replay_worker` は60秒間隔・1 instance で実行し、1 tick につき期限到来ジョブを1本取得します。中断ジョブをロック所有確認後に `retry_wait` へ戻し、10分ごとに録画済み・チャット有効・ファイルあり・削除前で未取得の動画を1 SQLで最大20件抽出します。自動ジョブは5分刻みで予約し、手動 queue は最優先です。取得中は同期DB transaction を保持せず、rate limit は monitor の共有 cooldown に反映します。文字起こし・要約 worker から独立しています。
+
+`manual_video_worker` は 60 秒間隔で監視チャンネルに依存せず手動追加の `WAITING_LIVE` を確認し、開始・終了・非公開状態に応じて録画対象化または中止します。確認時刻は各動画の `manual_next_check_at` に記録し、アクセス制限時は monitor と共有する process 内 cooldown を適用します。
 
 ## 動画状態と遷移
 
