@@ -13,12 +13,20 @@ codex exec --yolo --dangerously-bypass-hook-trust \
   -C "C:/prog/youtube-live-archiver" - < プロンプトファイル
 ```
 
+macOS / Linux:
+
+```bash
+codex exec --yolo --dangerously-bypass-hook-trust \
+  -m gpt-6-luna --skip-git-repo-check \
+  -C "/Users/ayumu/prog/youtube-live-archiver" - < prompt.txt
+```
+
 `--yolo` と `--dangerously-bypass-hook-trust` を**必ず付ける**。
 
 ## reasoning effort は config.toml 側で決める
 
 `-c model_reasoning_effort=...` をコマンドラインで渡すな。
-**Windows で前回値に引っ張られる不具合報告がある。** `~/.codex/config.toml` に書く。
+**Windows で前回値に引っ張られる不具合報告がある。** `~/.codex/config.toml` に書く。Windows の例は `%USERPROFILE%\.codex\config.toml`、macOS / Linux は `~/.codex/config.toml`。
 
 ```toml
 model = "gpt-6-luna"
@@ -27,6 +35,13 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 
 [projects.'C:\prog']
+trust_level = "trusted"
+```
+
+macOS / Linux の project 設定例:
+
+```toml
+[projects.'/Users/ayumu/prog/youtube-live-archiver']
 trust_level = "trusted"
 ```
 
@@ -52,8 +67,7 @@ Luna は高効率モデルなので**常用は high**。現在の設定も high�
 
 ## その他の必須フラグ
 
-- `--skip-git-repo-check` — このリポジトリは git 管理外。無いと
-  `Not inside a trusted directory` で即終了する。
+- `--skip-git-repo-check` — このリポジトリは git 管理下。Codex の trusted directory 判定で `Not inside a trusted directory` が出る環境では、このフラグで repo check を回避する。
 - `-C <ディレクトリ>` — 作業ディレクトリ指定。
 - `- < ファイル` — プロンプトは stdin で渡す。引数で渡すと長文が壊れる。
 

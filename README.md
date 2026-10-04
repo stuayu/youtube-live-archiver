@@ -1,192 +1,219 @@
 # YouTube Live Archiver
 
-複数の YouTube チャンネルを監視し、ライブ配信を `yt-dlp` で保存するセルフホスト用アプリです。FastAPI / PostgreSQL / Vue 3 で構成します。
+複数の YouTube チャンネルを監視し、ライブ配信とアーカイブを保存するセルフホスト用アプリです。Backend は FastAPI / PostgreSQL、画面は Vue 3 / TypeScript で構成します。YouTube 取得に `yt-dlp`、メディア処理に `ffmpeg` と `ffprobe` を使います。
 
-## Windows ローカルセットアップ（Docker 不要）
+## セットアップと起動
 
-1. PostgreSQL 17 をインストールして起動し、アプリ用 DB とユーザーを用意します。例: `yla` DB、`postgres` ユーザー。
-2. リポジトリ直下と `backend/` の `.env` を作成し、`DATABASE_URL`、`STORAGE_ROOT` と下記設定を調整します。
-3. `cd backend; python -m pip install -r requirements.txt` を実行します。`yt-dlp` と `ffmpeg` は PATH に必要です。
-4. frontend をビルドします: `cd frontend; npm install; npm run build`。生成された `frontend/dist` は FastAPI が `/` で配信します。
-5. `cd backend; alembic upgrade head` で DB を更新します。
-6. `cd backend; python -m app` で起動します。GUI は <http://localhost:8000/>、API は <http://localhost:8000/docs> です。
-7. ストレージを登録してからチャンネルを登録します。登録時は正規 `UC...` ID を指定できます。
+### Windows（ローカル実行）
 
-設定例は `.env.example` を参照してください。`APP_HOST` の既定値は `0.0.0.0`、`APP_PORT` は `8000` です。CORS は任意の origin を許可する設定で、アプリに認証機構はありません。信頼できる LAN または tailnet 内だけで利用し、ネットワーク境界を信頼境界として扱ってください。インターネットへ直接公開しないでください。
-
-録画完了後の文字起こしは Python 製の DB ジョブキューからローカル `faster-whisper` で処理します。`TRANSCRIPTION_ENABLED`、`WHISPER_MODEL`、`WHISPER_DEVICE`、`WHISPER_COMPUTE_TYPE`、`WHISPER_LANGUAGE`、`TRANSCRIPTION_MAX_CONCURRENCY` は環境変数、または GUI の「設定」から変更できます。初回実行時は faster-whisper が選択モデルをローカルに取得します。ジョブ・再試行・セグメントは DB に保存し、録画本体の状態とは独立しています。詳細は [文字起こしと処理キュー](docs/ARCHITECTURE.md#文字起こしと処理キュー) を参照してください。
-
-LLM 要約（Phase 2）は既定で無効です。利用時は設定画面または `.env` の `OPENROUTER_API_KEY`、`OPENROUTER_MODEL` を設定し、要約を明示的に有効化してください。`OPENROUTER_BASE_URL`、`SUMMARY_CHUNK_MINUTES`、`OPENROUTER_MAX_CONCURRENCY`、`OPENROUTER_MAX_ATTEMPTS` も変更できます。OpenRouter へ送信するのはローカルで生成済みのタイムスタンプ付き文字起こしテキストだけで、録画動画・音声は送信しません。要約を無効にしても録画・文字起こし・字幕・検索は利用できます。外部プロバイダーへ文字起こし内容を送信し得るため、送信内容を確認したうえで有効化してください。詳細は [階層要約](docs/ARCHITECTURE.md#llm-階層要約-phase-2) を参照してください。
-
-録画中の追っかけ視聴はチャンネル詳細設定で個別に有効化します（既定 OFF）。有効時は ffmpeg tee が保存用 MKV と HLS を同時に生成し、上限 bytes を指定できます。tee が失敗した場合は通常の yt-dlp 録画へ切り替えます。詳しくは [アーキテクチャ](docs/ARCHITECTURE.md#録画中の追っかけ再生) を参照してください。
-
-録画失敗・録画プロセスの異常終了・heartbeat stale・出力メディア欠落は、保存ファイルを削除する理由になりません。部分ファイル、info.json、サムネイルを保全し、エラーログを録画ディレクトリの親へ保存します。削除は [Retention の安全原則](docs/ARCHITECTURE.md#failure-artifacts-and-deletion-safety) に従い、要件30章の条件確認後に限ります。
-
-チャンネル設定の「過去配信の取込数」は登録済みの過去アーカイブを何本録画するかを指定します。既定値 `0` は過去分を録画せず、監視開始後のライブのみを対象にします。過去分は一覧に `SKIPPED` として表示されます。チャンネル登録後に名前・アイコンなどを再取得するには「情報更新」を使います。アイコンは `DATA_DIR`（既定 `./data`）配下へキャッシュします。
-
-### 画質・フォーマット設定
-
-MKV 録画は動画一覧から MP4 リマックス（再エンコードなし）を要求できます。AV1 非対応端末向けの H.264 + AAC 変換も明示操作でキューに追加できます。変換結果は別ファイルになり、元録画のダウンロードも引き続き可能です。
-
-ライブ録画と終了済みアーカイブでは画質設定を分けています。ライブは既定で「オリジナル（自動選択）」となり、yt-dlp に `-f` を渡しません。ライブ配信で形式指定が原因の失敗を避け、取りこぼしを抑える設定です。終了済みアーカイブは既定で AV1 → VP9 → 利用可能な最良形式の順に選びます。グローバル既定値は backend の `LIVE_QUALITY` / `ARCHIVE_QUALITY` 環境変数でも設定できます。
-
-プリセットは「オリジナル」「AV1 優先 高画質」「VP9 優先 高画質」「H.264 優先」「1080p まで」「720p まで」「音声のみ」です。必要な場合はカスタム欄へ yt-dlp format selector を指定できます。設定の優先順位は動画個別、ルール、チャンネル、グローバル既定値です（ルール録画と動画個別設定は現在未実装）。変更は次回録画から適用し、録画中の selector は変えません。
-
-指定形式が利用できず yt-dlp が失敗した場合は、自動選択（`-f` なし）で再試行します。適用した selector と fallback 状態は録画レコードと `recording.json` に記録されます。再試行も失敗すると `RECORDING_FAILED` とし、`<video_id>-recording-error.log` にエラーを保存します。フォーマット確認欄はボタン操作時だけ YouTube へ問い合わせます。
-
-AV1 はエンコード・デコードが重く、古い機器やブラウザでは再生できない場合があります。再生互換性を重視する場合は H.264 を選んでください。MKV はブラウザ再生に対応しないことがあるため、必要に応じてファイルをダウンロードして再生してください。
-
-「分析」タブは、チャンネルメタデータの取得に成功した時点の統計スナップショットを表示します。記録間隔は `CHANNEL_STATS_INTERVAL_HOURS`（既定24時間）です。設定後から統計を蓄積し、存在しない過去データは補完しません。登録者数は yt-dlp が取得した整数を保持し、YouTube の表示値が丸められている可能性も記録します。
-
-アーカイブ画面は30件ずつページングします。録画ファイルの Range 配信は動画 ID に紐づく DB パスを登録 Storage の配下で検証してから行います。ブラウザ再生に対応しない MKV はダウンロードして再生してください。手動削除は確認ダイアログ後のみ実行され、操作履歴に記録されます。
-
-### aria2 ダウンロード
-
-`DOWNLOADER=aria2c` が既定です。`aria2c` が PATH に無い場合は自動的に yt-dlp 標準 downloader にフォールバックします。必要なら `ARIA2C_PATH`、`ARIA2C_CONNECTIONS`（-x）、`ARIA2C_SPLIT`（-s）、`ARIA2C_MIN_SPLIT_SIZE`（-k）、`ARIA2C_MAX_CONCURRENT_DOWNLOADS`（-j）を設定します。Windows では `winget install aria2.aria2` で導入できます。
-
-aria2c は終了済みアーカイブ、Remote fingerprint 用の section、その他の静的ファイル取得に使います。ライブ録画中の HLS はリアルタイムで流れるため、分割並列取得の対象に向かず、常に yt-dlp の native downloader を使います。
-
-### Windows サービス
-
-管理者 PowerShell からリポジトリ直下で実行します。NSSM が未導入なら `winget install nssm` を実行後にスクリプトを再実行します。NSSM が使えない場合は起動時タスクを利用できます。
+Python、Node.js / npm、PostgreSQL、`yt-dlp`、`ffmpeg` / `ffprobe` を用意し、実行ファイルを PATH に通します。PowerShell の例です。
 
 ```powershell
-.\scripts\install-windows-service.ps1
-# または
-.\scripts\install-windows-service.ps1 -UseScheduledTask
-```
-
-サービスは PostgreSQL `postgresql-17` に依存し、異常終了時に再起動します。ログは `logs/service-stdout.log` と `logs/service-stderr.log` に出力されます。解除は ` .\scripts\uninstall-windows-service.ps1` です。
-
-### LAN / Tailscale とファイアウォール
-
-Private プロファイルだけで TCP `APP_PORT` を許可するには、管理者 PowerShell で ` .\scripts\setup-firewall.ps1` を実行します。Tailscale の送信元範囲も許可する場合は ` .\scripts\setup-firewall.ps1 -AllowTailscale` を使います。
-
-同じ宅内 LAN からはこの PC の LAN IP を使って `http://<LAN-IP>:8000/` にアクセスします。Tailscale では `http://100.115.154.148:8000/`（`stuayu-miyagi`）です。認証がないため、ルーターでポート転送したり、インターネットへ直接公開したりしないでください。
-
-## チャンネル設定
-
-一覧から監視 ON/OFF、間隔（30/45/60/AUTO）、保存先と Fallback Storage、保存期間、削除猶予、画質、Cookie Profile、自動保護、編集検出モードを編集できます。チャンネル単位の「常に永久保存」と、録画中の停止・失敗録画の再試行にも対応しています。チャンネル削除は論理削除し、動画履歴を維持します。
-
-Cookie Profile は Netscape 形式 Cookie ファイルのパス、または `chrome[:profile]` 等を指定します。Docker 利用時は Cookie ファイルを backend コンテナへ読み取り可能な形でマウントしてください。ホストのブラウザ profile はコンテナから見えないため、コンテナ内で利用できるブラウザ profile のみ指定できます。
-
-## 監視と録画
-
-通常監視はチャンネル設定に従い、AUTO は30〜60分の jitter を加えます。Upcoming 配信は予定時刻に応じて 5〜10分、1〜3分、15〜30秒間隔へ短縮し、開始検出後に yt-dlp へ引き渡します。チャンネルごとに次回時刻をずらします。
-
-録画開始時に保存先の書き込みと空き容量を確認し、Primary が利用できなければ設定済み Fallback、続いて Default Storage を試します。保存先が利用できなければ `WAITING_FOR_STORAGE` で待機します。異常終了・GUI停止時は部分録画を保持して `RECORDING_FAILED` にします。起動時と毎分の復旧ジョブが YouTube 状態を確認し、配信中なら別パートで再開、公開済みならアーカイブを取得します。非公開・削除済み・視聴不能なら部分録画を保護し、判定不能時は指数バックオフで保留します。
-
-## 保持と削除の安全性
-
-Retention は保持期限後に YouTube 状態と編集を確認し、設定された猶予期間後、削除直前にも再確認します。PRIVATE / DELETED / 利用不能 / 編集検出は保護し、通信・メタデータ・指紋の判定不能は `PROTECTION_PENDING` に留めます。初回と最終確認の両方で PUBLIC かつ未変更を確認できた場合だけ削除します。保護動画は Retention から除外し、ファイル削除後も履歴を残します。
-
-編集検出モード:
-
-- **OFF**: 編集検出を行いません。
-- **Basic**: duration を比較します。
-- **Standard**: duration と6地点（5/20/40/60/80/95%）の映像 perceptual hash を比較します。
-- **Strong**: Standard に加えて音声 fingerprint を比較します。
-
-比較しきい値は `FINGERPRINT_VIDEO_THRESHOLD`（既定0.25）と `FINGERPRINT_AUDIO_THRESHOLD`（既定0.35）で指定できます。動画/音声サンプル作成には `ffmpeg` が必要です。指紋の不足や取得失敗は自動削除許可にしません。
-
-## 開発と確認
-
-```powershell
+Copy-Item .env.example backend/.env
+# backend/.env の DATABASE_URL、STORAGE_ROOT などを環境に合わせて編集
 cd backend
-alembic upgrade head
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m alembic upgrade head
+cd ..\frontend
+npm ci
+npm run build
+cd ..\backend
 python -m app
 ```
 
-別ターミナルで `cd frontend; npm install; npm run dev` を実行します。
+画面は `http://localhost:8000/`、API ドキュメントは `http://localhost:8000/docs` です。`APP_HOST` / `APP_PORT` は backend の待受先です。フロントエンドを開発するときは別ターミナルで `cd frontend; npm ci; npm run dev` を実行します。
 
-Retention / 排他の pytest は `cd backend; python -m pytest` で実行します（`backend/requirements.txt` の依存が必要です）。依存導入前はリポジトリルートから `python scripts/smoke_policy.py` を実行すると標準ライブラリだけで安全ポリシーの基本動作を確認できます。実配信での段階的な検証は [docs/E2E_TESTING.md](docs/E2E_TESTING.md) を参照してください。
+### macOS / Linux（ローカル実行）
 
-## 現時点の制限
+Python 3、Node.js / npm、PostgreSQL、`yt-dlp`、`ffmpeg` / `ffprobe` を用意し PATH に通します。
 
-- Remote fingerprint 確認は yt-dlp の section download を使います。配信者側の形式や YouTube 側の制限によってサンプルが取れない場合は `PROTECTION_PENDING` となり、削除しません。
-- 録画停止 API による子プロセス制御は、その Recorder を起動した backend プロセス内に限られます。
-- 実録画と YouTube への Remote 確認にはネットワーク、`yt-dlp`、`ffmpeg` が必要です。
+```sh
+cp .env.example backend/.env
+# backend/.env の DATABASE_URL、STORAGE_ROOT などを環境に合わせて編集
+cd backend
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m alembic upgrade head
+cd ../frontend
+npm ci
+npm run build
+cd ../backend
+python -m app
+```
 
-## YouTube ライブチャット
+既定の待受先は `http://localhost:8000/` です。ローカル実行時は backend の作業ディレクトリから `backend/.env` が読み込まれます。Compose 用の `.env` はリポジトリ直下に別途置きます。フロントエンド開発サーバーは `cd frontend && npm ci && npm run dev` で起動します。
 
-チャンネルの詳細設定で「ライブチャット保存」を切り替えます（既定 ON）。録画時に yt-dlp の live_chat 字幕を取得し、動画再生画面でコメント一覧・検索・種別絞り込み・削除済み表示・JSON export を利用できます。終了済みアーカイブの「チャット再取得」は動画の一覧データだけを更新し、チャット取得失敗で録画や既存コメントを変更しません。
+### Docker Compose
 
-録画途中からの配信は、配信開始時刻と録画開始時刻の差を差し引いて弾幕時刻をローカル動画へ合わせます。補正の詳細は [アーキテクチャ](docs/ARCHITECTURE.md#ライブチャット) を参照してください。
+Docker が使える環境では、リポジトリ直下で `docker compose up --build` を実行します。DB、backend、開発用 frontend が起動します。`.env` の `POSTGRES_PASSWORD` と `ARCHIVE_PATH` は Compose 側で使われます。ローカル実行用の `DATABASE_URL` はコンテナ名 `db` を使うため、ホスト上で動かす場合は `localhost` と PostgreSQL のポートに合わせて変更してください。
 
+このアプリには認証がなく、CORS は任意の origin を許可します。信頼できる LAN / tailnet 内で使い、インターネットへ直接公開しないでください。
 
-## ルール録画（自動予約）
+### 初回設定
 
-設定タブでタイトル・説明文のキーワードまたは正規表現ルールを追加できます。対象チャンネル、有効/無効、大文字小文字、除外ルール、優先順位を設定でき、保存先・保存期間・画質・編集検出をルール単位で上書きできます。「既存動画でプレビュー」は保存済み videos と照合し件数を表示します。除外は包含より優先し、有効な包含ルールがある場合は不一致の候補を `SKIPPED` にします。包含ルールが無いチャンネルの従来の自動録画動作は維持します。
+1. 「ストレージ」で書き込み可能な保存先を登録し、必要なら既定の保存先にします。
+2. 「チャンネル」で YouTube URL、`@handle`、チャンネル ID のいずれかを登録します。登録時に名前とアイコンを取得し、初回スキャンを実行します。
+3. チャンネル設定で監視、保存先、保存期間、画質、Cookie Profile、チャット、追っかけ視聴などを調整します。
 
-ルール録画の照合・保存先/保持設定の適用と、除外優先・正規表現・チャンネル範囲は pytest で確認済みです。説明文が既存動画の `raw_metadata` に無い場合、プレビューは空の説明文として照合します。
+登録後のメタデータ更新はチャンネルの「情報更新」、今すぐの再スキャンは「今すぐ確認」を使います。
 
-## PWA と API の応答
+## 画面と主な操作
 
-manifest、テーマ色、SVG アプリアイコンを用意し、スマートフォンからホーム画面へ追加できます。Service Worker によるオフライン再生はありません。API のエラー応答は `{"error":"..."}` 形式です。日時は UTC の ISO 8601 で返します（UTC オフセットは `+00:00` または `Z`）。GET のコレクション一覧は配列です。公開 API の ID は JSON 文字列で、内部 DB の主キーは整数のままです。ID を含む入力は URL / JSON 上で文字列として扱い、既存の数値キーを使う入力も受け付けます。
+| 画面 | 主な操作 |
+| --- | --- |
+| ホーム | 監視・録画の概要、配信予定、最近の録画、システム状態を確認します。 |
+| チャンネル | チャンネルを登録・編集・削除し、監視、次回確認時刻、予定数、録画数、失敗状態を確認します。削除は論理削除です。 |
+| 配信予定 | 予定配信を検索・絞り込みし、録画予約の有効 / 無効を切り替えます。 |
+| アーカイブ | 録画一覧を検索・絞り込み・並べ替えし、再生、ダウンロード、保護、削除、変換、録画再試行、停止を操作します。 |
+| 全文検索 | 文字起こし本文を検索し、チャンネルや録画期間で絞り込みます。結果から録画の該当位置へ移動できます。 |
+| ストレージ | 保存先の追加・編集・削除、既定先、使用量・空き容量を確認します。 |
+| 分析 | チャンネル統計と録画量の推移を確認します。統計は取得開始後のスナップショットです。 |
+| アクティビティ | 監視・録画・保護・Retention などの操作履歴と状態を確認します。 |
+| 設定 | 表示、録画の実効設定、画質、録画ルール、文字起こし、要約を設定します。 |
 
-## 全文検索・タイムライン
+アーカイブの削除は確認ダイアログを経て監査ログに記録されます。手動保護を解除しない限り自動 Retention の対象にはなりません。
 
-「全文検索」タブから文字起こし済みの録画を横断検索できます。共通チャンネル選択で対象を絞り、録画詳細は発言の時刻をクリックするとその位置から再生します。検索はページングされます。PostgreSQL の `pg_trgm` が利用可能なら trigram を併用し、拡張未導入または利用権限が無い場合は `ILIKE` に切り替えます。拡張は任意です。動画詳細には要約の話題、なければ文字起こしセグメントを使うタイムラインが表示されます。
+## 設定
 
-## 設定と運用
+`.env.example` には backend runtime が参照する環境変数、既定値、説明を記載しています。UI から変更できる項目は DB のアプリ設定が環境変数の値を上書きする場合があります。保存先やチャンネル固有の項目は画面から設定します。
 
-主な環境変数は `.env.example` にあります。`DATABASE_URL` は PostgreSQL 17 接続 URL、`APP_HOST` / `APP_PORT` は待受、`STORAGE_ROOT` / `DATA_DIR` は保存先、`POLL_INTERVAL_MINUTES` は監視、`RETENTION_*` と `DURATION_TOLERANCE_SECONDS` は保持判定、`TRANSCRIPTION_*` / `WHISPER_*` は文字起こし、`SUMMARY_*` / `OPENROUTER_*` は任意要約、`DOWNLOADER` / `ARIA2C_*` は取得方式、`CHANNEL_STATS_INTERVAL_HOURS` は統計周期です。実際に読み込む全キーと既定値は `.env.example` および `backend/app/config.py` を参照してください。
+主な既定値は次のとおりです。
 
-日常運用では GUI のストレージ空き容量と録画中モニタを確認し、バックアップ前に録画処理と PostgreSQL の状態を確認します。設定変更後の DB 更新は `cd backend; alembic upgrade head`。Windows サービス登録・解除は上記スクリプトを管理者 PowerShell で実行します。サービス稼働中の検証では既存ポートを使わず、検証用 backend の `APP_PORT` に空きポートを指定してください。
+- `DATABASE_URL`: PostgreSQL 接続 URL
+- `STORAGE_ROOT`: 基本保存ルート（コンテナ内は `/archive`）
+- `DOWNLOADER=native`: yt-dlp の標準 downloader。必要時に `aria2c` を選べます。
+- `LIVE_QUALITY` は空で形式を固定せず、`ARCHIVE_QUALITY` は AV1、VP9、best の順に選びます。
+- `MAX_CONCURRENT_LIVE_RECORDINGS=8`、`MAX_CONCURRENT_ARCHIVE_DOWNLOADS=2`
+- `LIVE_FROM_START=true`、`LIVE_FROM_START_MAX_AGE_HOURS=12`
+- `TRANSCRIPTION_ENABLED=true`、`WHISPER_MODEL=large-v3-turbo`。モデルの初回利用時にダウンロードされます。
+- `SUMMARY_ENABLED=false`。有効化には OpenRouter の API キーとモデルが必要です。
+
+環境変数の詳細な一覧は [.env.example](.env.example) を参照してください。チャンネルの画質、保存先、保存期間などの優先値は画面設定に従います。録画ルールはタイトル / 説明文のキーワードまたは正規表現で録画対象を選別します。
+
+## 監視
+
+チャンネル登録直後に初回スキャンし、通常スキャンは既定で `AUTO`（30〜60 分の範囲）です。チャンネルごとに 30 / 45 / 60 分または AUTO を指定できます。予定配信の開始時刻を動画情報から取得し、開始が近づくと通常間隔を上限として確認間隔を短縮します。予定情報がない場合も候補を定期確認します。
+
+開始予定の30分より前（最大24時間前）は5〜10分、30分以内は1〜3分、5分以内は15〜30秒へ短縮します。数値指定の通常間隔は短縮間隔の上限として働きます。一時的なスキャン失敗は連続失敗数に応じて指数バックオフし、成功後にリセットします。アクセス制限を検出すると全チャンネルのスキャンをクールダウンし、連続検出時は10、20、40、最大60分へ延びます。
+
+ホームとチャンネル画面では、監視中・確認待ち・停止中・録画中・エラーなどの健全性、直近の成功 / 失敗、次回確認時刻を表示します。システム状態と scheduler job の実行状況は `/api/status`、イベントは `/api/events` から確認できます。
+
+## 録画と復旧
+
+- ライブ録画と終了済みアーカイブ取得は別々の同時実行枠で処理します。既定はライブ8件、アーカイブ2件です。
+- ライブチャットは映像録画とは別の yt-dlp プロセスで並行取得します。チャット取得失敗は映像録画の成功を取り消しません。
+- 通常のライブ録画は検出時点から開始します。配信先頭からの録画はチャンネルと全体の設定が有効な場合に `yt-dlp --live-from-start` で試みます。配信開始時刻を取得できた配信は開始から12時間を超えると対象外にし、時刻不明なら先頭取得を試します。追っかけ視聴と併用するチャンネルでは先頭取得を使わず通常録画にします。先頭取得の yt-dlp がエラー終了し media が残らない場合は `--live-from-start` を外して通常録画へ再試行します。
+- 追っかけ視聴を有効にすると ffmpeg tee で保存用メディアと一時 HLS を並行生成します。HLS は設定したサイズ上限まで保持し、録画中に再生できます。tee の起動・実行に失敗した場合は HLS を破棄して通常録画を再起動します。
+- 録画停止はその backend プロセスが所有する子プロセスを停止します。再生可能な出力が救出できたユーザー停止録画は部分録画として保持し、自動再開しません。
+- アプリ終了やプロセス異常終了で出力が途切れた場合は部分ファイルを保全し、起動時・定期復旧で YouTube 状態を確認します。公開中なら別 stem / 区間で録画を再開し、終了済みならアーカイブ取得を試みます。非公開・削除・視聴不能は保護し、判定不能はバックオフして再確認します。試行上限に達したものは `recovery_exhausted` として自動再試行を止めます。
+- 冒頭欠け、復旧による複数区間、配信先頭取得の不足はアーカイブ補完をキューに入れる場合があります。補完アーカイブを duration tolerance と照合し、完全と判断した場合に primary media を切り替え、部分録画フラグを解除します。
+- 完了時は出力の存在・サイズ・duration などを確認し、録画情報・checksum・fingerprint を更新します。integrity worker は ACTIVE 録画のメディア欠落・空ファイルを確認し、見つけると監査記録を作って `RECORDING_FAILED` に戻し、復旧確認へ渡します。
+- 録画中にストレージの空き容量が警告しきい値を下回ると警告イベントを記録します。録画開始時に保存先へ書き込み可能か、最低空き容量を満たすか確認します。
+
+Retention 対象になるのは `ACTIVE` かつ完全な録画です。部分録画は保持期限や自動削除の対象外です。録画失敗・停止・後処理失敗だけを理由にファイルを削除しません。
+
+## Retention と整合性保護
+
+Retention は保存期限後に YouTube の状態と編集有無を確認し、削除猶予の後にもう一度確認します。2回目の削除直前確認でも公開状態かつ未編集であり、独立した成功確認がそろった場合にだけ削除します。
+
+編集検出は OFF / Basic / Standard / Strong です。Basic は duration、Standard は duration と映像 fingerprint、Strong は映像と音声 fingerprint を比較します。Standard / Strong の録画 fingerprint は元動画の5 / 20 / 40 / 60 / 80 / 95%地点から採取します。許容 duration 差は `DURATION_TOLERANCE_SECONDS`、fingerprint しきい値は `FINGERPRINT_VIDEO_THRESHOLD` / `FINGERPRINT_AUDIO_THRESHOLD` で指定します。遠隔サンプル、duration、fingerprint の取得に失敗して判定できない場合は `PROTECTION_PENDING` に保留し、自動削除を許可しません。手動保護、非公開、削除、視聴不能、編集検出は保護状態になります。
+
+部分録画は Retention の候補抽出と削除判定の両方で除外します。中間ファイルは検証済みの同 stem の完成ファイルがある場合に限り整理します。
+
+## チャットとプレイヤー
+
+チャットは通常コメント、スーパーチャット / スーパーステッカー、メンバーシップ、ギフト関連を保存します。絵文字画像は `DATA_DIR/chat-assets` にローカルキャッシュし、画面からはアプリ内のキャッシュ URL で読み込みます。コメントの再生時刻はライブ開始からの offset を録画開始 offset 分補正します。途中から録画した場合、録画より前のコメントは表示時刻をゼロへまとめず除外します。
+
+アーカイブの「チャット再取得」は replay を取得してから取り込みます。取得不能時は既存コメントを維持し、バックグラウンドで再試行を予約する場合があります。「再解析」は保存済み JSONL を使ってコメントを再解析します。動画の再生位置に合わせてチャット一覧を追従します。
+
+DPlayer の標準ホットキーを有効にしています。歯車メニューには再生速度、ループ、弾幕表示、不透明度、流れる速さ、文字サイズ、表示領域、弾幕の量、コメント種別（すべて / スーパーチャット / メンバーシップ）、削除済みコメントの表示設定があります。ライブ録画中はライブ追従と任意位置の追っかけを切り替えられます。追従設定時はライブ端から遅れた場合に追従位置へ戻ります。`d` キーで弾幕表示を切り替え、`Escape` キーで設定パネルを閉じるかプレイヤーを閉じます。設定の拡張は `frontend/src/lib/dplayerSettings.ts` で DPlayer の設定パネルへ項目を追加します。
+
+## 文字起こし、要約、検索
+
+録画完了後、任意設定で faster-whisper による文字起こしを処理キューへ登録します。失敗・再試行は録画状態から独立しています。文字起こしは動画詳細、全文検索、字幕出力から利用できます。要約は既定で無効で、OpenRouter を使う場合はタイムスタンプ付き文字起こしテキストを外部 API へ送ります。動画・音声ファイルは送信しません。
 
 ## トラブルシューティング
 
-- `WAITING_FOR_STORAGE`: 保存先の接続・書込権限・最低空き容量を確認し、GUI から再試行します。
-- `RECORDING_FAILED`: エラーログと部分成果物を保持したまま、監視状態と YouTube 公開状態を確認して再試行します。
-- 文字起こしが `retry_wait`: ffmpeg、モデルの取得先、GPU/メモリを確認します。録画状態とは独立して再試行されます。
-- 検索結果が空: 対象録画の文字起こし状態、キーワード、チャンネル絞り込みを確認します。pg_trgm は任意で、拡張なしでも部分一致検索できます。
-- 自動削除保留: Remote 確認失敗・編集判定不足は安全側の動作です。ログと保護状態を調べ、未確認を理由に手動で一括削除しないでください。
-- `npm run build` または画面撮影スクリプトが権限エラーとなる環境では、その制限を確認結果に記録してください。
+| 症状 | 確認箇所 |
+| --- | --- |
+| 画面が表示されない | `APP_HOST` / `APP_PORT`、backend ログ、`frontend/dist` のビルド有無を確認します。開発中は Vite の URL を使います。 |
+| DB 接続・起動エラー | `DATABASE_URL`、PostgreSQL 稼働、`python -m alembic upgrade head` の結果を確認します。 |
+| チャンネル情報を取得できない | `yt-dlp --version`、ネットワーク、Cookie Profile、チャンネルのアクセス権を確認します。 |
+| 配信が検出されない | チャンネル監視状態、`next_check_at`、最終成功 / エラー、システム `/api/status` を確認します。アクセス制限時はクールダウン終了を待ちます。 |
+| 録画が始まらない | 録画枠、保存先の有効 / 書込権限 / 空き容量、`WAITING_FOR_STORAGE`、動画状態、`yt-dlp` ログを確認します。 |
+| 録画が部分状態のまま | `recording.json`、録画ディレクトリの stem ごとのファイル、復旧履歴、YouTube 上の公開状態を確認します。保全ファイルを手動で消さないでください。 |
+| 再生できない | ブラウザ対応形式を確認します。MKV が再生できない場合はダウンロードまたは MP4 へのリマックス / H.264 変換を使います。 |
+| 文字起こしされない | 設定の有効状態、処理ジョブ、ffmpeg、Whisper のモデル / device / compute type、ログを確認します。 |
+| Retention が保留される | Remote 状態、`remote_checks`、編集検出モード、ffmpeg、fingerprint と duration の取得状況を確認します。保留中のファイルは削除しません。 |
 
+## テストと画面キャプチャ
 
-## 機能と検証状況（2026-10-03）
+`YLA_TEST_DATABASE_URL` を省略すると、backend pytest と Playwright E2E は pgserver を一時ディレクトリで起動し、終了時に片付けます。外部 PostgreSQL を使う場合は、`postgresql+psycopg://...` の専用テスト server（DB 作成権限あり）を指定してください。
 
-### 実装済み
+```sh
+cd backend
+python -m pytest -q -p no:cacheprovider
+```
 
-- チャンネル監視、ライブ/予定配信の検出、yt-dlp 録画、保存先の空き容量確認、復旧・Retention・Protection の各 worker。
-- Remote が Public で未編集と確認できる場合に限る保持期限削除、保護、監査ログ。手動削除と Retention は別 API / 別状態で、手動削除の復元用ゴミ箱は未実装です。
-- byte Range による録画ファイル配信、文字起こし/要約ジョブのコード、配信予定一覧、チャット取り込み処理、変換処理、分析、検索。
-- ルール録画、自動除外、保存設定上書き、既存動画プレビュー。
-- 公開 JSON の内部 ID を文字列で返す API 境界変換。DB の整数主キーは維持し、チャンネル/動画/保存先/ルール/チャット/検索/処理ジョブの応答を文字列 ID に統一。
-- URL 状態を使うタブ/フィルター復元、1440/820/390 の responsive UI、manifest/icon による PWA インストール設定。
-- subprocess 起動は引数配列を使用し、backend/app 内に `shell=True` / shell 起動 API はありません。`data/`、`archive/` は Git ignore 対象です。
+Frontend の各確認コマンドです。
 
-### 実機・実環境で検証済み
+```sh
+cd frontend
+npm run format:check
+npm run lint
+npm run build
+npm run test:unit
+npm run test:e2e
+npm run shots
+```
 
-2026-10-03 に次を実行しました。
+E2E と shots は一時 PostgreSQL・backend・frontend を起動します。詳細と外部サービスへ接続する実配信手順は [docs/E2E_TESTING.md](docs/E2E_TESTING.md) を参照してください。
 
-- `backend`: `python -m pytest -q -p no:cacheprovider` — 99 passed。
-- `backend`: `python ..\scripts\smoke_policy.py` — retention policy smoke checks passed。
-- `backend`: `python -m alembic upgrade head` / `python -m alembic current` — `0014_recording_rules (head)`。
-- `frontend`: `npm run build` — Vue/TypeScript と Vite build が成功。バンドルサイズ警告は残っています。
-- `frontend`: `npm audit --omit=dev` — 0 vulnerabilities。DPlayer 経由の axios を修正版へ override しました。
-- `APP_PORT=8011` 相当で試験専用 PostgreSQL DB を作成し backend を起動。`health`、`api/channels`、`api/videos`、`api/storages`、`api/storages/usage`、`api/quality-presets` はすべて HTTP 200。検証DBは終了後に削除しました。
-- Playwright E2E は実ブラウザーで desktop 1440 / tablet 820 / mobile 390 を実行し、全7タブ、横幅、URL状態・リロード、チャンネル URL入力、主要操作の44px領域、コンソール/HTTPエラーを確認 — 3 projects passed。確認用 DB は一時DBで、終了後に削除しました。
-- `scripts/shot.sh final` は3幅×7タブの21枚を取得し、画像を目視しました。録画監視ワーカー6個も常駐サービスを止めずに直接呼び出して例外が無いことを確認しました。
+## 未実装
 
-Windows サービスは依頼どおり停止・再起動していません。既存の `8000` 番サービスに対する最初の E2E では `/api/videos/count`、`/api/recording-rules`、`/api/settings/summary`、録画モニターの各 API が `404` となりました。現行コードを試験専用 DB・`8011` 番ポートで起動した再確認では全指定 API が `200`、Playwright は3幅すべて成功しました。したがって、既存サービスでは現行 backend API がまだ読み込まれていません。次回の計画されたサービス再起動後に再確認が必要です。本ラウンドで本番DBに適用した migration はなく、試験 DB は削除済みです。
+- 要件の保存パス Template 設定。現行保存先は `{storage}/{channel_id}/{year}/{video_id}` 固定です。
+- 通知機能。
+- 復元可能なゴミ箱。手動削除後のファイル復元機能はありません。
+- 簡易認証。API と画面にログイン認証はありません。
+- 要件で想定する数十〜数百チャンネルの長期運用の実証。
 
-これらの確認は実際の YouTube 配信を使った録画成功保証ではありません。自動テストのモック結果を実機検証として扱っていません。
+## 機能と検証状況（2026-10-04）
 
-### 未検証・未実装（理由）
+この節の「実機で確認済み」は、本書冒頭に記載された同日 macOS / yt-dlp 2026.8.19 / 実 YouTube の実機確認記録だけに基づきます。自動テストの結果は実機での確認とは分けて記載します。
 
-- **faster-whisper 実推論**: 今回モデルのダウンロードと実録画推論は行っていません。モデル取得先・GPU/メモリを含む実機確認待ちです。
-- **OpenRouter 実 API 呼び出し**: 実 API キーによる送信・応答確認はしていません。
-- **HLS 追っかけ再生**: 実配信を使うブラウザー再生を確認していません。
-- **ライブチャット取得**: 実配信での yt-dlp 取得・保存・同期を確認していません。
-- **配信予定のチャンネル横断タイムライン**: 現状は配信予定一覧で、時間軸グリッドは未実装です。
-- **復元可能なゴミ箱**: 未実装。Retention による自動削除とは完全に分離した復元機能が必要です。現行手動削除は復元できません。
-- **通知、GUI ログ閲覧、録画ごとのエラーログ参照**: 未実装。エラー情報は backend ログと録画ディレクトリ親のログファイルで確認します。
-- **変換キューの同時実行数/優先度/進捗/キャンセル GUI**: 変換処理と単一 worker はありますが、要件のキュー操作 UI は未実装です。変換元ファイルは保持します。
-- **シリーズ/連番グルーピング**: 未実装。
-- **簡易認証**: 未実装。現在は認証なしで、LAN/tailnet 内だけを信頼境界とします。
-- **予約状態 `partial` / `conflict` を持つ独立予約モデル**: 録画動画の部分状態は保持しますが、独立した予約状態 enum は未実装です。
-- **DB 内部キー自体の string 化**: 公開 API の ID 表現は文字列へ統一しましたが、PostgreSQL 内部主キーは整数です。DB の主キー型変更は既存データと全テーブルの参照移行が必要なため行っていません。
-- **YouTube 実配信の検出、Remote 編集確認、Retention 削除**: 今回は実データを消さない方針のため、試験動画を用いた破壊的な実動作確認はしていません。削除ポリシーの単体テストと既存 smoke check で確認しています。
+### 実機で確認済み
 
-既知の注意点は、yt-dlp/YouTube の仕様変化による検出・Remote 確認失敗、そして本番配信の E2E が未実施であることです。Remote 確認不能は削除許可にせず保留にします。
+- URL / ID からのチャンネル登録、名前・アイコン取得、登録直後スキャン、ライブ・予定・過去配信の検出。
+- 予定開始時刻の取得と直前の短縮ポーリング。07:00 予定の配信を開始33秒後に録画開始。
+- ライブ2本とアーカイブ1本の同時処理、チャット別プロセス取得、録画中の映像ファイル増加。
+- 自然終了後の完了処理、冒頭欠けの検出、自動アーカイブ補完、35,757秒の全編取得、primary 切替と部分録画フラグ解除。
+- ユーザー停止後の再生可能ファイル保持と自動再開抑止、アプリ再起動後の別区間での録画再開。
+- 過去配信64分の取り込み、チャット replay 6,057件の取り込み、再解析、絵文字キャッシュ表示、再生位置追従。
+- Retention 二段階確認から削除まで（初回確認35秒、猶予後の最終確認28秒、ディレクトリ削除と監査ログ）。
+- 配信先頭からの録画、`.part` 増加、ユーザー停止時の570秒分の再生可能ファイル、開始から12時間超の対象外判定。
+
+### 自動テスト
+
+Round 5b 時点では backend 293件、frontend unit 40件、E2E 45件（3画面幅）が成功しました。Round 8 の最終ローカル実行結果は次のとおりです。
+
+- backend pytest: 296 passed（専用 PostgreSQL URL で2回連続、pgserver 自動起動でも296 passed）
+- frontend format:check: 成功
+- frontend lint: 成功
+- frontend build: 成功
+- frontend test:unit: 40 passed
+- frontend E2E: 45 passed（`YLA_TEST_DATABASE_URL` 無指定と専用 PostgreSQL URL の両方）
+- frontend shots: review 74枚を生成し、歯車メニューを目視確認
+
+### 未検証（理由）
+
+- Windows 実行: Windows 環境を今回使っていないため。CTRL_BREAK による停止、部分録画救出、サービス運用を含みます。
+- 先頭から録画した配信の自然終了までの一連動作: 実機確認はユーザー停止までの範囲です。
+- 追っかけ視聴の ffmpeg tee 実配信: 実配信での動作を確認していません。
+- faster-whisper の実推論: 実モデルで確認していません。
+- OpenRouter 実 API: 外部 API 呼び出しを確認していません。
+- 非公開・削除・編集動画に対する Retention 保護: 実 YouTube での保護動作は未検証です。単体・統合テストのみです。
+- 数十〜数百チャンネルの長期運用: 規模・期間を満たす稼働を確認していません。
+- スーパーチャットを含む実チャット表示: 通常チャット等の確認と分けて、実スーパーチャットを確認していません。

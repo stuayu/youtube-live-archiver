@@ -7,7 +7,7 @@ description: YouTube Live Archiver の変更後に必ず回す検証手順。pyt
 
 コード変更後、これ全部通るまで「できた」と言うな。
 
-## 1. backend テスト
+## 1. Backend pytest（unit / integration）
 
 ```bash
 cd C:/prog/youtube-live-archiver/backend
@@ -15,6 +15,15 @@ python -m pytest -q -p no:cacheprovider
 ```
 
 全件 pass 必須。失敗1件でも次へ進むな。
+
+macOS / Linux:
+
+```bash
+cd /Users/ayumu/prog/youtube-live-archiver/backend
+python -m pytest -q -p no:cacheprovider
+```
+
+`YLA_TEST_DATABASE_URL` が無ければ pgserver を一時ディレクトリで起動し、テスト DB と server を終了時に片付ける。外部 PostgreSQL を使う場合だけ、専用 URL（`postgresql+psycopg://...`）を指定する。接続先に本番・開発用 DB を指定するな。
 
 ## 2. マイグレーション
 
@@ -24,6 +33,8 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
+macOS / Linux は `cd /Users/ayumu/prog/youtube-live-archiver/backend` から同じ `python -m alembic` commands を実行する。
+
 - head に到達必須。
 - 新規DBでの `upgrade head` → `downgrade base` も確認。本番DB `yla` は壊すな。
 - ALTER がハングしたら `pg_stat_activity` で `idle in transaction` を疑え。
@@ -32,20 +43,35 @@ python -m alembic current
 
 ```bash
 cd C:/prog/youtube-live-archiver/frontend
+npm run format:check
+npm run lint
 npm run build
+npm run test:unit
+npm run test:e2e
 ```
 
 **`npx vue-tsc -b` だけでは不十分。** 型チェックは通るのに Vite のテンプレート
 パーサで落ちるケースが実際にあった（未終端文字列 `:'}}`）。必ず `npm run build` まで回す。
 
+macOS / Linux は `cd /Users/ayumu/prog/youtube-live-archiver/frontend` から同じ npm commands を実行する。`test:e2e` は desktop 1440 / tablet 820 / mobile 390 の Playwright project を使う。
+
 ## 4. 全画面キャプチャ
 
 ```bash
 cd C:/prog/youtube-live-archiver
-bash scripts/shot.sh <ラベル>
+bash scripts/shot.sh [latest|review]
 ```
 
-PC 1440 / タブレット 820 / スマホ 390 の3幅 × 全タブを `shots/` に出力。
+macOS / Linux:
+
+```bash
+cd /Users/ayumu/prog/youtube-live-archiver
+bash scripts/shot.sh [latest|review]
+```
+
+同じ workflow は `cd frontend && npm run shots` でも実行できる。出力先は `frontend/shots/latest/` または `frontend/shots/review/`。shots は一時 DB と画面用サービスを起動する。
+
+PC 1440 / タブレット 820 / スマホ 390 の3幅 × 全タブを light / dark で `frontend/shots/latest/` または `frontend/shots/review/` に出力。
 撮ったら**必ず画像を開いて目視**しろ。撮っただけで終わるな。
 
 見る点:
@@ -56,8 +82,9 @@ PC 1440 / タブレット 820 / スマホ 390 の3幅 × 全タブを `shots/` �
 - タブ切替・リロードで状態が飛ばないか
 
 **ヘッドレス Chrome の `--window-size` は Windows のウィンドウ最小幅に
-引きずられる。** 狭い幅は `frame.html` の iframe 経由で撮れ。直接撮ると
-「はみ出している」という誤判定をする（実際に誤報を出した）。
+引きずられる。** これは Chrome を直接起動して撮る場合の注意。旧手順では
+狭い幅を `frame.html` の iframe 経由で撮影し、「はみ出している」という
+誤判定を避けた。現在の `npm run shots` は Playwright viewport を使う。
 
 ## 5. API 生存確認（モック化・壊れ検出）
 
@@ -94,6 +121,18 @@ PGPASSWORD=ylapass "/c/Program Files/PostgreSQL/17/bin/psql.exe" -h localhost -U
 PGPASSWORD=ylapass "/c/Program Files/PostgreSQL/17/bin/psql.exe" -h localhost -U postgres -d yla \
   -c "SELECT status,count(*) FROM videos GROUP BY status;"
 ```
+
+macOS / Linux のログ例:
+
+```bash
+tail -40 /Users/ayumu/prog/youtube-live-archiver/logs/service-stderr.log
+PGPASSWORD='<test-db-password>' psql -h localhost -U '<test-db-user>' -d '<test-db-name>' \
+  -c "SELECT id,name,enabled,next_check_at FROM channels;"
+PGPASSWORD='<test-db-password>' psql -h localhost -U '<test-db-user>' -d '<test-db-name>' \
+  -c "SELECT status,count(*) FROM videos GROUP BY status;"
+```
+
+PostgreSQL の `psql` と DB 名は各自の隔離した検証環境に合わせる。上記 Windows の `yla` は既存環境例であり、別環境の確認に流用しない。
 
 - `next_check_at` が止まっていたら監視が死んでいる。
 - ワーカーを直接叩いて例外を見る:
