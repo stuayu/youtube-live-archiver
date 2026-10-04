@@ -55,6 +55,15 @@ const emptyChat: ChatPage = {
   available_total: 0,
   chat_enabled: true,
   chat_replay: 'available',
+  replay: {
+    state: 'unavailable',
+    checked_at: null,
+    next_attempt_at: null,
+    attempts: 0,
+    error: null,
+    covered_from_ms: null,
+    covered_to_ms: null,
+  },
   superchat_totals: {},
   unknown_amounts: {},
 }
@@ -85,6 +94,48 @@ function renderChat(messages: ChatMessage[], following = true) {
 }
 
 describe('PlayerPanels chat rendering', () => {
+  it('explains missing replay, shows covered range, disables retrieval while queued, and seeks to coverage', async () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'chat',
+        video,
+        chat: {
+          ...emptyChat,
+          replay: {
+            state: 'queued',
+            checked_at: null,
+            next_attempt_at: null,
+            attempts: 0,
+            error: null,
+            covered_from_ms: 31300000,
+            covered_to_ms: 35750000,
+          },
+        },
+        transcript,
+        timeline: [],
+        summary: null,
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: false,
+        transcriptQuery: '',
+        playbackSeconds: 0,
+        following: true,
+      },
+    })
+    expect(wrapper.text()).toContain('この時刻のコメントは未取得です')
+    expect(wrapper.text()).toContain('8:41:40 〜 9:55:50')
+    expect(wrapper.get('.replay-empty button').text()).toBe('取得済みの位置へ移動')
+    const buttons = wrapper.findAll('.replay-empty button')
+    expect((buttons[1]!.element as HTMLButtonElement).disabled).toBe(true)
+    expect(buttons[1]!.text()).toBe('取得中…')
+    await buttons[0]!.trigger('click')
+    expect(wrapper.emitted('seekCovered')).toEqual([[31300]])
+  })
   it('renders text, standard emoji, cached emotes, and falls back to the shortcode on image error', async () => {
     const wrapper = renderChat([
       {

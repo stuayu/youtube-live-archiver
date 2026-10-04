@@ -138,14 +138,39 @@ export async function startE2E() {
         ]
       }),
     )
+    const fakeVideos = {
+      manup000001: {
+        id: 'manup000001',
+        channel_id: 'UCmanual' + 'a'.repeat(16),
+        channel: 'E2E 手動追加チャンネル',
+        title: 'E2E manual upcoming',
+        live_status: 'is_upcoming',
+        release_timestamp: Math.floor(Date.now() / 1000) + 7200,
+      },
+      manliv00001: {
+        id: 'manliv00001',
+        channel_id: 'UCmanual' + 'a'.repeat(16),
+        channel: 'E2E 手動追加チャンネル',
+        title: 'E2E manual live',
+        live_status: 'is_live',
+      },
+      manarc00001: {
+        id: 'manarc00001',
+        channel_id: 'UCmanual' + 'a'.repeat(16),
+        channel: 'E2E 手動追加チャンネル',
+        title: 'E2E manual archive',
+        live_status: 'was_live',
+      },
+    }
     await import('node:fs/promises').then((fs) =>
-      fs.writeFile(fakeState, JSON.stringify({ channels: fakeChannels, videos: {} })),
+      fs.writeFile(fakeState, JSON.stringify({ channels: fakeChannels, videos: fakeVideos })),
     )
     const env = {
       ...process.env,
       DATABASE_URL: databaseUrl,
       STORAGE_ROOT: storageRoot,
       DATA_DIR: dataDir,
+      REMOTE_IMAGE_FETCH_ENABLED: 'false',
       YT_DLP_PATH: join(backendDir, 'tests', 'fakes', 'fake_ytdlp.py'),
       FAKE_YTDLP_STATE: fakeState,
       SCHEDULER_ENABLED: 'false',

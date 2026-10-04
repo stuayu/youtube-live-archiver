@@ -74,7 +74,7 @@ let focusBefore: HTMLElement | null = null
 let metadataTimer = 0
 let prepareSequence = 0
 let backgroundSequence = 0
-async function loadChat() {
+async function loadChat(atSeconds = playbackSeconds.value) {
   const p = new URLSearchParams({
     offset: String((chatQuery.value || chatKind.value ? chatPage.value : 0) * 200),
     limit: chatQuery.value || chatKind.value ? '200' : '300',
@@ -83,7 +83,7 @@ async function loadChat() {
   if (chatQuery.value) p.set('q', chatQuery.value)
   if (chatKind.value) p.set('kind', chatKind.value)
   if (!chatQuery.value && !chatKind.value) {
-    const range = chatReplayRange(playbackSeconds.value)
+    const range = chatReplayRange(atSeconds)
     p.set('after_ms', String(range.afterMs))
     p.set('before_ms', String(range.beforeMs))
   }
@@ -166,10 +166,13 @@ watch(
 )
 watch(danmakuOn, (enabled) => playerSettings?.setDanmakuEnabled(enabled))
 function seek(seconds: number) {
+  playbackSeconds.value = Math.max(0, seconds)
+  if (followingChat.value && !chatQuery.value && !chatKind.value) void loadChat(seconds)
   const el = videoEl.value
   if (!el) return
   const setTime = () => {
     el.currentTime = Math.max(0, seconds)
+    playbackSeconds.value = Math.max(0, seconds)
     void el.play().catch(() => {})
   }
   if (el.readyState >= 1) setTime()
@@ -317,7 +320,12 @@ async function makePlayer(renditionName?: PlaybackRendition['name'], startTime =
   playbackTimer = window.setInterval(() => {
     update()
     if (props.live && liveFollow.value && delay.value !== null && delay.value > 3) followLive()
-    if (followingChat.value && !chatQuery.value && !chatKind.value) void loadChat()
+    if (
+      (followingChat.value || ['queued', 'running'].includes(chat.value.replay?.state || '')) &&
+      !chatQuery.value &&
+      !chatKind.value
+    )
+      void loadChat()
   }, 2000)
   if (props.live) {
     monitorTimer = window.setInterval(async () => {
@@ -450,7 +458,7 @@ async function retrieveChat() {
   busy.value = true
   try {
     await request(`/videos/${props.video.id}/chat/retrieve`, { method: 'POST', body: '{}' })
-    await loadChat()
+    void loadChat()
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'チャットを取得できません'
   } finally {
@@ -706,6 +714,7 @@ onBeforeUnmount(() => {
           :conversion-note="conversionNote"
           @search-chat="searchChat"
           @retrieve-chat="retrieveChat"
+          @seek-covered="seek"
           @reparse-chat="reparseChat"
           @next-chat-page="nextChatPage"
           @previous-chat-page="previousChatPage"

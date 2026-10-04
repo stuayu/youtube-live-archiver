@@ -60,8 +60,69 @@ def test_first_tick_scans_immediately_and_backfill_limit(fake_youtube):
     assert [rows[key].status for key in ("old-a", "old-b", "old-c")] == ["DISCOVERED", "DISCOVERED", "SKIPPED"]
     assert read_channel(pk).baseline_completed_at is not None
     assert read_channel(pk).next_check_at > now()
-    assert len(fake_youtube.calls()) == 1
+    assert len(fake_youtube.calls()) == 2
     assert fake_youtube.calls()[0]["argv"][-1] == f"https://www.youtube.com/channel/{channel_id}/streams"
+    assert fake_youtube.calls()[1]["argv"][-1] == "https://www.youtube.com/watch?v=old-c"
+    assert rows["old-c"].raw_metadata["start_probe_attempted"] is True
+
+
+
+def test_multiple_schedules_use_shortest_interval():
+    now_at = now()
+    long = now_at + timedelta(hours=8)
+    soon = now_at + timedelta(minutes=4)
+    assert monitor.calculate_next_interval("AUTO", [long, soon], now_at) == (20, 40)
+
+
+def test_activity_profile_selects_only_release_timestamp_column():
+    from sqlalchemy import event
+    from app.services.monitor import _activity_profile
+
+    channel_id = add_channel("UCabcdefghijabcdefghij34")
+    statements = []
+    with SessionLocal() as db:
+        event.listen(db.bind, "before_cursor_execute", lambda _conn, _cursor, stmt, _params, _ctx, _many: statements.append(stmt))
+        _activity_profile(db, channel_id, now())
+    query = next(stmt for stmt in statements if "FROM videos" in stmt and "to_timestamp" in stmt)
+    selected = query.split("FROM videos")[0].lower()
+    assert "->>" in selected
+    assert "select videos.raw_metadata" not in selected
+
+
+def test_learned_activity_sets_short_hot_and_long_cold_checks():
+    from app.services.monitor import _activity_profile, _schedule_next
+
+    channel_id = add_channel("UCabcdefghijabcdefghij33")
+    with SessionLocal() as db:
+        channel = db.get(Channel, channel_id)
+        current = now()
+        for index in range(8):
+            started = (current - timedelta(days=index + 1)).replace(hour=21, minute=10, second=0, microsecond=0)
+            db.add(Video(youtube_video_id=f"profile{index:05d}", channel_id=channel_id, title="history",
+                         status="ACTIVE", raw_metadata={"release_timestamp": started.timestamp()}))
+        db.add(Video(youtube_video_id="future000001", channel_id=channel_id, title="future", status="WAITING_LIVE",
+                     scheduled_start_at=current + timedelta(days=2),
+                     raw_metadata={"release_timestamp": (current + timedelta(days=2)).timestamp()}))
+        db.add(Video(youtube_video_id="cancelled01", channel_id=channel_id, title="cancelled", status="CANCELLED",
+                     raw_metadata={"release_timestamp": current.timestamp()}))
+        db.add(Video(youtube_video_id="oldstream01", channel_id=channel_id, title="old", status="ACTIVE",
+                     raw_metadata={"release_timestamp": (current - timedelta(days=120)).timestamp()}))
+        db.commit()
+        assert _activity_profile(db, channel_id, current).samples == 8
+        assert _activity_profile(db, channel_id, current).mode == "insufficient"
+        for index in range(8, 12):
+            started = (current - timedelta(days=index + 1)).replace(hour=21, minute=10, second=0, microsecond=0)
+            db.add(Video(youtube_video_id=f"profile{index:05d}", channel_id=channel_id, title="history",
+                         status="ACTIVE", raw_metadata={"release_timestamp": started.timestamp()}))
+        db.flush()
+        hot = current.replace(hour=21, minute=0, second=0, microsecond=0)
+        _schedule_next(channel, db, hot, [])
+        hot_delay = (channel.next_check_at - hot).total_seconds()
+        assert 900 <= hot_delay <= 1800
+        cold = current.replace(hour=9, minute=0, second=0, microsecond=0)
+        _schedule_next(channel, db, cold, [])
+        cold_delay = (channel.next_check_at - cold).total_seconds()
+        assert 7200 <= cold_delay <= 14400
 
 
 def test_backfill_zero_skips_all_past_lives(fake_youtube):

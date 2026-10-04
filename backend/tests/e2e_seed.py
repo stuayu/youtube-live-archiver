@@ -1,16 +1,36 @@
 """Seed the scratch dev DB with representative rows for UI review (no YouTube access)."""
 import os
+import json
 import shutil
 import subprocess
 import sys
+import struct
+import zlib
 from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.db import SessionLocal  # noqa: E402
-from app.models import (AuditLog, Channel, ChannelStat, ChatMessage, RecordingRule, Storage, TranscriptSegment,  # noqa: E402
+from app.models import (AuditLog, Channel, ChannelStat, ChatMessage, ProcessingJob, RecordingRule, Storage, TranscriptSegment,  # noqa: E402
                         Video, now)
 from app.services.chat import ingest_records  # noqa: E402
+
+
+def review_thumbnail_png() -> bytes:
+    width, height = 160, 90
+    rows = []
+    for y in range(height):
+        pixels = bytearray()
+        for x in range(width):
+            pixels.extend((22, 126 + x // 8, 168 + y // 4))
+        rows.append(b"\x00" + pixels)
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        body = kind + payload
+        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">2I5B", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows))) + chunk(b"IEND", b""))
 
 root = Path(os.environ["STORAGE_ROOT"])
 for pattern in ("*.playable.mp4", "*.h264.mp4", "*.tmp.mp4"):
@@ -160,6 +180,14 @@ for i, (vid, title, status, ext, extra) in enumerate(rows):
             ingest_records(db, v.id, [record], complete_snapshot=False)
             if n == 4:
                 db.query(ChatMessage).filter_by(video_id=v.id, message_id=f"m{n}").one().is_deleted = True
+    if i == 1:
+        v.raw_metadata = {"recording_start_offset_ms": 0, "chat_replay": "unavailable",
+                          "chat_replay_error": "YouTube 側でリプレイがまだ用意されていません"}
+        for n, offset in enumerate((6000, 8000)):
+            db.add(ChatMessage(video_id=v.id, message_id=f"late-only-{n}", offset_ms=offset,
+                author_name="後半コメント", message_text=f"後半だけのコメント {n}", message_type="normal"))
+        db.add(ProcessingJob(video_id=v.id, kind="CHAT_REPLAY", status="failed", attempts=10,
+            payload={}, error="failed", finished_at=now()))
 if av1_target:
     av1_path = av1_target / "video.mkv"
     db.add(Video(
@@ -207,13 +235,22 @@ db.add(ChatMessage(video_id=legacy_video.id, message_id="legacy-emote", offset_m
                    author_name="旧形式の投稿者", author_badges=["Member (1 year)"],
                    message_text="旧形式の絵文字 :_legacy:", message_runs=[], message_type="normal",
                    raw={"record": old_record, "renderer": old_record["liveChatTextMessageRenderer"]}))
-upcoming = [("up000000001", "【重大告知】明日の記念配信", now() + timedelta(hours=3), {}),
+upcoming = [("up000000001", "【重大告知】明日の記念配信", now() + timedelta(hours=3),
+             {"thumbnail_url": "https://i.ytimg.com/vi/up000000001/hq720.jpg"}),
             ("up000000002", "時刻未定の待機枠 / フリーチャット", None, {}),
             ("up000000003", "録画しない設定の配信", now() + timedelta(days=1), {"schedule_enabled": False}),
             ("up000000004", "開始時刻を過ぎた待機枠", now() - timedelta(hours=5), {})]
 for vid, title, when, meta in upcoming:
-    db.add(Video(youtube_video_id=vid, channel_id=channels[1].id, title=title, status="WAITING_LIVE", scheduled_start_at=when,
-                 raw_metadata={"live_status": "is_upcoming", **meta}, retention_days=30))
+    video = Video(youtube_video_id=vid, channel_id=channels[1].id, title=title, status="WAITING_LIVE", scheduled_start_at=when,
+                 raw_metadata={"live_status": "is_upcoming", **meta}, retention_days=30)
+    if meta.get("thumbnail_url"):
+        video.thumbnail_url = meta["thumbnail_url"]
+        cache = Path(os.environ["DATA_DIR"]) / "thumbnails"
+        cache.mkdir(parents=True, exist_ok=True)
+        # A small visible PNG used only by this isolated E2E database.
+        from app.services.chat_assets import asset_key
+        (cache / f"{asset_key(video.thumbnail_url)}.png").write_bytes(review_thumbnail_png())
+    db.add(video)
 # Add enough playable archive rows to exercise pagination without repeated media encoding.
 source_target = root / channels[0].youtube_channel_id / "2026" / "vid00000001"
 source_media = source_target / "video.mp4"
@@ -259,5 +296,13 @@ for n in range(3):
 db.add(RecordingRule(name="歌枠だけ録画", pattern="歌枠|singing", match_mode="regex", channel_id=channels[0].id, priority=10))
 db.add(RecordingRule(name="メンバー限定を除外", pattern="メンバー限定", is_exclusion=True, priority=5))
 db.commit()
+# Deterministic replay for fake yt-dlp, without contacting YouTube.
+fake_state = Path(os.environ["FAKE_YTDLP_STATE"])
+fake_data = json.loads(fake_state.read_text(encoding="utf-8")) if fake_state.exists() else {}
+fake_data.setdefault("videos", {})["vid00000002"] = {"chat_replay": [{
+    "liveChatTextMessageRenderer": {"id": "seed-replay", "videoOffsetTimeMsec": 1000,
+    "authorName": {"simpleText": "Fake replay"}, "message": {"runs": [{"text": "先頭のコメント"}]}}
+}]}
+fake_state.write_text(json.dumps(fake_data, ensure_ascii=False), encoding="utf-8")
 print("seeded", db.query(Video).count(), "videos", db.query(Channel).count(), "channels")
 db.close()

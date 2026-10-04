@@ -16,6 +16,7 @@ import Icon from './components/ui/Icon.vue'
 import ConfirmDialog from './components/ui/ConfirmDialog.vue'
 import Toasts from './components/ui/Toasts.vue'
 import PlayerDialog from './components/PlayerDialog.vue'
+import ManualVideoDialog from './components/ManualVideoDialog.vue'
 import { useWorkspace } from './composables/useWorkspace'
 import { workspaceKey } from './composables/workspaceContext'
 import type { Tab } from './composables/useQueryState'
@@ -38,6 +39,13 @@ const views: Record<Tab, Component> = {
   settings: SettingsView,
 }
 const activeView = computed(() => views[ctx.tab])
+function onManualVideoAdded(target: 'upcoming' | 'videos') {
+  ctx.manualVideoOpen = false
+  if (target === 'videos') ctx.goToArchive()
+  else ctx.setTab('upcoming')
+  ctx.push(target === 'upcoming' ? '配信予定に追加しました' : 'アーカイブに追加しました')
+  void ctx.load()
+}
 function selectMoreTab(id: Tab) {
   ctx.setTab(id)
   moreMenuOpen.value = false
@@ -129,6 +137,12 @@ function playerFinished(latest: Video) {
       :channel="ctx.editingChannel"
       @close="ctx.editingChannel = undefined"
       @saved="ctx.saveChannel"
+    />
+    <ManualVideoDialog
+      v-if="ctx.manualVideoOpen"
+      :storages="ctx.storages"
+      @close="ctx.manualVideoOpen = false"
+      @added="onManualVideoAdded"
     />
     <PlayerDialog
       v-if="ctx.playerVideo"

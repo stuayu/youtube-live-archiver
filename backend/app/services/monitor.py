@@ -5,13 +5,15 @@ import logging
 import random
 import threading
 
-from sqlalchemy import select
+from sqlalchemy import select, func, cast, Float
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import SessionLocal
 from ..models import AuditLog, Channel, Video, now
 from .channel_stats import record_snapshot
+from .activity_profile import Profile, build_profile
 from .locks import channel_lock, default_locks
 from .youtube import channel_scan, classify_ytdlp_error, inspect
 
@@ -63,11 +65,14 @@ def _scheduled_entry(entry: dict) -> datetime | None:
     return _timestamp(entry.get("release_timestamp") or entry.get("scheduled_start_time") or entry.get("timestamp"))
 
 
-def calculate_next_interval(poll_interval: str | None, scheduled_times: list[datetime | None], current: datetime) -> tuple[float, float]:
-    """Return jitter bounds in seconds, using the nearest eligible schedule."""
+def calculate_next_interval(poll_interval: str | None, scheduled_times: list[datetime | None], current: datetime,
+                            profile: Profile | None = None) -> tuple[float, float]:
+    """Return lower and upper polling delay bounds in seconds."""
     raw_poll = (poll_interval or "AUTO").strip().upper()
     if raw_poll == "AUTO":
-        normal_low, normal_high = 1800.0, 3600.0
+        profile = profile or build_profile([])
+        normal_low, normal_high = {"hot": (900.0, 1800.0), "warm": (1800.0, 3600.0),
+                                   "cold": (7200.0, 14400.0), "normal": (1800.0, 3600.0)}[profile.level_at(current)]
         numeric_poll = False
     else:
         try:
@@ -79,30 +84,53 @@ def calculate_next_interval(poll_interval: str | None, scheduled_times: list[dat
         normal_low = normal_high = float(minutes * 60)
         numeric_poll = True
     normal_jitter = (normal_low, normal_high) if normal_low != normal_high else (normal_low * .9, normal_high * 1.1)
-    if not scheduled_times:
-        return normal_jitter
-    candidates = [value for value in scheduled_times if value is not None]
-    if not candidates:
-        interval = (300.0, 600.0)
-        if numeric_poll:
-            interval = (min(interval[0], normal_low), min(interval[1], normal_low))
-        return interval
-    intervals = []
-    for scheduled in candidates:
-        delta = (scheduled - current).total_seconds()
-        if -1800 <= delta <= 300:
-            intervals.append((15.0, 30.0))
-        elif 300 < delta <= 1800:
-            intervals.append((60.0, 180.0))
-        elif 1800 < delta <= 86400 or -21600 <= delta < -1800:
-            intervals.append((300.0, 600.0))
+    interval = normal_jitter
+    if raw_poll == "AUTO" and profile is not None and profile.level_at(current) != "hot":
+        next_hot = profile.next_hot_start(current)
+        if next_hot:
+            cap = max(60.0, (next_hot - current).total_seconds() + 600.0)
+            interval = (min(interval[0], cap), min(interval[1], cap))
+    eligible = scheduled_times
+    if eligible:
+        candidates = [value for value in eligible if value is not None]
+        if not candidates:
+            scheduled_interval = (600.0, 1200.0)
+            interval = (min(interval[0], scheduled_interval[0]), min(interval[1], scheduled_interval[1]))
         else:
-            intervals.append((300.0, 600.0) if len(candidates) < len(scheduled_times) else normal_jitter)
-    interval = min(intervals, key=lambda bounds: bounds[0])
-    if numeric_poll:
-        cap = normal_low
-        interval = (min(interval[0], cap), min(interval[1], cap))
+            for scheduled in candidates:
+                delta = (scheduled - current).total_seconds()
+                if delta > 1800:
+                    cap = max(60.0, delta - 1800.0)
+                    scheduled_interval = (min(interval[0], cap), min(interval[1], cap))
+                elif delta > 300:
+                    scheduled_interval = (120.0, 240.0)
+                elif delta > -600:
+                    scheduled_interval = (20.0, 40.0)
+                elif delta > -3600:
+                    scheduled_interval = (60.0, 120.0)
+                elif delta > -21600:
+                    scheduled_interval = (300.0, 600.0)
+                else:
+                    scheduled_interval = interval
+                interval = (min(interval[0], scheduled_interval[0]), min(interval[1], scheduled_interval[1]))
+            if any(value is None for value in eligible):
+                interval = (min(interval[0], 600.0), min(interval[1], 1200.0))
     return interval
+
+
+def _activity_profile(db: Session, channel_id: int, at: datetime) -> Profile:
+    cutoff = at - timedelta(days=90)
+    release_value = cast(Video.raw_metadata, JSONB)["release_timestamp"].as_string()
+    release_time = func.to_timestamp(cast(release_value, Float))
+    rows = db.execute(select(release_time).where(Video.channel_id == channel_id,
+        Video.status != "CANCELLED", release_value.is_not(None), release_time >= cutoff,
+        release_time <= at)).all()
+    starts = [row[0].replace(tzinfo=timezone.utc) if row[0].tzinfo is None
+              else row[0].astimezone(timezone.utc) for row in rows if row[0] is not None]
+    profile = build_profile(starts)
+    if len(starts) < 12:
+        return Profile(len(starts), "insufficient", ("normal",) * 168)
+    return profile
 
 
 def _schedule_next(ch: Channel, db: Session, at: datetime, entries: list[dict]) -> None:
@@ -113,7 +141,8 @@ def _schedule_next(ch: Channel, db: Session, at: datetime, entries: list[dict]) 
         if metadata.get("schedule_enabled") is False:
             continue
         schedules.append(row.scheduled_start_at)
-    low, high = calculate_next_interval(ch.poll_interval, schedules, at)
+    profile = _activity_profile(db, ch.id, at) if (ch.poll_interval or "AUTO").upper() == "AUTO" else None
+    low, high = calculate_next_interval(ch.poll_interval, schedules, at, profile)
     ch.next_check_at = at + timedelta(seconds=random.uniform(low, high))
 
 
@@ -161,6 +190,8 @@ def _handle_scan(db: Session, ch: Channel, entries: list[dict], channel_data: di
         result = _inspect(video_id, ch.cookie_profile)
         inspect_results[video_id] = result
         return result
+
+    auto_poll = (ch.poll_interval or "AUTO").upper() == "AUTO"
 
     # Inspect nearest scheduled entries first; list entries intentionally lack schedule timestamps.
     for entry in upcoming:
@@ -274,6 +305,31 @@ def _handle_scan(db: Session, ch: Channel, entries: list[dict], channel_data: di
             continue
         video.raw_metadata = {**(video.raw_metadata or {}), "schedule_inspected_at": at.isoformat()}
 
+    # Flat channel lists omit start times, so gradually inspect older recordings.
+    if auto_poll and inspect_used < inspect_budget and not _cooldown_active(at):
+        profile = _activity_profile(db, ch.id, at)
+        if profile.samples < 12:
+            probe = db.scalar(select(Video).where(
+                Video.channel_id == ch.id, Video.status != "CANCELLED",
+                Video.scheduled_start_at.is_(None), Video.recorded_at.is_(None),
+                Video.raw_metadata["release_timestamp"].as_string().is_(None),
+                Video.raw_metadata["start_probe_attempted"].as_string().is_(None),
+            ).order_by(Video.id.desc()).limit(1))
+            if probe:
+                data, kind = inspect_once(probe.youtube_video_id)
+                if kind == "RATE_LIMITED":
+                    _apply_rate_limit(at)
+                elif data is not None:
+                    release = _timestamp(data.get("release_timestamp"))
+                    metadata = {**(probe.raw_metadata or {}), "start_probe_attempted": True}
+                    if release is not None:
+                        metadata["release_timestamp"] = data.get("release_timestamp")
+                        if data.get("duration") is not None:
+                            probe.original_duration = data.get("duration")
+                    probe.raw_metadata = metadata
+                else:
+                    probe.raw_metadata = {**(probe.raw_metadata or {}), "start_probe_attempted": True}
+
     if baseline:
         ch.baseline_completed_at = at
     for attr, keys in (("subscriber_count", ("channel_follower_count", "subscriber_count")),
@@ -353,7 +409,8 @@ def _scan_one(channel_pk: int) -> None:
                     ch.last_error = None
                     ch.consecutive_failures = 0
                     ch.baseline_completed_at = ch.baseline_completed_at or at
-                    low, high = calculate_next_interval(ch.poll_interval, [], at)
+                    profile = _activity_profile(db, ch.id, at) if (ch.poll_interval or "AUTO").upper() == "AUTO" else None
+                    low, high = calculate_next_interval(ch.poll_interval, [], at, profile)
                     ch.next_check_at = at + timedelta(seconds=random.uniform(low, high))
                     if recovered:
                         db.add(AuditLog(channel_id=ch.id, action="MONITOR_RECOVERED", reason="SCAN_SUCCEEDED"))

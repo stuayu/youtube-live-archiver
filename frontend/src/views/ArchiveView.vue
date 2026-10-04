@@ -39,6 +39,7 @@ function hasFilter(key: QueryKey) {
         <h1>アーカイブ</h1>
         <p>{{ ctx.total }} 件の動画 · {{ ctx.scopeDeleted ? '削除済みの履歴' : '保存中の録画' }}</p>
       </div>
+      <button class="button" @click="ctx.manualVideoOpen = true">URL から追加</button>
       <div class="segmented">
         <button :class="{ active: !ctx.scopeDeleted }" @click="ctx.setArchiveScope(false)">録画</button>
         <button :class="{ active: ctx.scopeDeleted }" @click="ctx.setArchiveScope(true)">
@@ -217,6 +218,7 @@ function hasFilter(key: QueryKey) {
           <div class="archive-meta-line">
             <div class="item-title archive-title">{{ video.title }}</div>
             <span class="muted">{{ video.channel_name }} · {{ ctx.formatDate(video.recorded_at) }}</span>
+            <span v-if="video.manual" class="badge info">手動追加</span>
             <div class="badge-row">
               <span
                 v-for="badge in ctx.videoBadges(video)"

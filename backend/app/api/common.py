@@ -9,7 +9,7 @@ from urllib.request import urlopen
 from ..config import settings
 from sqlalchemy.orm import Session, object_session
 from ..db import get_db
-from ..models import Channel, ChannelStat, Storage, Video, AuditLog, ChatMessage, TranscriptSegment, AppSetting, RecordingRule, now
+from ..models import Channel, ChannelStat, Storage, Video, AuditLog, ChatMessage, TranscriptSegment, AppSetting, RecordingRule, ProcessingJob, now
 from ..schemas import (ChannelIn, ChannelOut, StorageIn, StorageOut, VideoOut, RecordingRuleIn, RecordingRuleOut,
                       ChannelCreate, ChannelPatch, ChannelPreviewIn, TranscriptionSettingsIn, SummarySettingsIn, StoragePatch)
 from ..services.youtube import resolve_channel, channel_metadata
@@ -126,10 +126,15 @@ def _video_query(status: str | None, channel_id: int | None, q: str | None,
     query = select(Video)
     if scope == "upcoming":
         query = query.where(or_(Video.status.in_(("WAITING_LIVE", "RECORDING")),
-                                (Video.status == "DISCOVERED") & (Video.raw_metadata["live_status"].as_string() == "is_live")))
+                                (Video.status == "DISCOVERED")
+                                & (Video.raw_metadata["live_status"].as_string().in_(("is_live", "is_upcoming")))
+                                & Video.raw_metadata["manual"].as_boolean().is_not(True)))
     elif scope == "deleted": query = query.where(Video.status.in_(("DELETED_BY_RETENTION", "DELETED_MANUALLY")))
     elif scope == "archive":
-        query = query.where(Video.file_path.is_not(None), Video.status.not_in(("WAITING_LIVE", "DISCOVERED", "SKIPPED", "CANCELLED", "DELETED_BY_RETENTION", "DELETED_MANUALLY")))
+        query = query.where(
+            or_(Video.file_path.is_not(None),
+                (Video.status == "DISCOVERED") & (Video.raw_metadata["manual"].as_string() == "true"))
+        )
     if channel_id is not None: query = query.where(Video.channel_id == channel_id)
     if status:
         if status == "PROTECTED": query = query.where(Video.protected.is_(True))

@@ -8,6 +8,13 @@ const props = defineProps<{
   video: Video
   deleted?: boolean
 }>()
+const fallbackThumbnail = (event: Event) => {
+  const image = event.target as HTMLImageElement
+  if (!image.dataset.fallback) {
+    image.dataset.fallback = 'true'
+    image.src = '/icon.svg'
+  }
+}
 const emit = defineEmits<{
   play: [video: Video]
   stop: [video: Video]
@@ -28,6 +35,7 @@ const menuActions = (video: Video) => ({
       decoding="async"
       :src="video.has_thumbnail ? `/api/videos/${video.id}/thumbnail` : '/icon.svg'"
       :alt="video.title"
+      @error="fallbackThumbnail"
     />
     <div class="item-main">
       <div class="item-title">{{ video.title }}</div>

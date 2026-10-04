@@ -244,6 +244,12 @@ export function installDPlayerSettings(options: DPlayerSettingsOptions): DPlayer
     const inner = item.querySelector<HTMLElement>('.dplayer-danmaku-bar-inner')!
     const currentLabel = item.querySelector<HTMLElement>('.yla-setting-current-value')!
     let current = Math.max(min, Math.min(max, initial))
+    wrap.setAttribute('role', 'slider')
+    wrap.setAttribute(
+      'aria-label',
+      item.querySelector<HTMLElement>('.dplayer-label')?.textContent?.trim() ?? '',
+    )
+    wrap.tabIndex = 0
     const updateValue = (value: number) => {
       current = value
       inner.style.width = `${((value - min) / (max - min)) * 100}%`
@@ -263,16 +269,37 @@ export function installDPlayerSettings(options: DPlayerSettingsOptions): DPlayer
       )
       updateValue(value)
     }
-    listen(wrap, 'pointerdown', update)
-    listen(wrap, 'pointermove', (event) => {
-      if ((event as PointerEvent).buttons > 0) update(event)
+    let pointerId: number | null = null
+    listen(wrap, 'pointerdown', (event) => {
+      const pointer = event as PointerEvent
+      if (pointer.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      pointerId = pointer.pointerId
+      if (wrap.setPointerCapture) wrap.setPointerCapture(pointer.pointerId)
+      update(event)
     })
+    listen(wrap, 'pointermove', (event) => {
+      if ((event as PointerEvent).pointerId === pointerId) update(event)
+    })
+    const release = (event: Event) => {
+      const pointer = event as PointerEvent
+      if (pointer.pointerId !== pointerId) return
+      pointerId = null
+      if (wrap.hasPointerCapture?.(pointer.pointerId)) wrap.releasePointerCapture(pointer.pointerId)
+    }
+    listen(wrap, 'pointerup', release)
+    listen(wrap, 'pointercancel', release)
+    listen(wrap, 'click', (event) => event.stopPropagation())
     listen(wrap, 'keydown', (event) => {
       const key = (event as KeyboardEvent).key
       if (key === 'ArrowLeft' || key === 'ArrowRight') {
         event.preventDefault()
         const step = key === 'ArrowRight' ? 1 : -1
         updateValue(Math.max(min, Math.min(max, current + step)))
+      } else if (key === 'Home' || key === 'End') {
+        event.preventDefault()
+        updateValue(key === 'Home' ? min : max)
       }
     })
   }
@@ -317,8 +344,6 @@ export function installDPlayerSettings(options: DPlayerSettingsOptions): DPlayer
 
   const opacityItem = root.querySelector<HTMLElement>('.dplayer-setting-danmaku')
   opacityItem?.classList.add('dplayer-setting-danmaku-active')
-  const opacityInner = opacityItem?.querySelector<HTMLElement>('.dplayer-danmaku-bar-inner')
-  if (opacityInner) opacityInner.style.width = `${preferences.opacity * 100}%`
   opacityItem?.classList.add('yla-setting-range-item')
   const opacityLabel = opacityItem?.querySelector<HTMLElement>('.dplayer-label')
   let opacityValue: HTMLElement | null = null
@@ -328,13 +353,33 @@ export function installDPlayerSettings(options: DPlayerSettingsOptions): DPlayer
     opacityValue.textContent = `${Math.round(preferences.opacity * 100)}%`
     opacityItem.insertBefore(opacityValue, opacityItem.querySelector('.dplayer-danmaku-bar-wrap'))
   }
+  const originalOpacityBar = opacityItem?.querySelector<HTMLElement>('.dplayer-danmaku-bar-wrap')
+  const opacityBar = originalOpacityBar?.cloneNode(true) as HTMLElement | undefined
+  if (originalOpacityBar && opacityBar instanceof HTMLElement) originalOpacityBar.replaceWith(opacityBar)
+  const opacitySliderItem = opacityItem
+  if (opacitySliderItem && opacityValue) {
+    const opacityRangeItem = opacitySliderItem
+    range(
+      opacityRangeItem,
+      0,
+      100,
+      Math.round(preferences.opacity * 100),
+      (value) => `${value}%`,
+      (value) => {
+        preferences.opacity = value / 100
+        player.danmaku.opacity(preferences.opacity)
+        root.style.setProperty('--danmaku-opacity', String(preferences.opacity))
+        save()
+      },
+    )
+  }
   player.danmaku.opacity(preferences.opacity)
   player.on('danmaku_opacity', (value) => {
     if (typeof value === 'number') {
       preferences.opacity = value
       root.style.setProperty('--danmaku-opacity', String(value))
-      if (opacityInner) opacityInner.style.width = `${value * 100}%`
       if (opacityValue) opacityValue.textContent = `${Math.round(value * 100)}%`
+      opacityBar?.setAttribute('aria-valuenow', `${Math.round(value * 100)}`)
       save()
     }
   })

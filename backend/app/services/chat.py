@@ -3,12 +3,15 @@
 import json
 import re
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, exists, and_, or_, text
 
-from ..models import ChatMessage, ProcessingJob, Video, now
+from ..db import SessionLocal
+from ..models import ChatMessage, Channel, ProcessingJob, Video, now
+from .locks import default_locks
 
 RENDERER_TYPES = {
     "liveChatTextMessageRenderer": "normal",
@@ -478,7 +481,8 @@ def rebase_live_chat_offsets(db, video_id: int) -> int:
     return changed
 
 
-def enqueue_replay_retry(db, video_id: int) -> ProcessingJob | None:
+def enqueue_replay_retry(db, video_id: int, *, immediate: bool = False,
+                         restart: bool = False) -> ProcessingJob | None:
     from datetime import timedelta
     video = db.get(Video, video_id)
     if not video or (video.raw_metadata or {}).get("chat_replay") == "imported":
@@ -486,17 +490,88 @@ def enqueue_replay_retry(db, video_id: int) -> ProcessingJob | None:
     job = db.scalar(select(ProcessingJob).where(
         ProcessingJob.video_id == video_id, ProcessingJob.kind == "CHAT_REPLAY"))
     if job:
+        if restart and job.status != "processing":
+            job.status, job.attempts, job.error = "retry_wait", 0, None
+            job.next_attempt_at, job.finished_at = now(), None
+            job.payload = {**(job.payload or {}), "manual_queue": True}
+            db.commit()
         return job
     job = ProcessingJob(video_id=video_id, kind="CHAT_REPLAY", status="retry_wait",
-                        attempts=0, next_attempt_at=now() + timedelta(hours=1),
-                        payload={})
+                        attempts=0, next_attempt_at=now() if immediate else now() + timedelta(hours=1),
+                        payload={"manual_queue": immediate})
     db.add(job)
     db.flush()
     return job
 
+_replay_backfill_checked_at = None
+
+
+def chat_replay_worker() -> None:
+    """Recover and run one due replay job per scheduler tick."""
+    global _replay_backfill_checked_at
+    at = now()
+    from .monitor import _cooldown_active
+    if _cooldown_active(at):
+        return
+
+    with SessionLocal() as db:
+        interrupted = db.scalars(select(ProcessingJob.id).where(
+            ProcessingJob.kind == "CHAT_REPLAY", ProcessingJob.status == "processing")).all()
+    for job_id in interrupted:
+        with default_locks.acquire("processing-job", str(job_id)) as lease:
+            if not lease.acquired:
+                continue
+            with SessionLocal() as db:
+                job = db.get(ProcessingJob, job_id)
+                if job and job.status == "processing":
+                    job.status, job.next_attempt_at, job.updated_at = "retry_wait", at, at
+                    db.commit()
+
+    if _replay_backfill_checked_at is None or at - _replay_backfill_checked_at >= timedelta(minutes=10):
+        _replay_backfill_checked_at = at
+        sql = text("""SELECT v.id, v.file_path FROM videos AS v
+            WHERE v.file_path IS NOT NULL AND v.recording_finished_at IS NOT NULL
+              AND v.status NOT IN ('DELETED_BY_RETENTION', 'DELETED_MANUALLY')
+              AND (v.raw_metadata ->> 'chat_replay' IS NULL OR v.raw_metadata ->> 'chat_replay' <> 'imported')
+              AND EXISTS (SELECT 1 FROM channels c WHERE c.id = v.channel_id AND c.chat_enabled = TRUE)
+              AND NOT EXISTS (SELECT 1 FROM processing_jobs j WHERE j.video_id = v.id AND j.kind = 'CHAT_REPLAY')
+            ORDER BY v.id DESC LIMIT 20""")
+        with SessionLocal() as db:
+            missing = db.execute(sql).all()
+            for index, (video_id, file_path) in enumerate(missing):
+                path = Path(file_path)
+                if not path.exists():
+                    continue
+                db.add(ProcessingJob(video_id=video_id, kind="CHAT_REPLAY", status="retry_wait",
+                    attempts=0, next_attempt_at=at + timedelta(minutes=5 * index), payload={}))
+            db.commit()
+
+    if _cooldown_active(now()):
+        return
+    with SessionLocal() as db:
+        job_id = db.scalar(select(ProcessingJob.id).where(
+            ProcessingJob.kind == "CHAT_REPLAY", ProcessingJob.status.in_(("pending", "retry_wait")),
+            or_(ProcessingJob.status == "pending", ProcessingJob.next_attempt_at <= now())
+        ).order_by(ProcessingJob.payload["manual_queue"].as_string().desc().nullslast(),
+                   ProcessingJob.next_attempt_at.asc().nullsfirst(), ProcessingJob.id.asc()).limit(1))
+    if job_id is None:
+        return
+    with default_locks.acquire("processing-job", str(job_id)) as lease:
+        if not lease.acquired:
+            return
+        with SessionLocal() as db:
+            job = db.get(ProcessingJob, job_id)
+            if job and job.status in ("pending", "retry_wait") and (
+                    job.status == "pending" or job.next_attempt_at is None or job.next_attempt_at <= now()):
+                process_replay_retry(db, job)
+                db.commit()
+    if _cooldown_active(now()):
+        return
+
 
 def process_replay_retry(db, job: ProcessingJob) -> None:
     from datetime import timedelta
+    from .youtube import classify_ytdlp_error
     video = db.get(Video, job.video_id)
     if not video:
         job.status = "failed"
@@ -507,22 +582,63 @@ def process_replay_retry(db, job: ProcessingJob) -> None:
         job.finished_at = now()
         return
     channel = video.channel
-    retrieve_replay(db, video.id, video.youtube_video_id, channel.cookie_profile)
+    if channel and not channel.chat_enabled:
+        job.status, job.finished_at = "disabled", now()
+        db.commit()
+        return
+    if job.status == "processing":
+        job.status, job.next_attempt_at = "retry_wait", now()
+    job.status, job.started_at, job.updated_at = "processing", now(), now()
+    job.payload = {key: value for key, value in (job.payload or {}).items() if key != "manual_queue"}
+    db.commit()
+    try:
+        retrieve_replay(db, video.id, video.youtube_video_id, channel.cookie_profile if channel else None)
+    except Exception as exc:
+        error = str(exc)
+        kind = classify_ytdlp_error(error)
+        video = db.get(Video, job.video_id)
+        metadata = dict(video.raw_metadata or {})
+        limited = kind == "RATE_LIMITED"
+        if limited:
+            from .monitor import _apply_rate_limit
+            _apply_rate_limit(now())
+        metadata.update(chat_replay="rate_limited" if limited else "failed",
+                        chat_replay_checked_at=now().isoformat(),
+                        chat_replay_error="アクセス制限中です" if limited else "リプレイ取得に失敗しました")
+        video.raw_metadata = metadata
+        job.error = metadata["chat_replay_error"]
+        job.updated_at = now()
+        if limited:
+            job.status, job.next_attempt_at = "retry_wait", now() + timedelta(hours=1)
+        else:
+            job.attempts += 1
+            job.status = "failed" if job.attempts >= 10 else "retry_wait"
+            delay = (1, 3, 6, 12, 24)[min(job.attempts - 1, 4)]
+            job.next_attempt_at = None if job.status == "failed" else now() + timedelta(hours=delay)
+        db.commit()
+        return
+    if (video.raw_metadata or {}).get("chat_replay") == "rate_limited":
+        from .monitor import _apply_rate_limit
+        _apply_rate_limit(now())
     rebase_live_chat_offsets(db, video.id)
-    job.attempts += 1
     job.updated_at = now()
-    if (video.raw_metadata or {}).get("chat_replay") == "imported":
+    metadata = dict(video.raw_metadata or {})
+    if metadata.get("chat_replay") == "imported":
         job.status = "completed"
         job.finished_at = now()
         job.next_attempt_at = None
-    elif job.attempts >= 7:
-        job.status = "failed"
-        job.finished_at = now()
-        job.next_attempt_at = None
-    else:
-        delay_hours = 6 if job.attempts == 1 else 24
+        job.error = None
+    elif metadata.get("chat_replay") == "rate_limited":
         job.status = "retry_wait"
-        job.next_attempt_at = now() + timedelta(hours=delay_hours)
+        job.error = metadata.get("chat_replay_error")
+        job.next_attempt_at = now() + timedelta(hours=1)
+    else:
+        job.attempts += 1
+        delay = (1, 3, 6, 12, 24)[min(job.attempts - 1, 4)]
+        job.error = metadata.get("chat_replay_error")
+        job.status = "failed" if job.attempts >= 10 else "retry_wait"
+        job.finished_at = now() if job.status == "failed" else None
+        job.next_attempt_at = None if job.status == "failed" else now() + timedelta(hours=delay)
 
 
 def ingest_jsonl(db, video_id: int, path: str | Path, *, complete_snapshot: bool = True, isolated: bool = False) -> int:
@@ -599,24 +715,41 @@ def retrieve_replay(db, video_id: int, youtube_video_id: str, cookie_profile: st
     with tempfile.TemporaryDirectory(prefix="yla-chat-") as temp:
         output = str(Path(temp) / "%(id)s.%(ext)s")
         args = ["--no-warnings", "--skip-download", "--write-subs", "--sub-langs", "live_chat", "--sub-format", "json", "-o", output, *cookie_args(cookie_profile), f"https://www.youtube.com/watch?v={youtube_video_id}"]
-        proc = run_ytdlp(args, capture_output=True, timeout=3600, check=False)
+        proc = run_ytdlp(args, capture_output=True, text=True, timeout=3600, check=False)
         files = list(Path(temp).glob("*live_chat*")) + list(Path(temp).glob("*.live_chat.json"))
         video = db.get(Video, video_id)
-        if proc.returncode or not files:
+        from .youtube import classify_ytdlp_error
+        checked_at = now().isoformat()
+        stderr = proc.stderr.decode("utf-8", "replace") if isinstance(proc.stderr, bytes) else str(proc.stderr or "")
+        if proc.returncode:
+            limited = classify_ytdlp_error(stderr) == "RATE_LIMITED"
             if video is not None:
-                video.raw_metadata = {**(video.raw_metadata or {}), "chat_replay": "unavailable"}
+                video.raw_metadata = {**(video.raw_metadata or {}),
+                    "chat_replay": "rate_limited" if limited else "failed",
+                    "chat_replay_checked_at": checked_at,
+                    "chat_replay_error": "アクセス制限中です" if limited else "リプレイ取得に失敗しました"}
                 db.commit()
             log.info("chat replay unavailable for %s", youtube_video_id)
+            return "rate_limited" if limited else 0
+        if not files:
+            if video is not None:
+                video.raw_metadata = {**(video.raw_metadata or {}), "chat_replay": "unavailable",
+                    "chat_replay_checked_at": checked_at,
+                    "chat_replay_error": "YouTube 側でリプレイがまだ用意されていません"}
+                db.commit()
             return 0
         try:
             count = ingest_jsonl(db, video_id, files[0], complete_snapshot=True, isolated=True)
         except Exception:
             if video is not None:
-                video.raw_metadata = {**(video.raw_metadata or {}), "chat_replay": "unavailable"}
+                video.raw_metadata = {**(video.raw_metadata or {}), "chat_replay": "failed",
+                    "chat_replay_checked_at": checked_at,
+                    "chat_replay_error": "リプレイの形式を読み取れませんでした"}
                 db.commit()
             log.info("chat replay unavailable for %s", youtube_video_id)
             return 0
         if video is not None:
-            video.raw_metadata = {**(video.raw_metadata or {}), "chat_replay": "imported"}
+            video.raw_metadata = {**(video.raw_metadata or {}), "chat_replay": "imported",
+                "chat_replay_checked_at": checked_at, "chat_replay_error": None}
         db.commit()
         return count

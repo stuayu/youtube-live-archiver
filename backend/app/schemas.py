@@ -96,7 +96,7 @@ class ChannelIn(StrictInput):
     url: str | None = None
     name: str
     enabled: bool = True
-    poll_interval: str = "30"
+    poll_interval: str = "AUTO"
     storage_id: int | None = None
     fallback_storage_id: int | None = None
     retention_days: int | None = 30
@@ -178,6 +178,7 @@ class VideoOut(BaseModel):
     live_status: str | None = None
     recording_start_offset_ms: int = 0
     live_from_start: str | None = None
+    manual: bool = False
     transcription_status: str = "pending"
     transcription_error: str | None = None
     transcription_model: str | None = None
@@ -190,6 +191,15 @@ class VideoOut(BaseModel):
     media: dict | None = None
     renditions: list[dict] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)
+
+
+class ManualVideoPreviewIn(StrictInput):
+    url: str = Field(max_length=2000)
+
+
+class ManualVideoIn(ManualVideoPreviewIn):
+    storage_id: int | None = None
+    protected: bool = False
 
 
 class RecordingRuleIn(StrictInput):
@@ -235,7 +245,7 @@ class ChannelCreate(StrictInput):
     url: str = Field(min_length=1, max_length=1000)
     name: str | None = Field(default=None, max_length=300)
     enabled: bool = True
-    poll_interval: str = "30"
+    poll_interval: str = "AUTO"
     storage_id: int | None = None
     fallback_storage_id: int | None = None
     retention_days: int | None = Field(default=30, ge=1)
@@ -258,8 +268,8 @@ class ChannelCreate(StrictInput):
     @field_validator("poll_interval")
     @classmethod
     def poll_valid(cls, value):
-        if value not in ("30", "45", "60", "AUTO"):
-            raise ValueError("poll_interval は 30/45/60/AUTO のいずれかです")
+        if value not in ("30", "45", "60", "90", "120", "180", "240", "360", "AUTO"):
+            raise ValueError("poll_interval は 30/45/60/90/120/180/240/360/AUTO のいずれかです")
         return value
 
     @field_validator("edit_detection_mode")
@@ -314,8 +324,8 @@ class ChannelPatch(StrictInput):
     @field_validator("poll_interval")
     @classmethod
     def patch_poll_valid(cls, value):
-        if value is not None and value not in ("30", "45", "60", "AUTO"):
-            raise ValueError("poll_interval は 30/45/60/AUTO のいずれかです")
+        if value is not None and value not in ("30", "45", "60", "90", "120", "180", "240", "360", "AUTO"):
+            raise ValueError("poll_interval は 30/45/60/90/120/180/240/360/AUTO のいずれかです")
         return value
 
     @field_validator("edit_detection_mode")

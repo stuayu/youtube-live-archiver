@@ -1,8 +1,22 @@
 <script setup lang="ts">
-import { reactive } from 'vue'
+import { computed, reactive } from 'vue'
 import { useWorkspaceContext } from '../composables/workspaceContext'
 import Icon from '../components/ui/Icon.vue'
+import { api } from '../api/resources'
 const ctx = reactive(useWorkspaceContext())
+const fixedIntervalCount = computed(
+  () => ctx.channels.filter((channel) => channel.poll_interval !== 'AUTO').length,
+)
+function setAllIntervalsAuto() {
+  if (!fixedIntervalCount.value) return
+  ctx.confirm(
+    '監視間隔を自動に変更',
+    `${fixedIntervalCount.value} チャンネルの固定間隔をすべて自動に変更します。`,
+    async () => {
+      await api.setAllPollIntervalsAuto()
+    },
+  )
+}
 </script>
 <template>
   <section>
@@ -13,6 +27,9 @@ const ctx = reactive(useWorkspaceContext())
       </div>
       <button class="button primary" @click="ctx.editingChannel = null">
         <Icon name="add" />チャンネルを追加
+      </button>
+      <button v-if="fixedIntervalCount" class="button secondary" @click="setAllIntervalsAuto">
+        固定間隔のチャンネルをすべて自動にする（{{ fixedIntervalCount }} 件）
       </button>
     </header>
     <div class="toolbar">

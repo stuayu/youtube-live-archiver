@@ -6,6 +6,8 @@ import { bytesToGb, gbToBytes } from '../lib/format'
 import type { Channel, ChannelInput, ChannelPreview, QualityPreset, Storage } from '../api/types'
 import ChannelIdentityField from './ChannelIdentityField.vue'
 import Icon from './ui/Icon.vue'
+import type { ActivityProfile } from '../api/types'
+import { activitySummary, localActivityHours } from '../lib/activityProfile'
 const props = defineProps<{
   channel?: Channel | null
 }>()
@@ -17,7 +19,7 @@ const initial = () => ({
   url: '',
   name: '',
   enabled: true,
-  poll_interval: '30',
+  poll_interval: 'AUTO',
   storage_id: null as string | null,
   fallback_storage_id: null as string | null,
   retention_days: 30 as number | null,
@@ -49,6 +51,8 @@ const applyRetention = ref(false)
 const retentionCustom = ref(false)
 const liveGb = ref(5)
 const archiveQualityCustom = ref(false)
+const activity = ref<ActivityProfile | null>(null)
+const activityHours = computed(() => (activity.value ? localActivityHours(activity.value) : []))
 const liveQualityCustom = ref(false)
 const archivePreset = computed({
   get: () =>
@@ -112,6 +116,7 @@ watch(
     Object.assign(form, initial())
     errors.value = {}
     preview.value = null
+    activity.value = null
     previewMessage.value = ''
     if (channel) {
       for (const key of Object.keys(form) as Array<keyof typeof form>) {
@@ -126,6 +131,19 @@ watch(
       snapshot.value = { ...form }
     } else {
       snapshot.value = null
+    }
+  },
+  { immediate: true },
+)
+watch(
+  () => [props.channel?.id, form.poll_interval] as const,
+  ([channelId, interval]) => {
+    activity.value = null
+    if (channelId && interval === 'AUTO') {
+      void api
+        .activityProfile(channelId)
+        .then((value) => (activity.value = value))
+        .catch(() => {})
     }
   },
   { immediate: true },
@@ -238,13 +256,33 @@ async function save() {
             <div class="field">
               <label for="poll-interval">監視間隔</label>
               <select id="poll-interval" v-model="form.poll_interval">
-                <option value="AUTO">自動</option>
+                <option value="AUTO">自動（配信の多い時間帯に合わせる）</option>
                 <option value="30">30 分</option>
                 <option value="45">45 分</option>
                 <option value="60">60 分</option>
+                <option value="90">90 分</option>
+                <option value="120">2 時間</option>
+                <option value="180">3 時間</option>
+                <option value="240">4 時間</option>
+                <option value="360">6 時間</option>
               </select>
               <small v-if="errors.poll_interval" class="inline-error">{{ errors.poll_interval }}</small>
               <small>自動は配信状況に合わせて確認間隔を調整します。</small>
+              <div v-if="form.poll_interval === 'AUTO' && channel && activity" class="activity-profile">
+                <div class="activity-hours" aria-label="ローカル時刻の配信時間帯">
+                  <span v-for="(level, hour) in activityHours" :key="hour" :class="`level-${level}`">
+                    {{ hour
+                    }}<small>{{
+                      level === 'hot' ? '多' : level === 'warm' ? '中' : level === 'cold' ? '少' : '未'
+                    }}</small>
+                  </span>
+                </div>
+                <small>{{ activitySummary(activity) }}</small>
+              </div>
+              <small v-else-if="form.poll_interval !== 'AUTO'"
+                >常に約
+                {{ form.poll_interval }} 分ごとに確認します。配信予定の開始前後は自動で間隔を詰めます</small
+              >
             </div>
           </div>
         </fieldset>

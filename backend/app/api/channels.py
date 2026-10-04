@@ -1,4 +1,47 @@
 from .common import *
+from ..services.monitor import _activity_profile, calculate_next_interval
+
+
+@router.post("/channels/poll-interval/auto")
+def set_all_poll_intervals_auto(db: Session = Depends(get_db)):
+    channels = db.scalars(select(Channel).where(Channel.archived.is_(False), Channel.poll_interval != "AUTO")).all()
+    for channel in channels:
+        channel.poll_interval = "AUTO"
+    db.add(AuditLog(action="CHANNEL_POLL_AUTO_ALL", reason="USER_CONFIRMED",
+                    details={"updated_count": len(channels)}))
+    db.commit()
+    return {"updated_count": len(channels)}
+
+
+@router.get("/channels/{channel_id}/activity-profile")
+def activity_profile(channel_id: int, db: Session = Depends(get_db)):
+    channel = db.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(404, "チャンネルがありません")
+    current = now()
+    profile = _activity_profile(db, channel_id, current)
+    hours = []
+    for hour in range(24):
+        values = [profile.levels[day * 24 + hour] for day in range(7)]
+        hours.append(max(("hot", "warm", "cold", "normal"), key=values.count))
+    next_check = channel.next_check_at
+    normal = calculate_next_interval(channel.poll_interval, [], current, profile)
+    hot_hours = [hour for hour, level in enumerate(hours) if level == "hot"]
+    ranges = []
+    if hot_hours:
+        if len(hot_hours) == 24:
+            ranges = ["00:00–24:00"]
+        else:
+            starts = [hour for hour in hot_hours if (hour - 1) % 24 not in hot_hours]
+            for start in starts:
+                end = start
+                while (end + 1) % 24 in hot_hours:
+                    end = (end + 1) % 24
+                ranges.append(f"{start:02d}:00–{(end + 1) % 24:02d}:00")
+    return {"samples": profile.samples, "mode": profile.mode, "hours": hours,
+            "levels": list(profile.levels), "current_level": profile.level_at(current),
+            "next_check_at": utc_json_value(next_check), "normal_interval_seconds": list(normal),
+            "hot_ranges": ranges}
 
 @router.get("/channels")
 def channels(include_archived: bool = False, db: Session = Depends(get_db)):

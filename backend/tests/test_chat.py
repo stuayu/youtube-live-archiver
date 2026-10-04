@@ -3,7 +3,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from app.db import Base
-from app.models import Channel, Video, ChatMessage
+from app.models import Channel, Video, ChatMessage, ProcessingJob, now
 from app.api import dplayer_danmaku
 from app.api.videos import chat_messages
 from app.services.chat import (argb_to_hex, ingest_jsonl, ingest_records, parse_amount,
@@ -56,6 +56,46 @@ def test_failed_fetch_does_not_mark_missing(db, tmp_path):
     with pytest.raises(Exception): ingest_jsonl(session,video.id,bad,complete_snapshot=True)
     session.commit()
     assert session.query(ChatMessage).one().is_deleted is False
+
+
+def test_replay_failure_states_preserve_existing_comments(db, monkeypatch):
+    from types import SimpleNamespace
+    from app.services import chat
+
+    session, video = db
+    ingest_records(session, video.id, [entry("kept")])
+    monkeypatch.setattr(chat, "run_ytdlp", None, raising=False)
+    monkeypatch.setattr(chat, "cookie_args", lambda _profile: [], raising=False)
+
+    def limited(*_args, **_kwargs):
+        return SimpleNamespace(returncode=1, stderr="Sign in to confirm you're not a bot")
+
+    monkeypatch.setattr("app.services.youtube.run_ytdlp", limited)
+    chat.retrieve_replay(session, video.id, video.youtube_video_id)
+    session.refresh(video)
+    row = session.query(ChatMessage).filter_by(message_id="kept").one()
+    assert video.raw_metadata["chat_replay"] == "rate_limited"
+    assert video.raw_metadata["chat_replay_checked_at"]
+    assert not row.is_deleted
+
+
+def test_chat_listing_includes_replay_coverage_and_job_state(db):
+    session, video = db
+    video.raw_metadata = {"recording_start_offset_ms": 1500, "chat_replay": "unavailable"}
+    session.add_all([
+        ChatMessage(video_id=video.id, message_id="covered-a", offset_ms=3000),
+        ChatMessage(video_id=video.id, message_id="covered-b", offset_ms=9000),
+        ChatMessage(video_id=video.id, message_id="deleted-bounds", offset_ms=12000, is_deleted=True),
+    ])
+    job = ProcessingJob(video_id=video.id, kind="CHAT_REPLAY", status="retry_wait",
+                        attempts=2, next_attempt_at=now())
+    session.add(job)
+    session.flush()
+    response = chat_messages(video.id, db=session)
+    assert response["replay"]["state"] == "waiting"
+    assert response["replay"]["attempts"] == 2
+    assert response["replay"]["covered_from_ms"] == 1500
+    assert response["replay"]["covered_to_ms"] == 7500
 
 def test_jsonl_import_keeps_valid_records_around_malformed_lines(db, tmp_path):
     session, video = db
@@ -574,3 +614,73 @@ def test_dplayer_membership_heading_is_localized(db):
     assert result["data"][0][-1] == "メンバー 45 か月 · Gold ありがとう"
     assert len(dplayer_danmaku(video.id, "membership-0", session)["data"]) == 2
     assert len(dplayer_danmaku(video.id, "superchat-0", session)["data"]) == 2
+
+@pytest.mark.integration
+def test_chat_replay_worker_batches_staggers_and_runs_one(monkeypatch, tmp_path):
+    from datetime import timedelta
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.services import chat
+    from app.models import now
+
+    channel_id = "UC" + "r" * 22
+    root = tmp_path / "recordings"
+    root.mkdir()
+    with SessionLocal() as db:
+        channel = Channel(youtube_channel_id=channel_id, url="https://youtube.com/@replay", name="Replay")
+        db.add(channel)
+        db.flush()
+        for index in range(250):
+            path = root / str(index)
+            path.mkdir()
+            db.add(Video(youtube_video_id=f"rp{index:09d}", channel_id=channel.id, title="done",
+                status="ACTIVE", file_path=str(path), recording_finished_at=now(), raw_metadata={}))
+        db.commit()
+    monkeypatch.setattr(chat, "_replay_backfill_checked_at", None)
+    called = []
+    monkeypatch.setattr(chat, "process_replay_retry", lambda _db, job: called.append(job.video_id))
+    chat.chat_replay_worker()
+    with SessionLocal() as db:
+        jobs = db.scalars(select(ProcessingJob).where(ProcessingJob.kind == "CHAT_REPLAY")).all()
+        assert len(jobs) == 20
+        due = sorted((job.next_attempt_at, job.id) for job in jobs)
+        assert [item[0] for item in due] == [due[0][0] + timedelta(minutes=5 * index) for index in range(20)]
+        assert len(called) == 1
+
+
+@pytest.mark.integration
+def test_chat_replay_worker_prioritizes_manual_and_rate_limit_cooldown(monkeypatch, tmp_path):
+    from app.db import SessionLocal
+    from app.services import chat, monitor
+    from app.models import now
+
+    channel_id = "UC" + "s" * 22
+    root = tmp_path / "rec"
+    root.mkdir()
+    with SessionLocal() as db:
+        channel = Channel(youtube_channel_id=channel_id, url="https://youtube.com/@queue", name="Queue")
+        db.add(channel)
+        db.flush()
+        rows = [Video(youtube_video_id=f"q{index:010d}", channel_id=channel.id, title="done",
+                      status="ACTIVE", file_path=str(root), recording_finished_at=now()) for index in range(2)]
+        db.add_all(rows)
+        db.flush()
+        db.add(ProcessingJob(video_id=rows[0].id, kind="CHAT_REPLAY", status="retry_wait",
+                             next_attempt_at=now(), payload={}))
+        db.add(ProcessingJob(video_id=rows[1].id, kind="CHAT_REPLAY", status="retry_wait",
+                             next_attempt_at=now(), payload={"manual_queue": True}))
+        db.commit()
+    monkeypatch.setattr(chat, "_replay_backfill_checked_at", now())
+    called = []
+    monkeypatch.setattr(chat, "process_replay_retry", lambda _db, job: called.append(job.video_id))
+    chat.chat_replay_worker()
+    assert called == [rows[1].id]
+
+    monkeypatch.setattr(chat, "process_replay_retry", lambda _db, _job: monitor._apply_rate_limit(now()))
+    monitor._clear_rate_limit()
+    chat._replay_backfill_checked_at = now()
+    chat.chat_replay_worker()
+    called.clear()
+    chat.chat_replay_worker()
+    assert called == []
+    monitor._clear_rate_limit()

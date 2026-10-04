@@ -1,7 +1,9 @@
 from pathlib import Path
 from threading import Event, Thread
 import os
+import shutil
 import sys
+import subprocess
 import time
 
 import pytest
@@ -132,3 +134,55 @@ def test_progress_is_reported_and_stale_temporary_files_are_removed(tmp_path):
     transcode._jobs[key] = {"status": "running", "progress": 0.0}
     transcode._set_progress(key, 0.45)
     assert transcode.status(*key)["progress"] == 0.45
+
+
+def _mp4_children(data: bytes, start: int, end: int):
+    boxes = []
+    offset = start
+    while offset + 8 <= end:
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        kind = data[offset + 4 : offset + 8]
+        header = 8
+        if size == 1:
+            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+            header = 16
+        if size < header or offset + size > end:
+            break
+        boxes.append((kind, offset + header, offset + size))
+        offset += size
+    return boxes
+
+
+def test_remux_chunks_samples_for_webkit_long_recordings(tmp_path):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("ffmpeg is unavailable")
+    source = tmp_path / "six-seconds.mkv"
+    generated = subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc=size=160x90:rate=30", "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
+         "-t", "6", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source)],
+        capture_output=True, check=False,
+    )
+    assert generated.returncode == 0, generated.stderr.decode(errors="replace")
+    destination = tmp_path / "six-seconds.playable.mp4"
+    result = transcode._run(source, destination, "remux", ffmpeg)
+    assert result["status"] == "completed", result.get("error")
+    data = destination.read_bytes()
+    top = _mp4_children(data, 0, len(data))
+    moov = next((box for box in top if box[0] == b"moov"), None)
+    assert moov is not None
+    moov_boxes = _mp4_children(data, moov[1], moov[2])
+    tracks = [box for box in moov_boxes if box[0] == b"trak"]
+    assert len(tracks) >= 2
+    for track in tracks:
+        trak = _mp4_children(data, track[1], track[2])
+        mdia = next(box for box in trak if box[0] == b"mdia")
+        minf = next(box for box in _mp4_children(data, mdia[1], mdia[2]) if box[0] == b"minf")
+        stbl = next(box for box in _mp4_children(data, minf[1], minf[2]) if box[0] == b"stbl")
+        tables = _mp4_children(data, stbl[1], stbl[2])
+        offsets = next(box for box in tables if box[0] in (b"stco", b"co64"))
+        sizes = next(box for box in tables if box[0] == b"stsz")
+        chunk_count = int.from_bytes(data[offsets[1] + 4 : offsets[1] + 8], "big")
+        sample_count = int.from_bytes(data[sizes[1] + 8 : sizes[1] + 12], "big")
+        assert chunk_count < sample_count / 5

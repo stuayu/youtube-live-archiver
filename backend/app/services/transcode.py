@@ -9,6 +9,9 @@ import threading
 
 from ..config import settings
 from .ffmpeg import launch_ffmpeg
+from sqlalchemy import select
+
+DERIVED_FORMAT_VERSION = 2
 
 _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="media-convert")
 _guard = threading.Lock()
@@ -37,7 +40,7 @@ def _run(source: Path, dest: Path, mode: str, ffmpeg: str, progress=None):
             pass
         args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source)]
         args += ["-c", "copy", "-movflags", "+faststart"] if mode == "remux" else ["-c:v", "libx264", "-preset", "medium", "-c:a", "aac", "-movflags", "+faststart"]
-        args.extend(["-progress", "pipe:1", "-nostats", str(temp)])
+        args.extend(["-progress", "pipe:1", "-nostats", "-chunk_duration", "1000000", str(temp)])
         # stderr is merged so it cannot fill an unread pipe; -progress lines are key=value.
         process = launch_ffmpeg(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding="utf-8", errors="replace")
@@ -138,3 +141,82 @@ def cleanup_temporary_files(directories: list[Path]) -> int:
         except OSError:
             continue
     return removed
+
+
+def cleanup_old_derived_files() -> bool:
+    """Remove obsolete playback renditions once, keeping original recordings intact."""
+    from ..db import SessionLocal
+    from ..models import AuditLog, Storage, Video
+    from .media import source_media
+
+    version_file = Path(settings.data_dir) / "derived-format-version"
+    pending_file = Path(settings.data_dir) / "derived-format-pending"
+    try:
+        version = int(version_file.read_text(encoding="ascii").strip())
+    except (OSError, UnicodeError, ValueError):
+        version = 0
+    if version >= DERIVED_FORMAT_VERSION:
+        return True
+
+    try:
+        started_at = pending_file.stat().st_mtime
+    except FileNotFoundError:
+        pending_file.parent.mkdir(parents=True, exist_ok=True)
+        pending_file.touch()
+        started_at = pending_file.stat().st_mtime
+    except OSError:
+        return False
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Video.id, Video.file_path, Storage.root_path)
+            .outerjoin(Storage, Video.storage_id == Storage.id)
+            .where(Video.file_path.is_not(None))
+        ).all()
+
+    removed: list[tuple[int, str, int]] = []
+    complete = True
+    for video_id, file_path, storage_root in rows:
+        directory = Path(file_path)
+        if not storage_root:
+            complete = False
+            continue
+        try:
+            Path(storage_root).stat()
+            try:
+                directory.stat()
+            except FileNotFoundError:
+                # Deleted recordings are expected; a missing individual folder is not a retry condition.
+                continue
+            if not directory.is_dir():
+                complete = False
+                continue
+            next(directory.iterdir(), None)
+            source = source_media(directory)
+            if source is None or not source.is_file() or source.stat().st_size <= 0:
+                continue
+            for suffix in ("*.playable.mp4", "*.h264.mp4"):
+                for derived in directory.glob(suffix):
+                    if not derived.is_file():
+                        continue
+                    if derived.stat().st_mtime >= started_at:
+                        continue
+                    size = derived.stat().st_size
+                    derived.unlink()
+                    removed.append((video_id, derived.name, size))
+        except OSError:
+            complete = False
+
+    if removed:
+        with SessionLocal() as db:
+            db.add_all([
+                AuditLog(video_id=video_id, action="DERIVED_CLEANUP", reason="FORMAT_UPGRADED",
+                         details={"path": name, "size": size})
+                for video_id, name, size in removed
+            ])
+            db.commit()
+    if complete:
+        version_file.parent.mkdir(parents=True, exist_ok=True)
+        version_file.write_text(str(DERIVED_FORMAT_VERSION), encoding="ascii")
+        pending_file.unlink(missing_ok=True)
+    return complete

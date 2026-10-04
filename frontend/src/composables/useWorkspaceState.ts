@@ -82,6 +82,7 @@ export function useWorkspaceState() {
   })
   const ruleEditing = ref<string | undefined>(undefined)
   const rulePreview = ref<Record<string, unknown> | null>(null)
+  const manualVideoOpen = ref(false)
   const transcription = ref<Record<string, unknown>>({})
   const summarySettings = ref<Record<string, unknown>>({})
   const recordingSettings = ref<Record<string, unknown>>({})
@@ -164,6 +165,7 @@ export function useWorkspaceState() {
     ruleForm,
     ruleEditing,
     rulePreview,
+    manualVideoOpen,
     transcription,
     summarySettings,
     recordingSettings,

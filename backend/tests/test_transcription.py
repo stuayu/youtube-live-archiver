@@ -179,3 +179,13 @@ def test_transcript_cleanup_keeps_protected_video_rows(tmp_path):
 def test_srt_keeps_punctuation_and_transcript_exports_timestamps():
     assert "00:00:01,250 --> 00:00:02,500\nHi." in transcription.to_srt([{"start": 1.25, "end": 2.5, "text": "Hi."}])
     assert "00:00:01.250 --> 00:00:02.500" in transcription.to_webvtt([{"start": 1.25, "end": 2.5, "text": "Hi."}])
+
+
+def test_processing_worker_keeps_transcription_separate_from_replay(monkeypatch):
+    from app.services import processing
+
+    ran = []
+    monkeypatch.setattr(processing, "_process_transcription", lambda job_id: ran.append(job_id))
+    monkeypatch.setattr(processing, "summary_worker", lambda: None)
+    processing.processing_worker()
+    assert ran == []

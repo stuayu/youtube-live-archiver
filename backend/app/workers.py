@@ -224,6 +224,87 @@ def channel_monitor():
     run_channel_monitor()
 
 
+def manual_video_worker():
+    """Advance manually-added scheduled videos without requiring channel monitoring."""
+    from .services.youtube import inspect, classify_ytdlp_error
+    from .services.monitor import _cooldown_active, _apply_rate_limit
+    from .services.manual_video import canonical_video_url
+    at = now()
+    if _cooldown_active(at):
+        return
+    with SessionLocal() as db:
+        candidates = list(db.scalars(select(Video).where(Video.status == "WAITING_LIVE")).all())
+        due = []
+        for video in candidates:
+            metadata = video.raw_metadata or {}
+            if metadata.get("manual") is not True or metadata.get("schedule_enabled") is False:
+                continue
+            next_check = metadata.get("manual_next_check_at")
+            if next_check:
+                try:
+                    parsed = datetime.fromisoformat(next_check.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    if parsed > at:
+                        continue
+                except (ValueError, AttributeError):
+                    pass
+            due.append(video.id)
+        due = due[:5]
+        db.commit()
+    for video_pk in due:
+        with SessionLocal() as db:
+            video = db.get(Video, video_pk)
+            if not video or video.status != "WAITING_LIVE":
+                continue
+            scheduled = video.scheduled_start_at
+            metadata = dict(video.raw_metadata or {})
+            if scheduled is None:
+                interval = timedelta(minutes=10)
+            else:
+                delta = (scheduled - at).total_seconds()
+                interval = (timedelta(minutes=30) if delta > 600 else
+                            timedelta(minutes=1) if delta >= -7200 else timedelta(minutes=10))
+            metadata["manual_next_check_at"] = (at + interval).isoformat()
+            video.raw_metadata = metadata
+            video_id = video.youtube_video_id
+            cookie = video.channel.cookie_profile if video.channel else None
+            db.commit()
+        try:
+            result = inspect(canonical_video_url(video_id), cookie)
+            state = result.get("live_status")
+            failure = ""
+        except Exception as exc:
+            result = {}
+            failure = classify_ytdlp_error(str(exc))
+            if failure == "RATE_LIMITED":
+                _apply_rate_limit(at)
+                return
+            state = None
+        with SessionLocal() as db:
+            video = db.get(Video, video_pk)
+            if not video or video.status != "WAITING_LIVE":
+                continue
+            metadata = dict(video.raw_metadata or {})
+            if state == "is_live":
+                video.status = "DISCOVERED"
+                metadata["live_status"] = "is_live"
+            elif state in ("was_live", "post_live"):
+                video.status = "DISCOVERED"
+                metadata["live_status"] = "was_live"
+            elif state == "is_upcoming":
+                timestamp = result.get("release_timestamp") or result.get("timestamp")
+                if timestamp:
+                    video.scheduled_start_at = datetime.fromtimestamp(timestamp, timezone.utc)
+            elif failure in ("PRIVATE", "DELETED"):
+                video.status = "CANCELLED"
+                metadata["cancel_reason"] = failure
+            if result.get("title"):
+                video.title = result["title"]
+            video.raw_metadata = metadata
+            db.commit()
+
+
 def recorder_worker():
     """Scheduler entry point: dispatch candidates and return immediately."""
     from .services.recorder import dispatch_recordings
@@ -342,6 +423,11 @@ def retention_worker():
 
 
 def derived_cleanup_worker():
+    try:
+        from .services.image_cache import cleanup_thumbnails
+        cleanup_thumbnails(Path(settings.data_dir) / "thumbnails", 60 * 24 * 60 * 60)
+    except Exception as exc:
+        log.warning("thumbnail cache cleanup failed: %s", exc)
     if settings.playable_cache_days <= 0:
         return
     from .services.media import source_media

@@ -46,7 +46,9 @@ export function useWorkspace() {
   }
   const { load, schedulePoll } = useWorkspaceLifecycle(state, pageQuery)
   function setTab(value: Tab) {
+    if (value === tab.value) return
     tab.value = value
+    void load()
   }
   function refresh() {
     void load(true)

@@ -62,6 +62,16 @@ export interface Channel {
   monitor_state: MonitorState
   description?: string | null
 }
+export interface ActivityProfile {
+  samples: number
+  mode: 'insufficient' | 'hour' | 'weekhour'
+  hours: string[]
+  levels: string[]
+  current_level: string
+  next_check_at: string | null
+  normal_interval_seconds: [number, number]
+  hot_ranges: string[]
+}
 export interface Storage {
   id: Id
   name: string
@@ -94,6 +104,7 @@ export interface Video {
   youtube_video_id: string
   channel_id: Id
   title: string
+  manual?: boolean
   status: VideoStatus
   remote_status: string
   retention_expires_at: string | null
@@ -152,6 +163,24 @@ export interface Video {
     status?: string
     progress?: number
   }>
+}
+export interface ManualVideoPreview {
+  video_id: string
+  title: string
+  thumbnail: string | null
+  channel: { youtube_channel_id: string; name: string; registered: boolean; monitored: boolean }
+  live_status: string | null
+  scheduled_start_at: string | null
+  duration: number | null
+  action: 'record_live' | 'wait_live' | 'download_archive'
+  action_label: string
+  existing: { id: string; status: string; status_label: string } | null
+}
+export interface ManualVideoResult {
+  video: Video
+  action: ManualVideoPreview['action']
+  created: boolean
+  channel_created: boolean
 }
 export interface Page<T> {
   items: T[]
@@ -316,6 +345,16 @@ export interface ChatPage {
   available_total?: number
   chat_enabled?: boolean
   chat_replay?: string | null
+  replay?: {
+    state:
+      'imported' | 'queued' | 'running' | 'waiting' | 'unavailable' | 'rate_limited' | 'failed' | 'disabled'
+    checked_at: string | null
+    next_attempt_at: string | null
+    attempts: number
+    error: string | null
+    covered_from_ms: number | null
+    covered_to_ms: number | null
+  }
   superchat_totals?: Record<string, number>
   unknown_amounts?: Record<string, number>
 }

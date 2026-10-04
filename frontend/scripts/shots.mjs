@@ -55,6 +55,19 @@ try {
       await page.goto(context.baseURL, { waitUntil: 'networkidle' })
       for (const [tab, label] of screens) {
         await navigate(page, label, width)
+        if (tab === 'upcoming' && device === 'desktop') {
+          await page.getByRole('button', { name: 'URL から追加' }).click()
+          await page.getByRole('dialog', { name: 'URL から動画を追加' }).waitFor()
+          await page.screenshot({ path: join(output, `${device}-manual-video-dialog-${color}.png`) })
+          await page.keyboard.press('Escape')
+        }
+        if (tab === 'upcoming' && device === 'mobile') {
+          await page.getByRole('button', { name: 'URL から追加' }).click()
+          await page.getByRole('dialog', { name: 'URL から動画を追加' }).waitFor()
+          await page.screenshot({ path: join(output, `${device}-manual-video-dialog-${color}.png`) })
+          await page.keyboard.press('Escape')
+        }
+        if (tab === 'videos') await page.locator('.video-row').first().waitFor({ state: 'visible' })
         await page.waitForTimeout(250)
         await page.screenshot({ path: join(output, `${device}-${tab}-${color}.png`) })
         if (tab === 'videos') {
@@ -78,6 +91,23 @@ try {
             await page.waitForTimeout(600)
             await page.screenshot({ path: join(output, `${device}-player-${color}.png`) })
             if (width === 1440 || width === 390) {
+              const fullScreen = page.locator('.dplayer-full-icon')
+              await fullScreen.hover()
+              await page.waitForTimeout(350)
+              const controller = await page.locator('.dplayer-controller').boundingBox()
+              const playerBox = await page.locator('.dplayer').boundingBox()
+              if (controller && playerBox) {
+                const clipY = Math.max(playerBox.y, controller.y - 80)
+                await page.screenshot({
+                  path: join(output, `${device}-player-controls-right-${color}.png`),
+                  clip: {
+                    x: Math.max(controller.x, controller.x + controller.width - 320),
+                    y: clipY,
+                    width: Math.min(320, controller.width),
+                    height: Math.min(playerBox.y + playerBox.height - clipY, controller.height + 80),
+                  },
+                })
+              }
               await page.locator('.dplayer-setting-icon').click()
               await page.locator('.dplayer-setting-box-open').waitFor()
               await page.waitForFunction(() => {

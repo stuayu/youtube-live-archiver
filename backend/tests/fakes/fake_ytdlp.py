@@ -88,6 +88,14 @@ def _recording(argv: list[str], video: dict, video_id: str) -> int:
     if template != "-" and "--write-thumbnail" in argv:
         (stem_path.parent / f"{stem}.webp").write_bytes(b"fake-thumbnail")
     if "--skip-download" in argv and "--write-subs" in argv:
+        state = load_state().get("videos", {}).get(video_id, {})
+        replay = state.get("chat_replay")
+        if replay:
+            time.sleep(state.get("chat_replay_delay", 0.5))
+            target = Path(template.replace("%(id)s", video_id).replace("%(ext)s", "live_chat.json"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("".join(json.dumps(item) + "\n" for item in replay), encoding="utf-8")
+            return 0
         output = stem_path.parent / f"{stem}.live_chat.json.part"
         fragment = stem_path.parent / f"{stem}.live_chat.json.part-Frag5"
         capture_started_epoch = time.time()

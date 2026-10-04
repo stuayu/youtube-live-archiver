@@ -1,5 +1,24 @@
 import { expect, test } from './helpers'
 
+test('unavailable chat replay shows coverage and retrieves it in background', async ({ page }) => {
+  await page.goto('/?tab=videos')
+  await page.getByPlaceholder('タイトル・説明').fill('歌枠 / Singing Stream')
+  await page
+    .locator('.video-row')
+    .filter({ hasText: '歌枠 / Singing Stream' })
+    .getByRole('button', { name: '再生', exact: true })
+    .click()
+  const dialog = page.getByRole('dialog', { name: /再生:/ })
+  await dialog.getByRole('button', { name: 'チャット', exact: true }).click()
+  await expect(dialog).toContainText('この時刻のコメントは未取得です')
+  await expect(dialog).toContainText('取得済み: 0:00:06 〜 0:00:08')
+  await dialog.getByRole('button', { name: '取得済みの位置へ移動' }).click()
+  await expect(dialog.locator('.chat-message')).toContainText('後半だけのコメント')
+  await dialog.getByRole('button', { name: '今すぐ再取得' }).click()
+  await expect(dialog).toContainText('取得中…')
+  await expect(dialog).toContainText('先頭のコメント', { timeout: 15000 })
+})
+
 test('player danmaku preferences and replay chat stay inside the player', async ({ page }) => {
   await page.route('**/api/chat-assets/**', (route) =>
     route.fulfill({

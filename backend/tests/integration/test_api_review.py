@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.models import AuditLog, Channel, Storage, Video, now
@@ -18,6 +19,38 @@ def add_channel(*, enabled=True):
         channel_id = channel.id
         db.commit()
         return channel_id
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("interval", ["90", "120", "180", "240", "360"])
+def test_extended_poll_intervals_and_invalid_values(client, interval):
+    channel_id = add_channel()
+    assert client.patch(f"/api/channels/{channel_id}", json={"poll_interval": interval}).status_code == 200
+    assert client.patch(f"/api/channels/{channel_id}", json={"poll_interval": "15"}).status_code == 422
+    assert client.patch(f"/api/channels/{channel_id}", json={"poll_interval": "abc"}).status_code == 422
+
+
+@pytest.mark.integration
+def test_bulk_auto_and_activity_profile_api(client):
+    channel_id = add_channel()
+    with SessionLocal() as db:
+        channel = db.get(Channel, channel_id)
+        channel.poll_interval = "360"
+        archived = Channel(youtube_channel_id="UC" + uuid4().hex[:22], url="https://youtube.com/@archived",
+                           name="Archived", poll_interval="90", archived=True)
+        db.add(archived)
+        db.commit()
+    response = client.post("/api/channels/poll-interval/auto")
+    assert response.status_code == 200
+    assert response.json()["updated_count"] >= 1
+    with SessionLocal() as db:
+        assert db.get(Channel, channel_id).poll_interval == "AUTO"
+        assert db.scalar(select(AuditLog).where(AuditLog.action == "CHANNEL_POLL_AUTO_ALL")) is not None
+    profile = client.get(f"/api/channels/{channel_id}/activity-profile")
+    assert profile.status_code == 200
+    assert len(profile.json()["hours"]) == 24
+    assert len(profile.json()["levels"]) == 168
+    assert profile.json()["samples"] == 0
 
 
 @pytest.mark.integration
@@ -132,6 +165,7 @@ def test_channel_registration_duplicate_name_fallback_and_non_youtube_url(client
     fake_youtube.set_state({"channels": {"@resolved": resolved, channel_youtube_id: resolved}, "videos": {}})
     first = client.post("/api/channels", json={"url": "https://youtube.com/@resolved", "name": "Input Name"})
     assert first.status_code == 200 and first.json()["name"] == "Metadata Name"
+    assert first.json()["poll_interval"] == "AUTO"
     duplicate = client.post("/api/channels", json={"url": "https://youtube.com/@resolved"})
     assert duplicate.status_code == 409
     fake_youtube.set_state({"channels": {}, "videos": {}})

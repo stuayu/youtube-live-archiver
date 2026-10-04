@@ -3,7 +3,10 @@ import type {
   Channel,
   ChannelInput,
   ChannelPreview,
+  ActivityProfile,
   EventItem,
+  ManualVideoPreview,
+  ManualVideoResult,
   QualityPreset,
   RecordingRule,
   SearchResponse,
@@ -21,6 +24,9 @@ const query = (values: Record<string, string | number | boolean | null | undefin
 }
 export const api = {
   channels: () => request<Channel[]>('/channels'),
+  activityProfile: (id: string) => request<ActivityProfile>(`/channels/${id}/activity-profile`),
+  setAllPollIntervalsAuto: () =>
+    request<{ updated_count: number }>('/channels/poll-interval/auto', jsonBody({})),
   previewChannel: (url: string) => request<ChannelPreview>('/channels/preview', jsonBody({ url })),
   qualityPresets: () => request<QualityPreset[]>('/quality-presets'),
   addChannel: (body: ChannelInput) => request<Channel>('/channels', jsonBody(body)),
@@ -40,6 +46,10 @@ export const api = {
   deleteStorage: (id: string) => request<void>(`/storages/${id}`, { method: 'DELETE' }),
   videos: (params: Record<string, string | number | boolean | null | undefined>) =>
     request<Video[]>(`/videos?${query(params)}`),
+  previewManualVideo: (url: string) =>
+    request<ManualVideoPreview>('/videos/manual/preview', jsonBody({ url })),
+  addManualVideo: (body: { url: string; storage_id?: string | null; protected?: boolean }) =>
+    request<ManualVideoResult>('/videos/manual', jsonBody(body)),
   count: (params: Record<string, string | number | boolean | null | undefined>) =>
     request<{ count: number }>(`/videos/count?${query(params)}`),
   video: (id: string) => request<Video>(`/videos/${id}`),

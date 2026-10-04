@@ -10,7 +10,9 @@ export function useWorkspaceLifecycle(
   state: WorkspaceState,
   pageQuery: (scope: string) => Parameters<typeof api.videos>[0],
 ) {
+  let loadGeneration = 0
   const load = async (silent = false) => {
+    const generation = ++loadGeneration
     if (silent) state.refreshing.value = true
     else state.loading.value = true
     try {
@@ -32,19 +34,26 @@ export function useWorkspaceLifecycle(
       } else if (state.tab.value === 'channels') {
         ;[state.channels.value, state.storages.value] = await Promise.all([api.channels(), api.storages()])
       } else if (state.tab.value === 'upcoming') {
-        state.upcoming.value = await api.videos({
-          scope: 'upcoming',
-          offset: 0,
-          limit: 100,
-          channel_id: state.values.value.channel,
-        })
-        state.channels.value = await api.channels()
+        const [upcoming, channels] = await Promise.all([
+          api.videos({
+            scope: 'upcoming',
+            offset: 0,
+            limit: 100,
+            channel_id: state.values.value.channel,
+          }),
+          api.channels(),
+        ])
+        if (generation !== loadGeneration) return
+        state.upcoming.value = upcoming
+        state.channels.value = channels
       } else if (state.tab.value === 'videos') {
         const params = pageQuery(state.scopeDeleted.value ? 'deleted' : 'archive')
         const [rows, count] = await Promise.all([api.videos(params), api.count(params)])
+        if (generation !== loadGeneration) return
         state.videos.value = rows
         state.total.value = count.count
         ;[state.storages.value, state.channels.value] = await Promise.all([api.storages(), api.channels()])
+        if (generation !== loadGeneration) return
         const recordingRows = rows.filter((video) => video.status === 'RECORDING')
         await Promise.all(
           recordingRows.map(async (video) => {
@@ -91,8 +100,10 @@ export function useWorkspaceLifecycle(
     } catch (error) {
       state.push(error instanceof Error ? error.message : '読み込みに失敗しました', 'error')
     } finally {
-      state.loading.value = false
-      state.refreshing.value = false
+      if (generation === loadGeneration) {
+        state.loading.value = false
+        state.refreshing.value = false
+      }
     }
   }
 

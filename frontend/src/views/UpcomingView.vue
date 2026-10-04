@@ -3,6 +3,13 @@ import { reactive } from 'vue'
 import { useWorkspaceContext } from '../composables/workspaceContext'
 import Icon from '../components/ui/Icon.vue'
 const ctx = reactive(useWorkspaceContext())
+const fallbackThumbnail = (event: Event) => {
+  const image = event.target as HTMLImageElement
+  if (!image.dataset.fallback) {
+    image.dataset.fallback = 'true'
+    image.src = '/icon.svg'
+  }
+}
 </script>
 <template>
   <section>
@@ -11,6 +18,7 @@ const ctx = reactive(useWorkspaceContext())
         <h1>配信予定</h1>
         <p>{{ ctx.filteredUpcoming.length }} 件 · 日付ごとに確認</p>
       </div>
+      <button class="button" @click="ctx.manualVideoOpen = true">URL から追加</button>
     </header>
     <div class="toolbar">
       <label class="field grow"
@@ -41,11 +49,13 @@ const ctx = reactive(useWorkspaceContext())
             decoding="async"
             :src="video.has_thumbnail ? ctx.apiUrl(`/videos/${video.id}/thumbnail`) : '/icon.svg'"
             :alt="video.title"
+            @error="fallbackThumbnail"
           />
           <div class="item-main">
             <div class="item-title">{{ video.title }}</div>
             <div class="meta">
               <span>{{ video.channel_name }}</span>
+              <span v-if="video.manual" class="badge info">手動追加</span>
               <span>{{
                 video.scheduled_start_at ? ctx.formatDate(video.scheduled_start_at) : '時刻未定'
               }}</span>

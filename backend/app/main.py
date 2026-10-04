@@ -11,8 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 from .api import router
 from .workers import (channel_monitor, recorder_worker, retention_worker, protection_worker,
-                      recovery_worker, integrity_worker, derived_cleanup_worker)
+                      recovery_worker, integrity_worker, derived_cleanup_worker, manual_video_worker)
 from .services.processing import processing_worker
+from .services.chat import chat_replay_worker
 
 scheduler = BackgroundScheduler(timezone="UTC")
 import logging
@@ -60,12 +61,23 @@ async def lifespan(app: FastAPI):
     try:
         from .db import SessionLocal
         from .models import Video
-        from .services.transcode import cleanup_temporary_files, resume as resume_conversions
+        from .services.transcode import (
+            cleanup_old_derived_files,
+            cleanup_temporary_files,
+            resume as resume_conversions,
+        )
         from sqlalchemy import select
         resume_conversions()
         with SessionLocal() as db:
             paths = db.scalars(select(Video.file_path).where(Video.file_path.is_not(None))).all()
         cleanup_temporary_files([Path(value) for value in paths if value])
+        try:
+            if not cleanup_old_derived_files():
+                logging.getLogger(__name__).warning(
+                    "derived format cleanup incomplete; it will retry on next startup"
+                )
+        except Exception:
+            logging.getLogger(__name__).exception("derived format upgrade cleanup failed")
     except Exception:
         logging.getLogger(__name__).exception("derived temp cleanup failed")
     if settings.scheduler_enabled:
@@ -82,6 +94,8 @@ async def lifespan(app: FastAPI):
             import logging
             logging.getLogger(__name__).exception("startup recording recovery scan failed; scheduler will retry")
         scheduler.add_job(_tracked_job("channel-monitor", channel_monitor), "interval", seconds=5, id="channel-monitor", max_instances=1, coalesce=True)
+        scheduler.add_job(_tracked_job("manual-video", manual_video_worker), "interval", seconds=60,
+                          id="manual-video", max_instances=1, coalesce=True)
         scheduler.add_job(_tracked_job("recorder", recorder_worker), "interval", seconds=5, id="recorder", max_instances=1)
         scheduler.add_job(_tracked_job("retention", retention_worker), "interval", minutes=15, id="retention", max_instances=1)
         scheduler.add_job(_tracked_job("derived-cleanup", derived_cleanup_worker), "interval", hours=24,
@@ -91,6 +105,8 @@ async def lifespan(app: FastAPI):
                           next_run_time=datetime.now(timezone.utc))
         scheduler.add_job(_tracked_job("recording-integrity", integrity_worker), "interval", minutes=30, id="recording-integrity", max_instances=1, coalesce=True)
         scheduler.add_job(_tracked_job("processing-queue", processing_worker), "interval", seconds=10, id="processing-queue", max_instances=1, coalesce=True)
+        scheduler.add_job(_tracked_job("chat-replay", chat_replay_worker), "interval", seconds=60,
+                          id="chat-replay", max_instances=1, coalesce=True)
         scheduler.start()
     yield
     try:
@@ -154,6 +170,10 @@ app.router.default_response_class = UTCJSONResponse
 
 @app.exception_handler(StarletteHTTPException)
 async def api_error(request: Request, exc: StarletteHTTPException):
+    if isinstance(exc.detail, dict) and "fields" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=exc.headers)
+    if isinstance(exc.detail, dict):
+        return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=exc.headers)
     return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)}, headers=exc.headers)
 
 

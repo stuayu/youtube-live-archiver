@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
     playable_cache_days: int = 14
+    remote_image_fetch_enabled: bool = True
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     # ソース変更を検知して自動再起動する。サービス常駐中でも有効にできるが、

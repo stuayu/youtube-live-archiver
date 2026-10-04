@@ -40,6 +40,7 @@ const emit = defineEmits<{
   'update:transcriptQuery': [value: string]
   searchChat: []
   retrieveChat: []
+  seekCovered: [seconds: number]
   reparseChat: []
   nextChatPage: []
   previousChatPage: []
@@ -64,6 +65,19 @@ const tabs = [
 ] as const
 const searchable = computed(() => Boolean(props.chatQuery || props.chatKind))
 const allRows = computed(() => props.chat.messages)
+const replayPending = computed(() => ['queued', 'running'].includes(props.chat.replay?.state || ''))
+function replayStatus() {
+  const replay = props.chat.replay
+  if (!replay) return ''
+  if (replay.state === 'queued') return '取得待ち'
+  if (replay.state === 'running') return '取得中…'
+  if (replay.state === 'waiting' || replay.state === 'rate_limited') {
+    return `${replay.state === 'rate_limited' ? 'アクセス制限中' : '取得待ち'}${replay.next_attempt_at ? `（次回 ${formatDate(replay.next_attempt_at)}）` : ''}`
+  }
+  if (replay.state === 'failed') return `取得できませんでした${replay.error ? `（${replay.error}）` : ''}`
+  if (replay.state === 'unavailable') return replay.error || 'YouTube 側でリプレイがまだ用意されていません'
+  return ''
+}
 function fallbackEmote(id: string) {
   fallback.value = new Set(fallback.value).add(id)
 }
@@ -208,10 +222,63 @@ watch(
       </button>
       <div ref="list" class="chat-list" @scroll.passive="onScroll">
         <p v-if="chat.chat_enabled === false" class="empty-state">このチャンネルではチャット保存が無効です</p>
-        <p v-else-if="chat.available_total === 0 && chat.chat_replay === 'unavailable'" class="empty-state">
-          チャットリプレイを取得できません
-        </p>
+        <div
+          v-else-if="chat.available_total === 0 && chat.replay?.state !== 'imported'"
+          class="empty-state replay-empty"
+        >
+          <p>この時刻のコメントは未取得です</p>
+          <p v-if="chat.replay?.covered_from_ms != null">
+            取得済み: {{ formatDuration(chat.replay.covered_from_ms / 1000) }} 〜
+            {{ formatDuration((chat.replay.covered_to_ms || 0) / 1000) }}（ライブ録画中に取得した分）。
+          </p>
+          <p>配信全体のコメント（リプレイ）は YouTube 側で用意されると取得できます。</p>
+          <p v-if="replayStatus()">{{ replayStatus() }}</p>
+          <button
+            v-if="chat.replay?.covered_from_ms != null"
+            class="button secondary"
+            @click="emit('seekCovered', chat.replay.covered_from_ms / 1000)"
+          >
+            取得済みの位置へ移動
+          </button>
+          <button
+            v-if="chat.replay?.state !== 'disabled'"
+            class="button secondary"
+            :disabled="replayPending"
+            @click="emit('retrieveChat')"
+          >
+            {{ replayPending ? '取得中…' : '今すぐ再取得' }}
+          </button>
+        </div>
         <p v-else-if="chat.available_total === 0" class="empty-state">保存されたコメントはありません</p>
+        <div
+          v-else-if="!allRows.length && chat.replay?.state !== 'imported'"
+          class="empty-state replay-empty"
+        >
+          <p>
+            この時刻のコメントは未取得です<span
+              v-if="chat.replay?.covered_from_ms !== null && chat.replay?.covered_from_ms !== undefined"
+              >。取得済み: {{ formatDuration(chat.replay.covered_from_ms / 1000) }} 〜
+              {{ formatDuration((chat.replay.covered_to_ms || 0) / 1000) }}（ライブ録画中に取得した分）</span
+            >。
+          </p>
+          <p>配信全体のコメント（リプレイ）は YouTube 側で用意されると取得できます。</p>
+          <p v-if="replayStatus()">{{ replayStatus() }}</p>
+          <button
+            v-if="chat.replay?.covered_from_ms !== null && chat.replay?.covered_from_ms !== undefined"
+            class="button secondary"
+            @click="emit('seekCovered', chat.replay.covered_from_ms / 1000)"
+          >
+            取得済みの位置へ移動
+          </button>
+          <button
+            v-if="chat.replay?.state !== 'disabled'"
+            class="button secondary"
+            :disabled="replayPending"
+            @click="emit('retrieveChat')"
+          >
+            {{ replayPending ? '取得中…' : '今すぐ再取得' }}
+          </button>
+        </div>
         <p v-else-if="!allRows.length" class="empty-state">この時刻にチャットはありません</p>
         <article
           v-for="message in allRows"

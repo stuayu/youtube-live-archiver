@@ -1,7 +1,147 @@
 from .common import *
+from fastapi import BackgroundTasks
 
 from ..db import SessionLocal
 from ..services.media import inspect_media, source_media, video_playback_metadata
+from ..services.manual_video import parse_video_url, canonical_video_url, action_for_live_status
+from ..services.image_cache import allowed_thumbnail_url, resolve_thumbnail
+from ..services.youtube import inspect as inspect_youtube, classify_ytdlp_error
+from ..schemas import ManualVideoPreviewIn, ManualVideoIn
+from datetime import timezone
+import re
+
+
+def _manual_error_fields(field: str, message: str):
+    raise HTTPException(422, detail={"error": message, "fields": {field: message}})
+
+
+def _manual_action_label(action: str) -> str:
+    return {"record_live": "配信中 → すぐ録画", "wait_live": "配信予定 → 開始時に録画",
+            "download_archive": "配信終了 → アーカイブをダウンロード"}[action]
+
+
+def _manual_inspect(url: str) -> tuple[str, dict]:
+    try:
+        video_id = parse_video_url(url)
+    except ValueError as exc:
+        _manual_error_fields("url", str(exc))
+    try:
+        data = inspect_youtube(canonical_video_url(video_id), None)
+    except Exception as exc:
+        classified = classify_ytdlp_error(str(exc))
+        messages = {"PRIVATE": "この動画は非公開です", "DELETED": "この動画は削除済みです",
+                    "MEMBERS_ONLY": "この動画はメンバー限定です", "RATE_LIMITED": "YouTube のアクセス制限中です",
+                    "UNAVAILABLE": "この動画を取得できません"}
+        _manual_error_fields("url", messages.get(classified, "この動画を取得できません"))
+    return video_id, data
+
+
+def _manual_live_status(data: dict) -> str | None:
+    value = data.get("live_status")
+    return value if value in ("is_live", "is_upcoming", "was_live", "post_live", "not_live") else None
+
+
+def _manual_existing_out(video: Video | None):
+    if video is None:
+        return None
+    return {"id": str(video.id), "status": video.status, "status_label": video_status_label(video.status)}
+
+
+def video_status_label(status: str) -> str:
+    return {"WAITING_LIVE": "配信待ち", "DISCOVERED": "録画待ち", "RECORDING": "録画中",
+            "ACTIVE": "録画済み", "RECORDING_FAILED": "録画失敗", "WAITING_FOR_STORAGE": "保存先待ち",
+            "SKIPPED": "スキップ", "CANCELLED": "中止", "DELETED_BY_RETENTION": "自動削除済み",
+            "DELETED_MANUALLY": "手動削除済み"}.get(status, status)
+
+
+@router.post("/videos/manual/preview")
+def preview_manual_video(body: ManualVideoPreviewIn, db: Session = Depends(get_db)):
+    video_id, data = _manual_inspect(body.url)
+    live_status = _manual_live_status(data)
+    action = action_for_live_status(live_status)
+    channel_youtube_id = str(data.get("channel_id") or data.get("uploader_id") or "")
+    channel = db.scalar(select(Channel).where(Channel.youtube_channel_id == channel_youtube_id)) if channel_youtube_id else None
+    existing = db.scalar(select(Video).where(Video.youtube_video_id == video_id))
+    scheduled = data.get("release_timestamp") or data.get("timestamp")
+    scheduled_at = datetime.fromtimestamp(scheduled, timezone.utc) if scheduled and live_status == "is_upcoming" else None
+    thumbnails = data.get("thumbnails") or []
+    thumbnail = f"/api/videos/manual/thumbnail/{video_id}"
+    title = data.get("title") or ""
+    if live_status == "is_live":
+        title = re.sub(r" \d{4}-\d{2}-\d{2} \d{2}:\d{2}$", "", title)
+    return {"video_id": video_id, "title": title, "thumbnail": thumbnail,
+            "channel": {"youtube_channel_id": channel_youtube_id, "name": data.get("channel") or data.get("uploader") or "不明なチャンネル",
+                        "registered": channel is not None, "monitored": bool(channel and channel.enabled and not channel.archived)},
+            "live_status": live_status, "scheduled_start_at": scheduled_at, "duration": data.get("duration"),
+            "action": action, "action_label": _manual_action_label(action), "existing": _manual_existing_out(existing)}
+
+
+@router.get("/videos/manual/thumbnail/{video_id}")
+def manual_video_thumbnail(video_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise HTTPException(404, "サムネイルがありません")
+    thumbnail = resolve_thumbnail(f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                                  Path(settings.data_dir) / "thumbnails",
+                                  settings.remote_image_fetch_enabled)
+    if not thumbnail:
+        raise HTTPException(404, "サムネイルがありません")
+    return FileResponse(thumbnail, headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.post("/videos/manual")
+def add_manual_video(body: ManualVideoIn, db: Session = Depends(get_db)):
+    video_id, data = _manual_inspect(body.url)
+    if body.storage_id is not None and db.get(Storage, body.storage_id) is None:
+        _manual_error_fields("storage_id", "指定した保存先がありません")
+    live_status = _manual_live_status(data)
+    action = action_for_live_status(live_status)
+    existing = db.scalar(select(Video).where(Video.youtube_video_id == video_id))
+    if existing:
+        if existing.status not in ("WAITING_LIVE", "SKIPPED", "CANCELLED"):
+            raise HTTPException(409, detail={"error": f"この動画は登録済みです（状態: {video_status_label(existing.status)}）", "video_id": video_id})
+        existing.status = "WAITING_LIVE" if action == "wait_live" else "DISCOVERED"
+        existing.raw_metadata = {**(existing.raw_metadata or {}), "live_status": live_status or "was_live",
+                                 "manual": True, "manual_added_at": now().isoformat(), "schedule_enabled": True}
+        db.commit()
+        out = VideoOut.model_validate(existing).model_dump()
+        out["manual"] = True
+        return {"video": out, "action": action, "created": False, "channel_created": False}
+    channel_id = str(data.get("channel_id") or data.get("uploader_id") or "")
+    if not channel_id:
+        _manual_error_fields("url", "動画のチャンネル情報を取得できません")
+    channel = db.scalar(select(Channel).where(Channel.youtube_channel_id == channel_id))
+    channel_created = channel is None
+    if channel is None:
+        channel = Channel(youtube_channel_id=channel_id, url=f"https://www.youtube.com/channel/{channel_id}",
+                          name=data.get("channel") or data.get("uploader") or channel_id, enabled=False)
+        db.add(channel)
+        db.flush()
+        db.commit()
+        try:
+            from .channels import refresh_channel_metadata
+            refresh_channel_metadata(channel)
+        except Exception:
+            pass
+    scheduled = data.get("release_timestamp") or data.get("timestamp")
+    scheduled_at = datetime.fromtimestamp(scheduled, timezone.utc) if scheduled and action == "wait_live" else None
+    metadata = {"live_status": live_status if action != "download_archive" else "was_live", "manual": True,
+                "manual_added_at": now().isoformat(), "schedule_enabled": True}
+    title = data.get("title") or ""
+    if live_status == "is_live":
+        title = re.sub(r" \d{4}-\d{2}-\d{2} \d{2}:\d{2}$", "", title)
+    video = Video(youtube_video_id=video_id, channel_id=channel.id, title=title,
+                  thumbnail_url=data.get("thumbnail"), original_duration=data.get("duration"),
+                  scheduled_start_at=scheduled_at, status="WAITING_LIVE" if action == "wait_live" else "DISCOVERED",
+                  raw_metadata=metadata, storage_id=body.storage_id, protected=body.protected,
+                  protection_reason="MANUAL" if body.protected else None, protected_at=now() if body.protected else None)
+    db.add(video)
+    db.flush()
+    db.add(AuditLog(video_id=video.id, channel_id=channel.id, action="MANUAL_ADD", reason=action))
+    db.commit()
+    db.refresh(video)
+    out = VideoOut.model_validate(video).model_dump()
+    out["manual"] = True
+    return {"video": out, "action": action, "created": True, "channel_created": channel_created}
 
 
 def _ensure_media_info(video_id: int, directory: Path | None, metadata: dict) -> dict | None:
@@ -121,7 +261,7 @@ def videos(offset: int = 0, limit: int = 50, status: str | None = None,
                     skip_reason=metadata.get("skip_reason"), cancel_reason=metadata.get("cancel_reason"),
                     missed_live=bool(metadata.get("missed_live")), schedule_enabled=metadata.get("schedule_enabled", True),
                     live_status=metadata.get("live_status"), recording_start_offset_ms=metadata.get("recording_start_offset_ms", 0),
-                    live_from_start=metadata.get("live_from_start"))
+                    live_from_start=metadata.get("live_from_start"), manual=bool(metadata.get("manual")))
         if v.status in ("RECORDING_FAILED", "WAITING_FOR_STORAGE") and v.file_path:
             error_path = Path(v.file_path).parent / f"{v.youtube_video_id}-recording-error.log"
             try: item["last_error"] = error_path.read_text(encoding="utf-8", errors="replace")[-2000:]
@@ -131,7 +271,8 @@ def videos(offset: int = 0, limit: int = 50, status: str | None = None,
         source = source_media(directory) if directory else None
         item.update(video_playback_metadata(v.id, source, media_info_by_id.get(v.id))
                     if source else {"media": media_info_by_id.get(v.id), "renditions": []})
-        item["has_thumbnail"] = bool(directory and any(p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} for p in directory.iterdir()))
+        folder_thumbnail = bool(directory and any(p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} for p in directory.iterdir()))
+        item["has_thumbnail"] = folder_thumbnail or allowed_thumbnail_url(v.thumbnail_url)
         result.append(item)
     return result
 
@@ -157,11 +298,12 @@ def video_detail(video_id: int, db: Session = Depends(get_db)):
                 skip_reason=metadata.get("skip_reason"), cancel_reason=metadata.get("cancel_reason"),
                 missed_live=bool(metadata.get("missed_live")), schedule_enabled=metadata.get("schedule_enabled", True),
                 live_status=metadata.get("live_status"), recording_start_offset_ms=metadata.get("recording_start_offset_ms", 0),
-                live_from_start=metadata.get("live_from_start"))
+                live_from_start=metadata.get("live_from_start"), manual=bool(metadata.get("manual")))
     media = media_file(directory) if directory else None
     item["media_extension"] = media.suffix.lower() if media else None
     item.update(video_playback_metadata(video.id, source, info) if source else {"media": info, "renditions": []})
-    item["has_thumbnail"] = bool(directory and any(path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} for path in directory.iterdir()))
+    folder_thumbnail = bool(directory and any(path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} for path in directory.iterdir()))
+    item["has_thumbnail"] = folder_thumbnail or allowed_thumbnail_url(video.thumbnail_url)
     if video.status in ("RECORDING_FAILED", "WAITING_FOR_STORAGE") and video.file_path:
         try: item["last_error"] = (Path(video.file_path).parent / f"{video.youtube_video_id}-recording-error.log").read_text(encoding="utf-8", errors="replace")[-2000:]
         except OSError: item["last_error"] = None
@@ -286,6 +428,8 @@ def chat_messages(video_id: int, offset: int = 0, limit: int = 200, q: str | Non
                   after_ms: int | None = None, before_ms: int | None = None,
                   db: Session = Depends(get_db)):
     video = _video_or_404(db, video_id)
+    replay_job = db.scalar(select(ProcessingJob).where(
+        ProcessingJob.video_id == video_id, ProcessingJob.kind == "CHAT_REPLAY"))
     stmt = select(ChatMessage).where(ChatMessage.video_id == video_id)
     if not include_deleted: stmt = stmt.where(ChatMessage.is_deleted.is_(False))
     available_query = select(func.count()).select_from(stmt.subquery())
@@ -346,8 +490,29 @@ def chat_messages(video_id: int, offset: int = 0, limit: int = 200, q: str | Non
             "color":m.superchat_color or (parsed_raw or {}).get("superchat_color"),
             "header_text":m.header_text or (parsed_raw or {}).get("header_text"),
             "sticker_url":cached_asset(m.sticker_url or (parsed_raw or {}).get("sticker_url"))})
+    bounds = db.execute(select(func.min(ChatMessage.offset_ms), func.max(ChatMessage.offset_ms)).where(
+        ChatMessage.video_id == video_id, ChatMessage.is_deleted.is_(False))).one()
+    metadata = video.raw_metadata or {}
+    replay_state = "disabled" if not video.channel or not video.channel.chat_enabled else (
+        "imported" if metadata.get("chat_replay") == "imported" else
+        "running" if replay_job and replay_job.status == "processing" else
+        "queued" if replay_job and replay_job.status in ("pending",) else
+        "queued" if replay_job and (replay_job.payload or {}).get("manual_queue") else
+        "rate_limited" if metadata.get("chat_replay") == "rate_limited" else
+        "failed" if replay_job and replay_job.status == "failed" else
+        "waiting" if replay_job and replay_job.status == "retry_wait" else
+        "unavailable" if metadata.get("chat_replay") == "unavailable" else
+        metadata.get("chat_replay") if metadata.get("chat_replay") == "failed" else
+        "unavailable")
+    offset = max(0, int(metadata.get("recording_start_offset_ms", 0)))
     result = {"total": total, "available_total": available_total, "chat_enabled": bool(video.channel and video.channel.chat_enabled),
         "chat_replay": (video.raw_metadata or {}).get("chat_replay"), "messages": messages,
+        "replay": {"state": replay_state, "checked_at": metadata.get("chat_replay_checked_at"),
+            "next_attempt_at": utc_json_value(replay_job.next_attempt_at) if replay_job else None,
+            "attempts": replay_job.attempts if replay_job else 0,
+            "error": metadata.get("chat_replay_error") or (replay_job.error if replay_job else None),
+            "covered_from_ms": max(0, bounds[0] - offset) if bounds[0] is not None else None,
+            "covered_to_ms": max(0, bounds[1] - offset) if bounds[1] is not None else None},
         "superchat_totals": {currency or "unknown": float(amount or 0) for currency, amount in sums},
         "unknown_amounts": {display: count for display, count in unknown}}
     db.commit()
@@ -456,15 +621,40 @@ def export_chat(video_id: int, db: Session = Depends(get_db)):
     return result
 
 @router.post("/videos/{video_id}/chat/retrieve")
-def retrieve_chat(video_id: int, db: Session = Depends(get_db)):
-    """Fetch and import the optional live-chat replay."""
+def retrieve_chat(video_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Queue retrieval of the optional live-chat replay."""
     video = _video_or_404(db, video_id)
     channel = video.channel
     if channel and not channel.chat_enabled: raise HTTPException(409, "このチャンネルではチャット取得が無効です")
-    from ..services.chat import retrieve_replay
-    count = retrieve_replay(db, video.id, video.youtube_video_id, channel.cookie_profile if channel else None)
-    current = db.get(Video, video.id)
-    return {"ok": True, "messages_seen": count, "chat_replay": (current.raw_metadata or {}).get("chat_replay", "unavailable")}
+    from ..services.chat import enqueue_replay_retry
+    job = enqueue_replay_retry(db, video.id, immediate=True, restart=True)
+    if job and job.status == "processing":
+        return {"ok": True, "state": "running"}
+    db.commit()
+    if job:
+        background_tasks.add_task(_process_chat_replay, video_id)
+    return {"ok": True, "state": "queued"}
+
+
+def _process_chat_replay(video_id: int) -> None:
+    from ..models import ProcessingJob
+    from ..services.chat import process_replay_retry
+    from ..services.locks import default_locks
+
+    with SessionLocal() as lookup_db:
+        job_id = lookup_db.scalar(select(ProcessingJob.id).where(
+            ProcessingJob.video_id == video_id, ProcessingJob.kind == "CHAT_REPLAY"))
+    if job_id is None:
+        return
+    with default_locks.acquire("processing-job", str(job_id)) as lease:
+        if not lease.acquired:
+            return
+        with SessionLocal() as replay_db:
+            job = replay_db.get(ProcessingJob, job_id)
+            if (job and job.status == "retry_wait" and job.next_attempt_at
+                    and job.next_attempt_at <= now()):
+                process_replay_retry(replay_db, job)
+                replay_db.commit()
 
 @router.get("/videos/{video_id}/file")
 def video_file(video_id: int, request: Request, download: bool = False, playable: bool = False,
@@ -544,13 +734,24 @@ def get_conversion_status(video_id: int, mode: str, db: Session = Depends(get_db
 @router.get("/videos/{video_id}/thumbnail")
 def video_thumbnail(video_id: int, db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
-    if not video or not video.file_path: raise HTTPException(404, "サムネイルがありません")
-    try: folder = registered_video_directory(video.file_path, video.storage.root_path if video.storage else None)
-    except (ValueError, OSError): raise HTTPException(404, "サムネイルがありません")
-    thumb = next((p.resolve() for p in folder.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
-    if not thumb or folder not in thumb.parents: raise HTTPException(404, "サムネイルがありません")
+    if not video: raise HTTPException(404, "サムネイルがありません")
+    file_path = video.file_path
+    storage_root = video.storage.root_path if video.storage else None
+    thumbnail_url = video.thumbnail_url
     db.close()
-    return FileResponse(thumb)
+    if file_path:
+        try:
+            folder = registered_video_directory(file_path, storage_root)
+            thumb = next((p.resolve() for p in folder.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
+            if thumb and folder in thumb.parents:
+                return FileResponse(thumb)
+        except (ValueError, OSError):
+            pass
+    thumb = resolve_thumbnail(thumbnail_url, Path(settings.data_dir) / "thumbnails",
+                              settings.remote_image_fetch_enabled)
+    if not thumb:
+        raise HTTPException(404, "サムネイルがありません")
+    return FileResponse(thumb, headers={"Cache-Control": "public, max-age=3600"})
 
 @router.post("/videos/{video_id}/protect")
 def protect_video(video_id: int, db: Session = Depends(get_db)):

@@ -4,6 +4,7 @@ import subprocess
 import pytest
 
 from app.services.monitor import calculate_next_interval
+from app.services.activity_profile import Profile, build_profile
 from app.services.recovery import classify_recovery
 from app.services.youtube import classify_ytdlp_error, resolve_channel, streams_url, ytdlp_command
 from app.services.policy import classify_remote
@@ -68,21 +69,49 @@ def test_fake_upcoming_requires_ignore_no_formats_error(fake_youtube):
 NOW = datetime(2026, 10, 4, tzinfo=timezone.utc)
 
 
-@pytest.mark.parametrize(("poll", "times", "expected"), [
-    ("AUTO", [], (1800, 3600)),
-    ("AUTO", [NOW + timedelta(hours=30)], (1800, 3600)),
-    ("AUTO", [NOW + timedelta(hours=12), NOW + timedelta(minutes=25)], (60, 180)),
-    ("AUTO", [NOW - timedelta(hours=7), NOW + timedelta(hours=1)], (300, 600)),
-    ("AUTO", [NOW + timedelta(minutes=4)], (15, 30)),
-    ("AUTO", [NOW - timedelta(minutes=20)], (15, 30)),
-    ("AUTO", [NOW - timedelta(hours=2)], (300, 600)),
-    ("AUTO", [None], (300, 600)),
-    ("AUTO", [NOW + timedelta(days=2), None], (300, 600)),
-    ("30", [NOW + timedelta(minutes=5)], (15, 30)),
-    ("bogus", [], (1620, 1980)),
+@pytest.mark.parametrize("poll", ["30", "45", "60", "90", "120", "180", "240", "360"])
+def test_numeric_interval_uses_ten_percent_jitter(poll):
+    minutes = int(poll)
+    assert calculate_next_interval(poll, [], NOW) == pytest.approx((minutes * 54, minutes * 66))
+
+
+@pytest.mark.parametrize(("offset", "expected"), [
+    (timedelta(minutes=31), (60, 60)),
+    (timedelta(minutes=30), (120, 240)),
+    (timedelta(minutes=5), (20, 40)),
+    (-timedelta(minutes=5), (20, 40)),
+    (-timedelta(minutes=10), (60, 120)),
+    (-timedelta(minutes=60), (300, 600)),
+    (-timedelta(hours=6), (1800, 3600)),
 ])
-def test_calculate_next_interval(poll, times, expected):
-    assert calculate_next_interval(poll, times, NOW) == pytest.approx(expected)
+def test_scheduled_interval_boundaries(offset, expected):
+    assert calculate_next_interval("AUTO", [NOW + offset], NOW) == pytest.approx(expected)
+
+
+def test_unknown_schedule_uses_six_to_twenty_minutes_or_shorter():
+    assert calculate_next_interval("AUTO", [None], NOW) == (600, 1200)
+    assert calculate_next_interval("30", [None], NOW) == (600, 1200)
+    assert calculate_next_interval("AUTO", [NOW + timedelta(hours=6), None], NOW) == (600, 1200)
+
+
+def test_scheduled_shortening_also_applies_to_fixed_interval():
+    assert calculate_next_interval("360", [NOW + timedelta(minutes=4)], NOW) == (20, 40)
+
+
+def test_auto_activity_levels_and_hot_start_cap():
+    history = [datetime(2026, 9, 1, 21, tzinfo=timezone.utc)] * 8
+    profile = build_profile(history)
+    hot_now = datetime(2026, 10, 4, 21, tzinfo=timezone.utc)
+    cold_now = datetime(2026, 10, 4, 9, tzinfo=timezone.utc)
+    assert calculate_next_interval("AUTO", [], NOW) == (1800, 3600)
+    assert calculate_next_interval("AUTO", [], hot_now, profile) == (900, 1800)
+    assert calculate_next_interval("AUTO", [], cold_now, profile) == (7200, 14400)
+    warm_profile = Profile(24, "weekhour", ("warm",) * 168)
+    assert calculate_next_interval("AUTO", [], cold_now, warm_profile) == (1800, 3600)
+    cold_levels = ["cold"] * 168
+    cold_levels[cold_now.weekday() * 24 + 21] = "hot"
+    upcoming_hot = Profile(24, "weekhour", tuple(cold_levels))
+    assert calculate_next_interval("AUTO", [], cold_now.replace(hour=20), upcoming_hot) == (4200, 4200)
 
 
 @pytest.mark.parametrize(("attempt", "status", "action"), [

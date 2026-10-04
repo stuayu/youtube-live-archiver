@@ -40,7 +40,7 @@ class Channel(Base):
     chat_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
-    poll_interval: Mapped[str] = mapped_column(String(20), default="30")
+    poll_interval: Mapped[str] = mapped_column(String(20), default="AUTO")
     storage_id: Mapped[int | None] = mapped_column(ForeignKey("storages.id"))
     fallback_storage_id: Mapped[int | None] = mapped_column(ForeignKey("storages.id"))
     retention_days: Mapped[int | None] = mapped_column(Integer, default=30)
