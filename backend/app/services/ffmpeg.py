@@ -1,6 +1,7 @@
 """Safe ffmpeg operations used by derived media processing."""
 import subprocess
 import tempfile
+import os
 from pathlib import Path
 
 from ..config import settings
@@ -13,6 +14,10 @@ def run_ffmpeg(args: list[str], *, timeout=60, text=False):
 
 def launch_ffmpeg(args: list[str], **kwargs):
     """Launch streaming ffmpeg commands through the shared process wrapper."""
+    if os.name == "nt":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        kwargs.setdefault("start_new_session", True)
     return subprocess.Popen(args, **kwargs)
 
 

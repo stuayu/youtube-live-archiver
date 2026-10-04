@@ -32,9 +32,9 @@ def classify_remote(status: str | None, error: str | None, original_duration: fl
 
 def may_delete(*, protected: bool, status: str, remote_status: str | None, edit_unchanged: bool | None,
                check_succeeded: bool, retention_expires_at: datetime | None, grace_until: datetime | None,
-               now: datetime) -> bool:
+               now: datetime, is_partial: bool = False) -> bool:
     """全条件必須。再確認成功を呼出側で保証する。"""
-    if protected or status != "DELETE_ELIGIBLE":
+    if protected or is_partial or status != "DELETE_ELIGIBLE":
         return False
     if not check_succeeded or remote_status != "PUBLIC" or edit_unchanged is not True:
         return False
@@ -44,8 +44,8 @@ def may_delete(*, protected: bool, status: str, remote_status: str | None, edit_
 
 
 def initial_retention_decision(*, protected: bool, finished_at: datetime | None,
-                               expires_at: datetime | None, now: datetime) -> str:
-    if protected:
+                               expires_at: datetime | None, now: datetime, is_partial: bool = False) -> str:
+    if protected or is_partial:
         return "KEEP"
     if finished_at is None or expires_at is None:
         return "KEEP"
@@ -69,18 +69,22 @@ def compare_fingerprints(mode: str, local: list[dict], remote: list[dict],
         audio_differences = []
         for sample in local:
             other = by_position[round(float(sample["position"]), 4)]
-            a, b = sample["video_hash"], other["video_hash"]
-            if not a or not b or len(a) != len(b):
+            a = sample["video_hash"]
+            video_candidates = other.get("video_hashes") or [other.get("video_hash")]
+            video_candidates = [value for value in video_candidates if value]
+            if not a or not video_candidates or any(len(a) != len(b) for b in video_candidates):
                 raise ValueError("missing video fingerprint")
             bits = len(a) * 4
-            video_differences.append((int(a, 16) ^ int(b, 16)).bit_count() / bits)
+            video_differences.append(min((int(a, 16) ^ int(b, 16)).bit_count() / bits for b in video_candidates))
             if need_audio:
-                if not sample.get("audio_hash") or not other.get("audio_hash"):
+                audio_candidates = other.get("audio_hashes") or [other.get("audio_hash")]
+                audio_candidates = [value for value in audio_candidates if value]
+                if not sample.get("audio_hash") or not audio_candidates:
                     raise ValueError("missing audio fingerprint")
-                aa, ab = sample["audio_hash"], other["audio_hash"]
-                if len(aa) != len(ab):
+                aa = sample["audio_hash"]
+                if any(len(aa) != len(ab) for ab in audio_candidates):
                     raise ValueError("audio fingerprint size mismatch")
-                audio_differences.append((int(aa, 16) ^ int(ab, 16)).bit_count() / (len(aa) * 4))
+                audio_differences.append(min((int(aa, 16) ^ int(ab, 16)).bit_count() / (len(aa) * 4) for ab in audio_candidates))
         if max(video_differences) > video_threshold:
             return Decision("PROTECTED", "REMOTE_CONTENT_CHANGED")
         if need_audio and max(audio_differences) > audio_threshold:

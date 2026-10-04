@@ -1,0 +1,68 @@
+from .common import *
+
+@router.get("/settings/transcription")
+def get_transcription_settings(db: Session = Depends(get_db)):
+    from ..services.processing import effective_settings
+    result = effective_settings(db)
+    db.commit()
+    return result
+
+@router.put("/settings/transcription")
+def put_transcription_settings(data: TranscriptionSettingsIn, db: Session = Depends(get_db)):
+    from ..services.processing import TRANSCRIPTION_DEFAULTS
+    allowed = set(TRANSCRIPTION_DEFAULTS)
+    values = data.model_dump(exclude_unset=True)
+    if set(values) - allowed:
+        raise HTTPException(422, "不明な設定項目です")
+    for key, value in values.items():
+        row = db.get(AppSetting, key)
+        if row is None:
+            row = AppSetting(key=key, value={"value": value})
+            db.add(row)
+        else:
+            row.value = {"value": value}
+    db.commit()
+    return {**TRANSCRIPTION_DEFAULTS, **{row.key: row.value["value"] for row in db.query(AppSetting).all() if row.key in allowed}}
+
+@router.get("/settings/summary")
+def get_summary_settings(db: Session = Depends(get_db)):
+    from ..services.processing import effective_summary_settings
+    result = effective_summary_settings(db)
+    db.commit()
+    return result
+
+@router.put("/settings/summary")
+def put_summary_settings(data: SummarySettingsIn, db: Session = Depends(get_db)):
+    from ..services.processing import SUMMARY_DEFAULTS, effective_summary_settings
+    allowed = set(SUMMARY_DEFAULTS) - {"openrouter_api_key_set"}
+    values = data.model_dump(exclude_unset=True)
+    if set(values) - allowed: raise HTTPException(422, "不明な設定項目です")
+    for key, value in values.items():
+        if key == "openrouter_api_key":
+            if value:
+                row = db.get(AppSetting, key)
+                if row is None: db.add(AppSetting(key=key, value={"value": str(value)}))
+                else: row.value = {"value": str(value)}
+            continue
+        if key == "summary_chunk_minutes" and int(value) not in (15, 20, 30, 60): raise HTTPException(422, "区間は15/20/30/60分です")
+        if key == "openrouter_max_concurrency" and not 1 <= int(value) <= 4: raise HTTPException(422, "同時実行数は1〜4です")
+        if key == "openrouter_max_attempts" and not 1 <= int(value) <= 10: raise HTTPException(422, "最大試行数は1〜10です")
+        if key in ("openrouter_model", "openrouter_base_url") and (not isinstance(value, str) or len(value) > 500): raise HTTPException(422, "設定値が不正です")
+        row = db.get(AppSetting, key)
+        if row is None: db.add(AppSetting(key=key, value={"value": value}))
+        else: row.value = {"value": value}
+    db.commit()
+    return effective_summary_settings(db)
+
+@router.get("/quality-presets")
+def quality_presets():
+    return PRESETS
+
+@router.get("/settings/recording")
+def get_recording_settings():
+    return {"max_concurrent_live_recordings": settings.max_concurrent_live_recordings,
+            "max_concurrent_archive_downloads": settings.max_concurrent_archive_downloads,
+            "monitor_concurrency": settings.monitor_concurrency, "downloader": settings.downloader,
+            "default_quality": settings.archive_quality, "live_quality": settings.live_quality,
+            "archive_quality": settings.archive_quality, "yt_dlp_path": settings.yt_dlp_path,
+            "ffmpeg_path": settings.ffmpeg_path}

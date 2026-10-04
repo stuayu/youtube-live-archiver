@@ -39,8 +39,26 @@ def prune_hls(hls_dir: Path, limit_bytes: int) -> int:
 
 def tee_args(ffmpeg_path: str, hls_dir: Path, output_file: Path) -> list[str]:
     hls_dir.mkdir(parents=True, exist_ok=True)
+    transport_stream = output_file.with_suffix(".tee.ts")
     return [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-y", "-i", "pipe:0", "-map", "0", "-c", "copy", "-f", "tee",
-            f"[f=matroska]{output_file}|[f=hls:hls_time=6:hls_list_size=0:hls_flags=append_list+independent_segments:hls_segment_filename={hls_dir / 'segment_%06d.ts'}]{hls_dir / 'index.m3u8'}"]
+            f"[f=mpegts]{transport_stream}|[f=hls:hls_time=6:hls_list_size=0:hls_flags=append_list+independent_segments:hls_segment_filename={hls_dir / 'segment_%06d.ts'}]{hls_dir / 'index.m3u8'}"]
+
+
+def finalize_tee_archive(ffmpeg_path: str, transport_stream: Path, output_file: Path) -> bool:
+    """Remux tee's transport stream into MKV after FFmpeg closes both outputs."""
+    temporary = output_file.with_name(f"{output_file.stem}.tee.tmp.mkv")
+    result = subprocess.run(
+        [ffmpeg_path, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(transport_stream),
+         "-map", "0", "-c", "copy", str(temporary)],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode or not temporary.is_file() or temporary.stat().st_size <= 0:
+        temporary.unlink(missing_ok=True)
+        return False
+    temporary.replace(output_file)
+    transport_stream.unlink(missing_ok=True)
+    return True
 
 def safe_hls_asset(video, asset: str) -> Path:
     if not video.live_hls_path or not SAFE_ASSET.fullmatch(asset):

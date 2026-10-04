@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # 再起動時に進行中の録画サブプロセスが巻き込まれるため、既定は無効。
     app_reload: bool = False
     app_reload_dirs: str = "app"
+    scheduler_enabled: bool = True
+    db_idle_in_transaction_timeout_ms: int = 60000
     downloader: Literal["native", "aria2c"] = "native"
     # yt-dlp の --concurrent-fragments。断片化された HLS/DASH では
     # aria2c より native + -N のほうが速く安定する。
@@ -26,9 +28,21 @@ class Settings(BaseSettings):
     aria2c_split: int = 16
     aria2c_min_split_size: str = "1M"
     aria2c_max_concurrent_downloads: int = 4
-    poll_interval_seconds: int = 60
     channel_stats_interval_hours: int = 24
     remote_timeout_seconds: int = 45
+    monitor_batch_size: int = 20
+    monitor_concurrency: int = 3
+    monitor_max_inspects_per_scan: int = 5
+    max_concurrent_live_recordings: int = 8
+    max_concurrent_archive_downloads: int = 2
+    recovery_max_attempts: int = 20
+    recorder_shutdown_timeout_seconds: int = 20
+    live_gap_backfill: bool = True
+    live_gap_backfill_threshold_seconds: int = 120
+    live_from_start: bool = True
+    live_from_start_max_age_hours: int = 12
+    storage_retry_seconds: int = 60
+    integrity_batch_size: int = 200
     duration_tolerance_seconds: int = 30
     fingerprint_enabled: bool = True
     fingerprint_video_threshold: float = 0.25

@@ -7,8 +7,10 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_engine(settings.database_url, pool_pre_ping=True,
-    connect_args={"options": "-c idle_in_transaction_session_timeout=60000"} if settings.database_url.startswith(("postgresql://", "postgresql+")) else {})
+_connect_args = {}
+if settings.database_url.startswith(("postgresql://", "postgresql+")):
+    _connect_args["options"] = f"-c idle_in_transaction_session_timeout={max(0, settings.db_idle_in_transaction_timeout_ms)}"
+engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args=_connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

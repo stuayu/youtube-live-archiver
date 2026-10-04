@@ -327,5 +327,24 @@ def processing_worker():
                 _process_transcription(job_id)
     with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="processing") as pool:
         list(pool.map(run, due))
+    chat_db = SessionLocal()
+    try:
+        replay_due = chat_db.scalars(select(ProcessingJob.id).where(
+            ProcessingJob.kind == "CHAT_REPLAY",
+            ProcessingJob.status == "retry_wait",
+            ProcessingJob.next_attempt_at <= now(),
+        ).order_by(ProcessingJob.created_at).limit(4)).all()
+    finally:
+        chat_db.close()
+    for job_id in replay_due:
+        with default_locks.acquire("processing-job", str(job_id)) as lease:
+            if not lease.acquired:
+                continue
+            with SessionLocal() as replay_db:
+                job = replay_db.get(ProcessingJob, job_id)
+                if job and job.status == "retry_wait" and job.next_attempt_at <= now():
+                    from .chat import process_replay_retry
+                    process_replay_retry(replay_db, job)
+                    replay_db.commit()
     # Summary failures stay in the independent summary job state machine.
     summary_worker()
