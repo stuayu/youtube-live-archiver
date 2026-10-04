@@ -28,9 +28,11 @@ def _start_database():
                 shutil.rmtree(temp_root, ignore_errors=True)
             return None, None, None, None, f"YLA_TEST_DATABASE_URL 未設定、pgserver 起動不可: {exc}"
 
+    # Initialize app settings only after giving them a test-only database URL.
+    os.environ["DATABASE_URL"] = admin_url
+    from app.database import normalize_database_url
+    admin_url = normalize_database_url(admin_url)
     parsed = make_url(admin_url)
-    if parsed.drivername == "postgresql":
-        parsed = parsed.set(drivername="postgresql+psycopg")
     database_name = f"yla_test_{secrets.token_hex(6)}"
     database_url = parsed.set(database=database_name)
     admin_engine = create_engine(parsed, isolation_level="AUTOCOMMIT")
@@ -101,6 +103,8 @@ _TEST_URL = os.environ.get("DATABASE_URL") if _DATABASE_NAME else None
 # TRANSCRIPTION_ENABLED=false. Preserve only the isolated test database URL.
 if _DATABASE_NAME:
     from app.config import Settings, settings
+
+    settings.database_url = os.environ["DATABASE_URL"]
 
     for field_name, field in Settings.model_fields.items():
         if field_name == "database_url" or field.default is None:

@@ -2,15 +2,23 @@ import json
 import subprocess
 import os
 import sys
+import shutil
+import importlib.util
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from ..config import settings
 from .download import downloader_args
 
 
 def ytdlp_command() -> list[str]:
-    path = settings.yt_dlp_path
+    path = settings.yt_dlp_path.strip() or "yt-dlp"
     if path.lower().endswith(".py"):
-        return [sys.executable, path]
+        if Path(path).is_file():
+            return [sys.executable, path]
+    elif shutil.which(path) or Path(path).is_file():
+        return [path]
+    if importlib.util.find_spec("yt_dlp") is not None:
+        return [sys.executable, "-m", "yt_dlp"]
     return [path]
 
 

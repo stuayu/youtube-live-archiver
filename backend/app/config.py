@@ -1,14 +1,18 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
 from typing import Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    database_url: str = "postgresql+psycopg://archiver:archiver@db:5432/archiver"
-    storage_root: str = "/archive"
+    database_url: str = ""
+    storage_root: str = "./data/archive"
     live_quality: str = ""
     archive_quality: str = "bv*[vcodec^=av01]+ba/bv*[vcodec^=vp9]+ba/bv*+ba/b"
     data_dir: str = "./data"
+    auto_migrate: bool = True
+    database_connect_retry_seconds: float = 30
     yt_dlp_path: str = "yt-dlp"
     ffmpeg_path: str = "ffmpeg"
     app_host: str = "0.0.0.0"
@@ -64,3 +68,16 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Resolve relative data paths against the backend directory once, so service
+# and local launches use the same stable locations regardless of process cwd.
+_backend_dir = Path(__file__).resolve().parents[1]
+
+
+def _backend_path(value: str) -> str:
+    path = Path(value).expanduser()
+    return str((path if path.is_absolute() else _backend_dir / path).resolve())
+
+
+settings.data_dir = _backend_path(settings.data_dir)
+settings.storage_root = _backend_path(settings.storage_root)

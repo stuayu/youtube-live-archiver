@@ -2,10 +2,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
 from fastapi.encoders import jsonable_encoder
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -79,26 +79,31 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(_tracked_job("processing-queue", processing_worker), "interval", seconds=10, id="processing-queue", max_instances=1, coalesce=True)
         scheduler.start()
     yield
-    if not settings.scheduler_enabled:
-        return
-    if scheduler.running:
-        scheduler.shutdown(wait=False)
-    from .services.recorder import shutdown as shutdown_recorders
-    from .config import settings
-    from .db import SessionLocal
-    from .models import Video, now
-    from sqlalchemy import select
-    from .workers import stop_recording
-    unfinished = shutdown_recorders(lambda video_id: stop_recording(video_id, user_requested=False),
-                                    settings.recorder_shutdown_timeout_seconds)
-    if unfinished:
-        with SessionLocal() as db:
-            rows = db.scalars(select(Video).where(Video.id.in_(unfinished))).all()
-            for video in rows:
-                video.status = "RECORDING_FAILED"
-                video.recording_heartbeat_at = None
-                video.next_recovery_at = None
-            db.commit()
+    try:
+        if not settings.scheduler_enabled:
+            return
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+        from .services.recorder import shutdown as shutdown_recorders
+        from .db import SessionLocal
+        from .models import Video
+        from sqlalchemy import select
+        from .workers import stop_recording
+        unfinished = shutdown_recorders(lambda video_id: stop_recording(video_id, user_requested=False),
+                                        settings.recorder_shutdown_timeout_seconds)
+        if unfinished:
+            with SessionLocal() as db:
+                rows = db.scalars(select(Video).where(Video.id.in_(unfinished))).all()
+                for video in rows:
+                    video.status = "RECORDING_FAILED"
+                    video.recording_heartbeat_at = None
+                    video.next_recovery_at = None
+                db.commit()
+    finally:
+        from .database import stop_embedded_postgres
+        from .db import engine
+        engine.dispose()
+        stop_embedded_postgres()
 
 
 app = FastAPI(title="YouTube Live Archiver", lifespan=lifespan)
@@ -184,6 +189,12 @@ async def integrity_error(request: Request, exc: IntegrityError):
     return JSONResponse(status_code=409, content={"error": "既に登録済みのデータです"})
 
 
+@app.exception_handler(SQLAlchemyError)
+async def database_unavailable(request: Request, exc: SQLAlchemyError):
+    logging.getLogger(__name__).warning("database request failed: %s", exc.__class__.__name__)
+    return JSONResponse(status_code=503, content={"error": "データベースに接続できません"})
+
+
 @app.exception_handler(Exception)
 async def internal_error(request: Request, exc: Exception):
     logging.getLogger(__name__).exception("unhandled API exception", exc_info=exc)
@@ -199,5 +210,15 @@ def health(): return {"status": "ok"}
 
 # frontend をビルド済みの場合は同一プロセスから配信する（単一サービスで常駐させるため）。
 _dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+@app.get("/", include_in_schema=False)
+def frontend_index():
+    if not _dist.is_dir() or not (_dist / "index.html").is_file():
+        message = "画面のビルドがありません。`cd frontend && npm ci && npm run build` を実行してください"
+        return HTMLResponse(f"<!doctype html><html lang='ja'><meta charset='utf-8'><title>画面のビルドがありません</title><body><h1>画面のビルドがありません</h1><p>{message}</p></body></html>", status_code=503)
+    return FileResponse(_dist / "index.html")
+
+
 if _dist.is_dir():
     app.mount("/", StaticFiles(directory=str(_dist), html=True), name="ui")

@@ -14,6 +14,8 @@ def api_status(db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
         database_ok = False
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="データベースに接続できません")
     with main_module._job_lock:
         job_stats = {key: dict(value) for key, value in main_module._job_stats.items()}
     scheduler_jobs = []
@@ -62,15 +64,24 @@ def api_status(db: Session = Depends(get_db)):
         except OSError:
             unavailable.append(storage.name)
     attention = []
+    if not storage_rows:
+        attention.append({"level": "warning", "code": "storage_missing", "message": "保存先が登録されていません"})
     for name in unavailable: attention.append({"level": "error", "code": "storage_unreachable", "message": f"保存先 {name} に到達できません"})
     for name in low_space: attention.append({"level": "warning", "code": "storage_low_space", "message": f"保存先 {name} の空き容量が不足しています"})
     for name in warning_space: attention.append({"level": "warning", "code": "storage_warning_space", "message": f"保存先 {name} の空き容量が警告しきい値を下回っています"})
     if error_channels: attention.append({"level": "warning", "code": "monitor_errors", "message": f"{error_channels} チャンネルで監視エラー"})
     if not tools["yt_dlp_available"]: attention.append({"level": "error", "code": "yt_dlp_missing", "message": "yt-dlp が見つかりません"})
+    if not tools["ffmpeg_available"]: attention.append({"level": "error", "code": "ffmpeg_missing", "message": "ffmpeg が見つかりません"})
+    if not tools["ffprobe_available"]: attention.append({"level": "error", "code": "ffprobe_missing", "message": "ffprobe が見つかりません"})
     failed_count = state_counts.get("RECORDING_FAILED", 0) + state_counts.get("WAITING_FOR_STORAGE", 0)
     if failed_count: attention.append({"level": "warning", "code": "recording_failures", "message": f"録画失敗 {failed_count} 件"})
     db.commit()
-    return utc_json_value({"database": {"available": database_ok},
+    from ..database import embedded_data_dir, is_embedded_database
+    embedded = is_embedded_database()
+    database = {"available": database_ok, "mode": "embedded" if embedded else "external"}
+    if embedded:
+        database["data_dir"] = str(embedded_data_dir())
+    return utc_json_value({"database": database,
             "scheduler": {"running": main_module.scheduler.running, "jobs": scheduler_jobs},
             "tools": tools,
             "monitor": {"enabled_channel_count": active_channels, "error_channel_count": error_channels,

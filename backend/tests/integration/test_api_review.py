@@ -383,7 +383,9 @@ def test_status_attention_is_empty_without_problems(client, monkeypatch):
     monkeypatch.setattr(main, "_tool_cache", {"yt_dlp_available": True, "yt_dlp_version": "fake",
                                                "yt_dlp_error": None, "ffmpeg_available": True, "ffprobe_available": True})
     status = client.get("/api/status")
-    assert status.status_code == 200 and status.json()["attention"] == []
+    assert status.status_code == 200 and status.json()["attention"] == [
+        {"level": "warning", "code": "storage_missing", "message": "保存先が登録されていません"}
+    ]
 
 
 @pytest.mark.integration

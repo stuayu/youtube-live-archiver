@@ -1,6 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from .config import settings
+from .database import resolve_database_url
 
 
 class Base(DeclarativeBase):
@@ -8,9 +9,10 @@ class Base(DeclarativeBase):
 
 
 _connect_args = {}
-if settings.database_url.startswith(("postgresql://", "postgresql+")):
+_database_url = resolve_database_url()
+if _database_url.startswith(("postgresql://", "postgresql+")):
     _connect_args["options"] = f"-c idle_in_transaction_session_timeout={max(0, settings.db_idle_in_transaction_timeout_ms)}"
-engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args=_connect_args)
+engine = create_engine(_database_url, pool_pre_ping=True, connect_args=_connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

@@ -131,7 +131,7 @@ export function useWorkspace() {
     } else if (code === 'recording_failures') {
       values.value.vstatus = 'RECORDING_FAILED'
       setTab('videos')
-    } else if (code === 'yt_dlp_missing') {
+    } else if (code.endsWith('_missing')) {
       setTab('home')
       window.setTimeout(() => document.getElementById('system-details')?.scrollIntoView(), 0)
     }

@@ -19,6 +19,8 @@ services:
       STORAGE_ROOT: /archive
       YT_DLP_PATH: yt-dlp
       FFMPEG_PATH: ffmpeg
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      DATABASE_CONNECT_RETRY_SECONDS: ${DATABASE_CONNECT_RETRY_SECONDS:-30}
     volumes:
       - ${ARCHIVE_PATH:-./archive}:/archive
     ports: ["8000:8000"]

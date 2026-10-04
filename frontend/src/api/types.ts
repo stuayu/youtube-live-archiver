@@ -208,7 +208,7 @@ export interface EventItem {
   channel_name: string | null
 }
 export interface StatusInfo {
-  database: { available: boolean }
+  database: { available: boolean; mode?: 'external' | 'embedded'; data_dir?: string }
   scheduler: {
     running: boolean
     jobs: Array<{

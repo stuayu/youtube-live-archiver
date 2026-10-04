@@ -4,39 +4,26 @@
 
 ## セットアップと起動
 
-### Windows（ローカル実行）
-
-Python、Node.js / npm、PostgreSQL、`yt-dlp`、`ffmpeg` / `ffprobe` を用意し、実行ファイルを PATH に通します。PowerShell の例です。
-
-```powershell
-Copy-Item .env.example backend/.env
-# backend/.env の DATABASE_URL、STORAGE_ROOT などを環境に合わせて編集
-cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt -r requirements-dev.txt
-python -m alembic upgrade head
-cd ..\frontend
-npm ci
-npm run build
-cd ..\backend
-python -m app
-```
-
-画面は `http://localhost:8000/`、API ドキュメントは `http://localhost:8000/docs` です。`APP_HOST` / `APP_PORT` は backend の待受先です。フロントエンドを開発するときは別ターミナルで `cd frontend; npm ci; npm run dev` を実行します。
+ローカル実行は Python 3.11 以上、Node.js / npm、`ffmpeg` が必要です。PostgreSQL と `yt-dlp` は Python 依存関係に含まれ、初回起動時に PostgreSQL を `backend/data/postgres` で自動起動します。録画ファイルの既定保存先は `backend/data/archive` です。
 
 ### macOS / Linux（ローカル実行）
 
-Python 3、Node.js / npm、PostgreSQL、`yt-dlp`、`ffmpeg` / `ffprobe` を用意し PATH に通します。
+`ffmpeg` の導入例です。
 
 ```sh
-cp .env.example backend/.env
-# backend/.env の DATABASE_URL、STORAGE_ROOT などを環境に合わせて編集
+# macOS
+brew install ffmpeg
+# Ubuntu / Debian
+sudo apt update && sudo apt install ffmpeg
+```
+
+リポジトリのルートで次を実行します。.env の作成は任意です。
+
+```sh
 cd backend
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt -r requirements-dev.txt
-python -m alembic upgrade head
 cd ../frontend
 npm ci
 npm run build
@@ -44,11 +31,76 @@ cd ../backend
 python -m app
 ```
 
-既定の待受先は `http://localhost:8000/` です。ローカル実行時は backend の作業ディレクトリから `backend/.env` が読み込まれます。Compose 用の `.env` はリポジトリ直下に別途置きます。フロントエンド開発サーバーは `cd frontend && npm ci && npm run dev` で起動します。
+### Windows（ローカル実行）
+
+Python 3.11 以上と Node.js をインストールし、PowerShell で `winget install -e --id Gyan.FFmpeg` を実行します。新しい PowerShell を開き、リポジトリのルートで次を実行します。
+
+```powershell
+Set-Location backend
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt -r requirements-dev.txt
+Set-Location ..\frontend
+npm ci
+npm run build
+Set-Location ..\backend
+python -m app
+```
+
+起動ログに組み込み PostgreSQL の場所と `http://0.0.0.0:8000/ で待受中` が表示されます。ブラウザーでは `http://localhost:8000/` を開きます。ホーム画面で保存先を登録後、チャンネルを登録すると監視と録画を開始できます。ローカル実行では PostgreSQL と yt-dlp の別途インストールは不要です。
+
+起動ログ例:
+
+```text
+組み込み PostgreSQL: /.../backend/data/postgres
+アプリデータ: /.../backend/data
+保存先ルート: /.../backend/data/archive
+http://0.0.0.0:8000/ で待受中
+```
+
+外部 DB に接続できない場合は次のように表示して、HTTP server を起動せず終了します。
+
+```text
+データベースに接続できません: connection refused。backend/.env の DATABASE_URL（現在: localhost:5432/yla）を確認してください。
+```
+
+### ローカル実行の設定
+
+`.env.example` を `backend/.env` にコピーするのは任意です。既定値のまま起動できます。外部 PostgreSQL、待受ポート、保存先を変更するときだけ `backend/.env` を作成し、例のように設定します。相対パスは backend ディレクトリ基準で絶対パスに解決されます。
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/yla
+APP_PORT=8010
+STORAGE_ROOT=./recordings
+```
+
+外部 PostgreSQL は起動時に接続確認されます。接続できない場合は最大 `DATABASE_CONNECT_RETRY_SECONDS`（既定30秒）再試行後に終了します。`AUTO_MIGRATE=false` の場合は schema が古いと起動せず、`python -m alembic upgrade head` を案内します。
+
+### データの保管と移行
+
+組み込み PostgreSQL は `backend/data/postgres` に保存されます。停止後にアプリ全体のバックアップを取る場合は、録画データの `backend/data/archive` と合わせて `backend/data` をコピーします。稼働中の PostgreSQL データディレクトリをコピーしないでください。外部 PostgreSQL へ移行する場合は、アプリ実行中に dump を取り、その後アプリを停止して外部 DB に restore します。
+
+```sh
+# アプリ実行中、backend ディレクトリで実行。Postgres の一貫した snapshot を dump する。
+# Linux / macOS: postmaster.pid の5行目が socket directory。
+PG_DATA=./data/postgres
+PG_SOCKET="$(sed -n '5p' "$PG_DATA/postmaster.pid")"
+pg_dump -h "$PG_SOCKET" -U postgres -d postgres -Fc -f yla.dump
+createdb -h localhost -U user yla
+pg_restore -h localhost -U user -d yla --no-owner yla.dump
+# 接続確認例
+psql 'postgresql://user:pass@localhost:5432/yla' -c 'SELECT version_num FROM alembic_version'
+```
+
+Windows では `backend\data\postgres\postmaster.pid` の4行目が port です。アプリ実行中に `pg_dump -h 127.0.0.1 -p <port> -U postgres -d postgres -Fc -f yla.dump` を実行してからアプリを停止します。移行後、`backend/.env` の `DATABASE_URL` を外部 URL に変更して起動します。利用環境に応じて `pg_dump` / `pg_restore` を組み込みサーバーのバージョンと合わせてください。
 
 ### Docker Compose
 
-Docker が使える環境では、リポジトリ直下で `docker compose up --build` を実行します。DB、backend、開発用 frontend が起動します。`.env` の `POSTGRES_PASSWORD` と `ARCHIVE_PATH` は Compose 側で使われます。ローカル実行用の `DATABASE_URL` はコンテナ名 `db` を使うため、ホスト上で動かす場合は `localhost` と PostgreSQL のポートに合わせて変更してください。
+リポジトリ直下で `docker compose up --build` を実行します。Compose は `docker-compose.yml` で `DATABASE_URL` を `db` サービス名に設定し、永続 volume に PostgreSQL を保存します。ルート `.env` の `POSTGRES_PASSWORD` と `ARCHIVE_PATH` は Compose 専用です。`.env.example` のローカル `DATABASE_URL` は空欄のままにしてください。Compose backend も起動時に自動 migration します。
+
+### Windows サービス
+
+サービスの `.env` に既存 PostgreSQL の `DATABASE_URL` を明示します。組み込み DB へ切り替える設定変更は不要です。サービス起動時に DB 接続確認と自動 migration が動くため、サービスアカウントに DB 接続権限と `DATA_DIR` / `STORAGE_ROOT` の書き込み権限を設定します。更新前バックアップ、サービス停止、更新、起動後 `/api/status` とログの確認を行います。自動 migration を止める場合は `AUTO_MIGRATE=false` とし、別途 `python -m alembic upgrade head` を実行します。
 
 このアプリには認証がなく、CORS は任意の origin を許可します。信頼できる LAN / tailnet 内で使い、インターネットへ直接公開しないでください。
 
@@ -139,8 +191,11 @@ DPlayer の標準ホットキーを有効にしています。歯車メニュー
 
 | 症状 | 確認箇所 |
 | --- | --- |
-| 画面が表示されない | `APP_HOST` / `APP_PORT`、backend ログ、`frontend/dist` のビルド有無を確認します。開発中は Vite の URL を使います。 |
-| DB 接続・起動エラー | `DATABASE_URL`、PostgreSQL 稼働、`python -m alembic upgrade head` の結果を確認します。 |
+| `frontend/dist` が無い | `cd frontend && npm ci && npm run build` を実行します。起動は続きますが `/` は案内 HTML の 503 を返します。 |
+| DB 接続エラー | 起動ログに表示された `host:port/database` と `backend/.env` の `DATABASE_URL` を確認します。外部 DB は既定30秒再試行します。組み込み DB の導入に失敗した場合は `python -m pip install pgserver` を実行します。 |
+| ポート使用中（`Address already in use`） | `APP_PORT` を空いている番号へ変更して再起動します。 |
+| ffmpeg が無い | macOS は `brew install ffmpeg`、Ubuntu / Debian は `sudo apt install ffmpeg`、Windows は `winget install -e --id Gyan.FFmpeg` を実行します。 |
+| `/api/*` が DB 接続エラー | backend 上部に DB 切断を表示します。DB が復旧すると API 成功時に表示が消えます。 |
 | チャンネル情報を取得できない | `yt-dlp --version`、ネットワーク、Cookie Profile、チャンネルのアクセス権を確認します。 |
 | 配信が検出されない | チャンネル監視状態、`next_check_at`、最終成功 / エラー、システム `/api/status` を確認します。アクセス制限時はクールダウン終了を待ちます。 |
 | 録画が始まらない | 録画枠、保存先の有効 / 書込権限 / 空き容量、`WAITING_FOR_STORAGE`、動画状態、`yt-dlp` ログを確認します。 |
@@ -152,6 +207,12 @@ DPlayer の標準ホットキーを有効にしています。歯車メニュー
 ## テストと画面キャプチャ
 
 `YLA_TEST_DATABASE_URL` を省略すると、backend pytest と Playwright E2E は pgserver を一時ディレクトリで起動し、終了時に片付けます。外部 PostgreSQL を使う場合は、`postgresql+psycopg://...` の専用テスト server（DB 作成権限あり）を指定してください。
+
+README の初回起動手順を一時コピーと新しい venv で確認する smoke test です。依存導入・frontend build を含み、実 YouTube へアクセスしません。
+
+```sh
+python scripts/smoke_first_run.py
+```
 
 ```sh
 cd backend
@@ -197,15 +258,16 @@ E2E と shots は一時 PostgreSQL・backend・frontend を起動します。詳
 
 ### 自動テスト
 
-Round 5b 時点では backend 293件、frontend unit 40件、E2E 45件（3画面幅）が成功しました。Round 8 の最終ローカル実行結果は次のとおりです。
+Round 9 の最終ローカル実行結果は次のとおりです。
 
-- backend pytest: 296 passed（専用 PostgreSQL URL で2回連続、pgserver 自動起動でも296 passed）
+- backend pytest: 304 passed（指定 PostgreSQL URL と `YLA_TEST_DATABASE_URL` 無指定の両方）
 - frontend format:check: 成功
 - frontend lint: 成功
 - frontend build: 成功
-- frontend test:unit: 40 passed
-- frontend E2E: 45 passed（`YLA_TEST_DATABASE_URL` 無指定と専用 PostgreSQL URL の両方）
-- frontend shots: review 74枚を生成し、歯車メニューを目視確認
+- frontend test:unit: 41 passed
+- frontend E2E: 45 passed（PC / tablet / mobile）
+- 初回起動 smoke: 新規 venv で成功。README 手順、組み込み DB、migration、画面、yt-dlp、保存先登録を確認
+- frontend shots: Round 8 で review 74枚を生成し、歯車メニューを目視確認
 
 ### 未検証（理由）
 

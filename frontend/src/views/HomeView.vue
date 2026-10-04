@@ -186,6 +186,11 @@ const ctx = reactive(useWorkspaceContext())
       <summary>システム詳細</summary>
       <div class="meta">
         <span>DB {{ ctx.status?.database.available ? '接続中' : '未接続' }}</span>
+        <span
+          >DB モード
+          {{ ctx.status?.database.mode === 'embedded' ? '組み込み PostgreSQL' : '外部 PostgreSQL' }}</span
+        >
+        <span v-if="ctx.status?.database.data_dir">DB データ {{ ctx.status.database.data_dir }}</span>
         <span>スケジューラー {{ ctx.status?.scheduler.running ? '稼働中' : '停止中' }}</span>
         <span>yt-dlp {{ String(ctx.status?.tools.yt_dlp_version ?? '不明') }}</span>
         <span>ffmpeg {{ ctx.status?.tools.ffmpeg_available ? '利用可能' : '未検出' }}</span>

@@ -19,6 +19,7 @@ import PlayerDialog from './components/PlayerDialog.vue'
 import { useWorkspace } from './composables/useWorkspace'
 import { workspaceKey } from './composables/workspaceContext'
 import type { Tab } from './composables/useQueryState'
+import { databaseUnavailable } from './api/client'
 
 const workspace = useWorkspace()
 provide(workspaceKey, workspace)
@@ -78,6 +79,9 @@ function playerUpdated() {
         </button>
       </header>
       <div v-if="ctx.refreshing" class="loading-strip" />
+      <div v-if="databaseUnavailable" class="attention error db-unavailable" role="alert">
+        backend はデータベースに接続できていません
+      </div>
       <div class="content"><component :is="activeView" /></div>
     </main>
 

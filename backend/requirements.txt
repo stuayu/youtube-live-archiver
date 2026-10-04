@@ -2,6 +2,8 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 SQLAlchemy==2.0.38
 psycopg[binary]==3.2.5
+pgserver
+yt-dlp
 alembic==1.14.1
 APScheduler==3.11.0
 pydantic-settings==2.7.1

@@ -1,5 +1,7 @@
 import type { ApiError } from './types'
+import { ref } from 'vue'
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
+export const databaseUnavailable = ref(false)
 export class HttpError extends Error implements ApiError {
   status: number
   fields: Record<string, string>
@@ -58,8 +60,10 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
         : typeof payload === 'string' && payload.trim()
           ? payload.slice(0, 300)
           : `要求に失敗しました (${response.status})`
+    if (message === 'データベースに接続できません') databaseUnavailable.value = true
     throw new HttpError(message, response.status, fields)
   }
+  databaseUnavailable.value = false
   return payload as T
 }
 export function jsonBody(value: unknown): RequestInit {
