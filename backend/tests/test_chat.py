@@ -415,7 +415,7 @@ def test_chat_api_supports_legacy_string_badges_and_raw_renderer(client):
     assert message["author"]["badges"][0]["url"].startswith("/api/chat-assets/")
 
 
-def test_chat_asset_key_must_resolve_to_a_stored_chat_url(client, monkeypatch):
+def test_chat_asset_key_must_be_one_the_chat_api_issued(client, monkeypatch):
     from app.db import SessionLocal
     from app.services import chat_assets
 
@@ -433,6 +433,94 @@ def test_chat_asset_key_must_resolve_to_a_stored_chat_url(client, monkeypatch):
     key = chat_assets.asset_key("https://yt3.ggpht.com/not-in-database.png")
     response = client.get(f"/api/chat-assets/{key}")
     assert response.status_code == 404
+
+def _chat_video_with_emote(url: str) -> int:
+    from app.db import SessionLocal
+
+    with SessionLocal() as session:
+        channel = Channel(youtube_channel_id="UCassetflow", url="https://youtube.com/@assetflow", name="asset")
+        session.add(channel)
+        session.flush()
+        video = Video(youtube_video_id="abcdefghijk4", channel_id=channel.id)
+        session.add(video)
+        session.flush()
+        session.add(ChatMessage(
+            video_id=video.id, message_id="emote-message", offset_ms=0, author_name="viewer",
+            author_badges=[], message_text=":wave:", raw={},
+            message_runs=[{"type": "emote", "id": "wave", "shortcut": ":wave:", "url": url}]))
+        session.commit()
+        return video.id
+
+
+class _ImageResponse:
+    headers = {"Content-Type": "image/png", "Content-Length": "5"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def geturl(self):
+        return "https://yt3.ggpht.com/wave.png"
+
+    def read(self, _size):
+        return b"image"
+
+
+def test_chat_asset_is_fetched_once_then_served_without_database_or_network(client, monkeypatch, tmp_path):
+    from sqlalchemy import event
+    from app.config import settings
+    from app.db import engine
+    from app.services import chat_assets
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    video_id = _chat_video_with_emote("https://yt3.ggpht.com/wave.png")
+    fetches = []
+    monkeypatch.setattr(chat_assets, "urlopen", lambda *_args, **_kwargs: (fetches.append(1), _ImageResponse())[1])
+    asset_url = client.get(f"/api/videos/{video_id}/chat").json()["messages"][0]["runs"][0]["url"]
+    statements = []
+    listener = lambda *_args: statements.append(1)
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        first = client.get(asset_url)
+        second = client.get(asset_url)
+        # After a restart the key is unknown to the process, but the file is still on disk.
+        with chat_assets._lock:
+            chat_assets._known_urls.clear()
+        third = client.get(asset_url)
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+    assert [first.status_code, second.status_code, third.status_code] == [200, 200, 200]
+    assert first.content == second.content == third.content == b"image"
+    assert first.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert fetches == [1]
+    assert statements == []
+
+
+def test_chat_asset_failure_is_not_retried_on_every_request(client, monkeypatch, tmp_path):
+    from urllib.error import URLError
+    from app.config import settings
+    from app.services import chat_assets
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    video_id = _chat_video_with_emote("https://yt3.ggpht.com/gone.png")
+    attempts = []
+
+    def unavailable(*_args, **_kwargs):
+        attempts.append(1)
+        raise URLError("offline")
+
+    monkeypatch.setattr(chat_assets, "urlopen", unavailable)
+    asset_url = client.get(f"/api/videos/{video_id}/chat").json()["messages"][0]["runs"][0]["url"]
+    assert [client.get(asset_url).status_code for _ in range(3)] == [404, 404, 404]
+    assert attempts == [1]
+    # The retry window is over: the next request may try again.
+    with chat_assets._lock:
+        chat_assets._failed_until.clear()
+    assert client.get(asset_url).status_code == 404
+    assert attempts == [1, 1]
+
 
 def test_dplayer_v3_rows_are_arrays_in_seconds_and_hide_deleted_by_default(db):
     session,video=db

@@ -21,7 +21,7 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 | `app/services/locks.py` | PostgreSQL session advisory lock と処理別 lock namespace。 |
 | `app/services/policy.py` | Retention、Remote 判定、削除許可の fail-closed policy。 |
 | `app/services/fingerprints.py`, `quality.py`, `youtube.py`, `download.py`, `ffmpeg.py` | YouTube 取得、形式選択、ダウンロード、メディア解析。 |
-| `app/services/chat.py`, `chat_assets.py` | ライブチャット解析・取得・再試行と絵文字画像キャッシュ。 |
+| `app/services/chat.py`, `chat_assets.py` | ライブチャット解析・取得・再試行と絵文字画像キャッシュ。画像の配信（`/api/chat-assets/{key}`）は DB を読まず、ディスクのキャッシュと、チャット API が発行した key → URL の対応（プロセス内）だけで解決する。 |
 | `app/services/live_playback.py` | 追っかけ HLS の生成、上限管理、安全な配信、後処理。 |
 | `app/services/processing.py`, `transcription.py`, `summarization.py`, `search.py` | DB 処理キュー、文字起こし、任意要約、全文検索と timeline。 |
 | `app/services/recording_rules.py`, `channel_stats.py`, `derived.py`, `transcode.py` | 録画ルール、統計、派生処理、変換。 |

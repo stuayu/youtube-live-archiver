@@ -138,6 +138,10 @@ def _truncate_test_database():
         # An app lifespan that ended inside the test leaves conversions stopped.
         from app.services import transcode
         transcode.resume()
+        from app.services import chat_assets
+        with chat_assets._lock:
+            chat_assets._known_urls.clear()
+            chat_assets._failed_until.clear()
     except ImportError:
         pass
     if not _TEST_URL:

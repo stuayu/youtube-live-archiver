@@ -305,9 +305,9 @@ def chat_messages(video_id: int, offset: int = 0, limit: int = 200, q: str | Non
     unknown = db.execute(select(ChatMessage.amount_display, func.count()).where(
         ChatMessage.video_id == video_id, ChatMessage.message_type.in_(("superchat", "supersticker")),
         ChatMessage.superchat_amount.is_(None), ChatMessage.amount_display.is_not(None)).group_by(ChatMessage.amount_display)).all()
-    from ..services.chat_assets import asset_key
+    from ..services.chat_assets import register_asset
     def cached_asset(url: str | None) -> str | None:
-        return f"/api/chat-assets/{asset_key(url)}" if url and url.startswith("https://") else None
+        return f"/api/chat-assets/{register_asset(url)}" if url and url.startswith("https://") else None
     messages = []
     for m in rows:
         from ..services.chat import parse_raw_message
@@ -355,38 +355,16 @@ def chat_messages(video_id: int, offset: int = 0, limit: int = 200, q: str | Non
 
 
 @router.get("/chat-assets/{key}")
-def chat_asset(key: str, db: Session = Depends(get_db)):
+def chat_asset(key: str):
+    """Serve a cached emoji/badge image. No DB access: one chat page requests dozens of these at once."""
     import re
     from ..config import settings
-    from ..services.chat_assets import asset_key, cache_asset
+    from ..services.chat_assets import resolve_asset
     if not re.fullmatch(r"[a-f0-9]{64}", key):
         raise HTTPException(404, "画像がありません")
-    rows = db.scalars(select(ChatMessage)).all()
-    urls = set()
-    def visit(value):
-        if isinstance(value, dict):
-            for child in value.values():
-                visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
-        elif isinstance(value, str) and value.startswith("https://"):
-            urls.add(value)
-    for message in rows:
-        visit(message.message_runs or [])
-        visit(message.author_badges or [])
-        visit(message.raw or {})
-        if message.sticker_url:
-            urls.add(message.sticker_url)
-    source = next((url for url in urls if asset_key(url) == key), None)
-    if not source:
+    path = resolve_asset(key, Path(settings.data_dir) / "chat-assets")
+    if path is None:
         raise HTTPException(404, "画像がありません")
-    # Asset misses perform a network request; release the read session first.
-    db.close()
-    try:
-        path = cache_asset(source, Path(settings.data_dir) / "chat-assets")
-    except ValueError:
-        raise HTTPException(404, "画像を取得できません")
     return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 @router.get("/videos/{video_id}/chat/danmaku")

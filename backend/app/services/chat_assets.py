@@ -1,6 +1,9 @@
 """Validated, content-addressed cache for chat emoji and badge artwork."""
+from collections import OrderedDict
 from hashlib import sha256
 from pathlib import Path
+import threading
+import time
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -11,6 +14,14 @@ from ..models import ChatMessage
 
 MAX_ASSET_BYTES = 1024 * 1024
 ASSET_TIMEOUT_SECONDS = 4
+ASSET_SUFFIXES = (".png", ".jpg", ".webp", ".gif")
+MAX_KNOWN_URLS = 50_000
+FAILURE_RETRY_SECONDS = 600
+
+# Keys handed to the browser by the chat API, so the asset route never has to scan chat rows.
+_known_urls: OrderedDict[str, str] = OrderedDict()
+_failed_until: dict[str, float] = {}
+_lock = threading.Lock()
 
 
 def _allowed_url(url: str) -> bool:
@@ -29,6 +40,39 @@ def asset_key(url: str) -> str:
     return sha256(url.encode("utf-8")).hexdigest()
 
 
+def register_asset(url: str) -> str:
+    """Remember the source of a key that is about to be sent to the browser."""
+    key = asset_key(url)
+    with _lock:
+        _known_urls[key] = url
+        _known_urls.move_to_end(key)
+        while len(_known_urls) > MAX_KNOWN_URLS:
+            _known_urls.popitem(last=False)
+    return key
+
+
+def cached_path(key: str, root: str | Path) -> Path | None:
+    cache_root = Path(root)
+    return next((path for suffix in ASSET_SUFFIXES if (path := cache_root / f"{key}{suffix}").is_file()), None)
+
+
+def resolve_asset(key: str, root: str | Path) -> Path | None:
+    """Serve from disk; fetch only keys the chat API issued, and do not retry recent failures."""
+    existing = cached_path(key, root)
+    if existing:
+        return existing
+    with _lock:
+        url = _known_urls.get(key)
+        if url is None or _failed_until.get(key, 0) > time.monotonic():
+            return None
+    try:
+        return cache_asset(url, root)
+    except ValueError:
+        with _lock:
+            _failed_until[key] = time.monotonic() + FAILURE_RETRY_SECONDS
+        return None
+
+
 def cache_asset(url: str, root: str | Path) -> Path:
     """Fetch an allowed image once, enforcing redirect, timeout and size limits."""
     if not _allowed_url(url):
@@ -36,7 +80,7 @@ def cache_asset(url: str, root: str | Path) -> Path:
     cache_root = Path(root).resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
     key = asset_key(url)
-    existing = next((path for path in cache_root.glob(f"{key}.*") if path.is_file()), None)
+    existing = cached_path(key, cache_root)
     if existing:
         return existing
     request = Request(url, headers={"User-Agent": "YouTubeLiveArchiver/1.0"})
