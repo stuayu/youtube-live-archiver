@@ -2,7 +2,8 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 SQLAlchemy==2.0.38
 psycopg[binary]==3.2.5
-pgserver
+# Embedded PostgreSQL. Wheels exist only for these targets; elsewhere set DATABASE_URL to an external PostgreSQL.
+pgserver; python_version < "3.13" and (platform_machine == "x86_64" or platform_machine == "AMD64" or (sys_platform == "darwin" and platform_machine == "arm64"))
 yt-dlp
 alembic==1.14.1
 APScheduler==3.11.0

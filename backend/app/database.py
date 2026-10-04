@@ -40,7 +40,8 @@ def start_embedded_postgres():
             except ImportError as exc:
                 raise RuntimeError(
                     "DATABASE_URL が未設定です。PostgreSQL の接続 URL を backend/.env に設定するか、"
-                    "組み込み PostgreSQL を使う場合は `pip install pgserver` を実行してください。"
+                    "組み込み PostgreSQL を使う場合は `pip install pgserver` を実行してください"
+                    "（pgserver の配布物は Python 3.12 以前の Windows x64 / macOS / Linux x86_64 向けです）。"
                 ) from exc
             data_dir = embedded_data_dir()
             data_dir.parent.mkdir(parents=True, exist_ok=True)
