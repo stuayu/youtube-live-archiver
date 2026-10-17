@@ -109,7 +109,8 @@ protection を6時間間隔、processing queue を10秒間隔で登録します�
 
 ## 録画ディレクトリとファイル
 
-標準 directory は `{storage_root}/{channel_id}/{year}/{video_id}` です。年は予定開始時刻、なければ行作成時刻を基準にします。タイトルを path key に使いません。既存の DB path が正しい storage root 配下なら同じ directory を継続使用します。
+標準 directory は `{storage_root}/{channel_name}/{YYYY-MM-DD title [video_id]}` です。日付は予定開始時刻、なければ行作成時刻、さらに無ければ現在時刻をサーバーのローカル日付にします。
+チャンネル名とタイトルは Windows 向けに安全化して長さを制限します。既存の DB path が保存先配下で、フォルダー名が動画 ID に一致する場合は同じ directory を継続使用します。
 
 yt-dlp output の stem は最初の live が `video`、後続 live が `video-part-2`、`video-part-3` …です。archive profile は live 区間が無ければ `video`、それ以外は `video-archive`、重複時は番号付き stem です。stem ごとに `*.info.json`、`*.description`、thumbnail、`*.live_chat.json`、media が生成されます。録画中の chat file は `.part` から final 名へ移します。
 

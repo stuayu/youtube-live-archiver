@@ -163,13 +163,12 @@ Channel C → USB-HDD
 
 さらに Default Storage も設定する。チャンネル側で未指定の場合は Default Storage を利用する。
 
-## 8. 保存パス Template
+## 8. 録画フォルダー構成
 
-ユーザーがパス形式を設定可能にする。
+保存先にはチャンネル表示名と日付・タイトル・動画 ID を使う。Windows の禁止文字・予約名を安全化し、既存録画は登録済みフォルダーを継続使用する。
 
 ```
-{channel_name}/{year}/{video_id}/
-{channel_id}/{date}_{video_id}/
+{channel_name}/{YYYY-MM-DD title [video_id]}/
 ```
 
 最終的な保存例:
@@ -177,17 +176,16 @@ Channel C → USB-HDD
 ```
 /mnt/nas/youtube/
   Channel-A/
-    2026/
-      abc123XYZ/
-        video.mkv
-        video.info.json
-        thumbnail.webp
-        description.txt
-        recording.json
-        checksum.sha256
+    2026-10-17 配信タイトル [abc123XYZ]/
+      video.mkv
+      video.info.json
+      thumbnail.webp
+      description.txt
+      recording.json
+      checksum.sha256
 ```
 
-ファイルシステム上の安全性を考え、YouTube タイトルそのものを主キーにはしない。基本キーは `video_id` とする。
+同名チャンネルや同名タイトルでも動画 ID で衝突しない。タイトルの長さを制限し、日付は予定開始時刻、登録日時、現在時刻の順に選ぶ。
 
 ## 9. 保存期間
 

@@ -1307,11 +1307,16 @@ def _choose_storage(db: Session, video: Video, channel: Channel) -> Storage | No
 
 
 def _recording_directory(video: Video, channel: Channel, storage_root: Path) -> Path:
+    from .recording_paths import (CHANNEL_DIRECTORY_MAX_LENGTH, is_video_directory,
+                                  sanitize_folder_name, video_directory_name)
     date_anchor = video.scheduled_start_at or video.created_at or now()
     existing = Path(video.file_path) if video.file_path else None
-    if existing and existing.parent.parent.parent == storage_root:
+    if existing and is_video_directory(existing, storage_root, video.youtube_video_id):
         return existing
-    return storage_root / channel.youtube_channel_id / str(date_anchor.year) / video.youtube_video_id
+    channel_name = sanitize_folder_name(channel.name or "", CHANNEL_DIRECTORY_MAX_LENGTH)
+    channel_name = channel_name or sanitize_folder_name(channel.youtube_channel_id, CHANNEL_DIRECTORY_MAX_LENGTH)
+    return storage_root / channel_name / video_directory_name(
+        video.youtube_video_id, video.title, date_anchor)
 
 
 def _next_output_stem(video: Video, target: Path, profile: str) -> str:

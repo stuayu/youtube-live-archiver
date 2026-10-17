@@ -25,6 +25,7 @@ _manual_video_inflight: set[int] = set()
 from .services.download import downloader_args
 from .services.locks import default_locks, recorder_lock, retention_lock
 from .services.backfill import media_file
+from .services.recording_paths import is_video_directory
 from .services.recovery import classify_recovery, recovery_delay, remove_intermediates_after_success
 from .services.recording_rules import select_rule
 
@@ -203,14 +204,19 @@ def verify_video(db, video: Video, *, final: bool = False, _lease=None) -> bool:
         p = Path(video.file_path).resolve()
         configured_storage = video.storage or (video.channel.storage if video.channel else None)
         root = Path(configured_storage.root_path if configured_storage else settings.storage_root).resolve()
-        if root not in p.parents:
-            raise ValueError("録画パスが storage root 外です")
+        if not is_video_directory(p, root, video.youtube_video_id):
+            raise ValueError("録画フォルダーが保存先配下の動画IDフォルダーではありません")
         if not _lease.still_owned():
             video.status = "PROTECTION_PENDING"
             log.error("retention lock lost before deleting %s; keeping file", video.youtube_video_id)
             return False
         db.commit()
-        shutil.rmtree(p) if p.is_dir() else p.unlink(missing_ok=True)
+        shutil.rmtree(p)
+        if p.parent != root and root in p.parent.parents:
+            try:
+                p.parent.rmdir()
+            except OSError:
+                pass
     except Exception as exc:
         video.status = "PROTECTION_PENDING"
         log.exception("retention file removal failed: %s", exc)

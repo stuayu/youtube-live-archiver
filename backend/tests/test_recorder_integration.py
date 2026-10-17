@@ -940,6 +940,35 @@ def test_retention_remote_wait_closes_short_idle_transaction(tmp_path, monkeypat
     engine.dispose()
 
 
+def test_retention_rejects_directory_without_matching_video_id(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from app import workers
+    from app.models import RemoteCheck, now
+
+    video_id, _ = _make_expired_video(tmp_path, "unsafe-retention")
+    channel_root = tmp_path / "archive" / "channel"
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        video.file_path = str(channel_root)
+        video.edit_detection_mode = "basic"
+        video.original_duration = 100
+        video.status = "DELETE_ELIGIBLE"
+        db.add(RemoteCheck(video_id=video.id, remote_status="PUBLIC", checked_at=now(),
+                           error=None, edit_detected=False))
+        video.deletion_candidate_at = now() - timedelta(days=5)
+        video.deletion_after = now() - timedelta(seconds=1)
+        db.commit()
+
+    monkeypatch.setattr(workers, "_inspection", lambda *_args, **_kwargs: (
+        "PUBLIC", 100, None, {"availability": "public", "duration": 100}))
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        assert workers.verify_video(db, video, final=True) is False
+        assert video.status == "PROTECTION_PENDING"
+        db.commit()
+    assert channel_root.is_dir()
+
+
 @pytest.mark.parametrize(("remote", "expected", "reason"), [
     ({"status": "private"}, "PROTECTED", "REMOTE_PRIVATE"),
     ({"error": "network_error"}, "PROTECTION_PENDING", "REMOTE_CHECK_FAILED"),
