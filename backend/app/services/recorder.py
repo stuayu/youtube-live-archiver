@@ -53,6 +53,7 @@ _stderr_tails: dict[int, tuple[deque[bytes], list[int], threading.Thread]] = {}
 STDERR_TAIL_LIMIT = 64 * 1024
 RECORDER_HEARTBEAT_SECONDS = 20
 TEE_YTDLP_EXIT_TIMEOUT_SECONDS = 30
+LIVE_END_INSPECT_DELAYS_SECONDS = (10, 30, 60)
 
 
 def stopping(video_id: int) -> bool:
@@ -446,6 +447,88 @@ def classify_attempt_result(exit_code: int | None, media_available: bool,
     return "COMPLETE"
 
 
+def _has_live_end_data_blocks_error(stderr: bytes | str | None) -> bool:
+    message = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else (stderr or "")
+    return re.search(r"(?im)^ERROR: Did not get any data blocks\s*$", message) is not None
+
+
+def _retryable_archive_backfill_media(video: Video, target: Path, profile: str,
+                                      stderr: bytes | str | None) -> Path | None:
+    """Keep a saved live segment queued when yt-dlp loses an archive fragment."""
+    message = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else (stderr or "")
+    if profile != "archive":
+        return None
+    if not re.search(r"(?im)^ERROR: Unable to download video: \[Errno 2\] No such file or directory:.*\.part-Frag\d+",
+                     message):
+        return None
+    metadata = video.raw_metadata or {}
+    if not any(item.get("profile") == "live" and item.get("outcome") == "success"
+               for item in metadata.get("attempts", [])):
+        return None
+    primary_name = metadata.get("primary_media")
+    if not isinstance(primary_name, str):
+        return None
+    media = target / primary_name
+    if not media.is_file() or media.stat().st_size <= 0:
+        return None
+    from .recovery import probe_duration
+    return media if probe_duration(media) else None
+
+
+def _verified_live_end_media(video: Video, target: Path, stem: str, inspected: dict,
+                             media: Path | None, allow_is_live: bool = False) -> Path | None:
+    """Accept the observed yt-dlp live-end error only with a full, probeable archive."""
+    terminal_statuses = {"post_live", "was_live", "not_live"}
+    if allow_is_live:
+        terminal_statuses.add("is_live")
+    if inspected.get("live_status") not in terminal_statuses:
+        return None
+    metadata = inspected
+    if not metadata.get("duration"):
+        metadata = _read_stem_metadata(target, stem)
+    try:
+        expected = float(metadata.get("duration"))
+    except (TypeError, ValueError):
+        return None
+    if expected <= 0:
+        return None
+    from_start = any(item.get("stem") == stem and item.get("from_start")
+                     for item in (video.raw_metadata or {}).get("attempts", []))
+    if not from_start:
+        offset_ms = (video.raw_metadata or {}).get("recording_start_offset_ms")
+        if not isinstance(offset_ms, (int, float)):
+            release = _timestamp_seconds(inspected.get("release_timestamp"))
+            if release is not None and video.recorded_at is not None:
+                offset_ms = max(0, int((video.recorded_at.timestamp() - release) * 1000))
+        if isinstance(offset_ms, (int, float)):
+            expected = max(0.0, expected - offset_ms / 1000)
+    if media is None or not media.is_file() or media.stat().st_size <= 0:
+        return None
+    from .recovery import probe_duration
+    actual = probe_duration(media)
+    tolerance = max(30.0, expected * 0.01)
+    if actual is None or abs(actual - expected) > tolerance:
+        return None
+    return media
+
+
+def _inspect_live_after_exit(video_id: str, cookie_profile: str | None) -> dict:
+    url = f"https://youtube.com/watch?v={video_id}"
+    try:
+        inspected = inspect(url, cookie_profile)
+    except Exception:
+        return {}
+    for delay in LIVE_END_INSPECT_DELAYS_SECONDS:
+        if inspected.get("live_status") != "is_live":
+            break
+        time.sleep(delay)
+        try:
+            inspected = inspect(url, cookie_profile)
+        except Exception:
+            break
+    return inspected
+
+
 def _stem_media_paths(directory: Path, stem: str) -> list[Path]:
     paths = [directory / f"{stem}.{extension}" for extension in ("mkv", "mp4", "ts", "webm", "m4v", "mov")]
     paths.append(directory / f"{stem}.tee.ts")
@@ -767,9 +850,19 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                 remuxed = finalize_tee_archive(
                     settings.ffmpeg_path, transport_stream, target / f"{output_stem}.mkv"
                 )
+            natural_end_error = (
+                yt_proc.returncode not in (None, 0)
+                and ff_proc.returncode == 0
+                and remuxed
+                and _has_live_end_data_blocks_error(yt_stderr)
+            )
             if requested_stop:
                 proc = ff_proc
                 proc.returncode = 0 if tee_media or remuxed else (tee_rc or 1)
+            elif natural_end_error:
+                proc = ff_proc
+                proc.returncode = yt_proc.returncode
+                proc._live_terminal_stderr = yt_stderr
             elif tee_rc:
                 from .live_playback import fallback_to_direct
                 def record_tee_failure(error, return_code):
@@ -839,6 +932,7 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
     if stopping(v.id):
         stop_process(proc)
     stderr = _wait_for_attempt(db, v, target, output_stem, proc, lease, chat_offsets)
+    stderr += getattr(proc, "_live_terminal_stderr", b"")
     active_recorders.pop(v.id, None)
     attempt_args = args
     if proc.returncode and selector and format_unavailable(stderr):
@@ -1140,6 +1234,8 @@ def _complete_recording(db: Session, v: Video, ch: Channel, target: Path, output
                            and release <= time.time() and len(attempts) == 1)
         v.is_partial = user_stopped or late_live_start
         v.raw_metadata["live_from_start"] = "used"
+    if is_live and inspected and inspected.get("live_status") in {"post_live", "was_live", "not_live"}:
+        v.raw_metadata["live_status"] = "was_live"
     v.retention_expires_at = (v.recording_finished_at + timedelta(days=v.retention_days)) if v.retention_days is not None and not v.is_partial else None
     _write_recording_index(v, ch, target, primary, segments, live_interval_stems)
     for removed in remove_intermediates_after_success(target, media,
@@ -1489,6 +1585,88 @@ def record_video(video_id: int) -> None:
                     return
                 if proc.returncode:
                     error_kind = classify_ytdlp_error(stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr or ""))
+                    backfill_media = _retryable_archive_backfill_media(
+                        v, target, profile, stderr)
+                    if (backfill_media is not None
+                            and (v.recovery_attempts or 0) + 1 < settings.recovery_max_attempts):
+                        v.raw_metadata = finish_attempt(
+                            v.raw_metadata or {}, output_stem, profile,
+                            "archive_backfill_retryable_failure", now())
+                        v.recovery_attempts = (v.recovery_attempts or 0) + 1
+                        v.raw_metadata = {
+                            **(v.raw_metadata or {}),
+                            "archive_backfill": "queued",
+                            "archive_backfill_last_error": (
+                                stderr.decode("utf-8", "replace") if isinstance(stderr, bytes)
+                                else str(stderr or ""))[-2000:],
+                        }
+                        v.status = "DISCOVERED"
+                        v.is_partial = True
+                        v.retention_expires_at = None
+                        v.recording_heartbeat_at = None
+                        v.next_recovery_at = now() + recovery_delay(v.recovery_attempts)
+                        db.add(AuditLog(video_id=v.id, action="ARCHIVE_BACKFILL_RETRY_QUEUED",
+                            reason="YT_DLP_FRAGMENT_TEMP_FILE_MISSING", details={
+                                "media_path": str(backfill_media),
+                                "media_size": backfill_media.stat().st_size,
+                                "recovery_attempts": v.recovery_attempts,
+                            }))
+                        (target / ".recorder.json").unlink(missing_ok=True)
+                        db.commit()
+                        log.warning("archive backfill retry queued with saved live media "
+                                    "youtube_video_id=%s path=%s attempt=%s",
+                                    v.youtube_video_id, backfill_media, v.recovery_attempts)
+                        return
+                    if is_live and _has_live_end_data_blocks_error(stderr):
+                        media = next((target / f"{output_stem}.{ext}"
+                                      for ext in ("mkv", "mp4", "ts", "webm", "m4v", "mov")
+                                      if (target / f"{output_stem}.{ext}").is_file()), None)
+                        if media is None:
+                            from .recovery import salvage_live_part
+                            media = salvage_live_part(target, output_stem,
+                                lambda path: db.add(AuditLog(video_id=v.id, action="SALVAGE_PARTIAL",
+                                    reason="VERIFIED_DURATION", details={"path": path})),
+                                ffmpeg_path=settings.ffmpeg_path)
+                        inspected = _inspect_live_after_exit(v.youtube_video_id, ch.cookie_profile)
+                        verified_media = _verified_live_end_media(
+                            v, target, output_stem, inspected, media, allow_is_live=True)
+                        if verified_media is not None:
+                            if inspected.get("live_status") == "is_live":
+                                inspected = {**inspected, "live_status": "was_live"}
+                            attempts = list((v.raw_metadata or {}).get("attempts", []))
+                            for attempt in reversed(attempts):
+                                if attempt.get("stem") == output_stem and attempt.get("outcome") == "running":
+                                    attempt["exit_code"] = proc.returncode
+                                    attempt["completion_reason"] = "complete_after_live_end_error"
+                                    break
+                            v.raw_metadata = {**(v.raw_metadata or {}), "attempts": attempts}
+                            from .recovery import probe_duration
+                            duration = probe_duration(verified_media) or 0
+                            expected = inspected.get("duration")
+                            v.raw_metadata = {
+                                **(v.raw_metadata or {}),
+                                "live_end_exit_evidence": {
+                                    "error": "Did not get any data blocks",
+                                    "exit_code": proc.returncode,
+                                    "duration_seconds": duration,
+                                    "youtube_duration_seconds": expected,
+                                },
+                            }
+                            db.add(AuditLog(video_id=v.id, action="LIVE_END_ERROR_ACCEPTED",
+                                reason="VERIFIED_FULL_MEDIA", details={
+                                    "exit_code": proc.returncode,
+                                    "stderr_tail": (stderr or b"").decode("utf-8", "replace")[-1000:],
+                                    "media_path": str(verified_media),
+                                    "duration_seconds": duration,
+                                    "youtube_duration_seconds": expected,
+                                }))
+                            log.info("accepted complete live media after yt-dlp live-end error "
+                                     "youtube_video_id=%s path=%s duration=%.3f",
+                                     v.youtube_video_id, verified_media, duration)
+                            _complete_recording(db, v, ch, target, output_stem, profile,
+                                                is_live, verified_media, lease, inspected)
+                            (target / ".recorder.json").unlink(missing_ok=True)
+                            return
                     log.error("recording failed youtube_video_id=%s channel_id=%s reason=%s",
                               v.youtube_video_id, ch.youtube_channel_id,
                               stderr.decode("utf-8", "replace")[-1000:] if isinstance(stderr, bytes)
@@ -1562,35 +1740,37 @@ def record_video(video_id: int) -> None:
                     return
                 inspected = {}
                 if is_live:
-                    try:
-                        db.commit()
-                        inspected = inspect(f"https://youtube.com/watch?v={v.youtube_video_id}", ch.cookie_profile)
-                    except Exception:
-                        inspected = {}
+                    db.commit()
+                    inspected = _inspect_live_after_exit(v.youtube_video_id, ch.cookie_profile)
                     if inspected.get("live_status") == "is_live":
                         from .recovery import probe_duration
                         duration = probe_duration(media)
-                        v.raw_metadata = finish_attempt(v.raw_metadata or {}, output_stem, profile,
-                                                        "interrupted_live", now())
-                        v.recording_heartbeat_at = None
-                        v.is_partial = True
-                        if duration is not None and duration >= 30:
-                            v.status = "DISCOVERED"
-                            v.recording_finished_at = None
-                            v.next_recovery_at = None
-                            v.raw_metadata = {**(v.raw_metadata or {}), "live_status": "is_live"}
-                            db.add(AuditLog(video_id=v.id, action="LIVE_SEGMENT_INTERRUPTED", reason="STREAM_STILL_LIVE"))
+                        verified_media = _verified_live_end_media(
+                            v, target, output_stem, inspected, media, allow_is_live=True)
+                        if verified_media is not None:
+                            inspected = {**inspected, "live_status": "was_live"}
                         else:
-                            v.status = "RECORDING_FAILED"
-                            v.recording_finished_at = None
-                            v.next_recovery_at = now() + recovery_delay(max(1, v.recovery_attempts or 0))
-                        _update_partial_evidence(v, target, output_stem)
-                        if ch.chat_enabled:
-                            _ingest_chat_snapshot(db, v, target, output_stem)
-                        manifest = target / ".recorder.json"
-                        manifest.unlink(missing_ok=True)
-                        db.commit()
-                        return
+                            v.raw_metadata = finish_attempt(v.raw_metadata or {}, output_stem, profile,
+                                                            "interrupted_live", now())
+                            v.recording_heartbeat_at = None
+                            v.is_partial = True
+                            if duration is not None and duration >= 30:
+                                v.status = "DISCOVERED"
+                                v.recording_finished_at = None
+                                v.next_recovery_at = None
+                                v.raw_metadata = {**(v.raw_metadata or {}), "live_status": "is_live"}
+                                db.add(AuditLog(video_id=v.id, action="LIVE_SEGMENT_INTERRUPTED", reason="STREAM_STILL_LIVE"))
+                            else:
+                                v.status = "RECORDING_FAILED"
+                                v.recording_finished_at = None
+                                v.next_recovery_at = now() + recovery_delay(max(1, v.recovery_attempts or 0))
+                            _update_partial_evidence(v, target, output_stem)
+                            if ch.chat_enabled:
+                                _ingest_chat_snapshot(db, v, target, output_stem)
+                            manifest = target / ".recorder.json"
+                            manifest.unlink(missing_ok=True)
+                            db.commit()
+                            return
                 _complete_recording(db, v, ch, target, output_stem, profile,
                                     is_live, media, lease, inspected)
                 (target / ".recorder.json").unlink(missing_ok=True)

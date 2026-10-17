@@ -41,6 +41,15 @@ def fail(kind: str) -> int:
     return 1
 
 
+def _terminal_error_exit(recording: dict) -> int | None:
+    error = recording.get("terminal_error")
+    if not error:
+        return None
+    sys.stderr.write(f"ERROR: {error}\n")
+    sys.stderr.flush()
+    return int(recording.get("terminal_exit_code", 1))
+
+
 _INTERRUPTED = False
 
 
@@ -152,7 +161,7 @@ def _recording(argv: list[str], video: dict, video_id: str) -> int:
             sys.stdout.buffer.write(fixture)
             sys.stdout.buffer.flush()
             if load_state().get("videos", {}).get(video_id, {}).get("recording", {}).get("ended"):
-                return 0
+                return _terminal_error_exit(recording) or 0
             time.sleep(0.2)
         return 1
     output = stem_path.parent / f"{stem}.mkv"
@@ -211,7 +220,8 @@ def _recording(argv: list[str], video: dict, video_id: str) -> int:
                                 stream.write(fixture)
                         for fragment in fragment_files:
                             fragment.unlink(missing_ok=True)
-                    return finalize_from_start()
+                    result = finalize_from_start()
+                    return (_terminal_error_exit(recording) or 0) if result == 0 else result
                 if recording.get("early_exit") and time.monotonic() - started >= float(recording.get("early_exit_after", 0)):
                     return 0
                 time.sleep(0.2)
@@ -230,8 +240,12 @@ def _recording(argv: list[str], video: dict, video_id: str) -> int:
                 stream.write(fixture)
             state = load_state().get("videos", {}).get(video_id, {})
             if state.get("recording", {}).get("ended"):
-                partial.replace(output)
-                return 0
+                if recording.get("part_only_on_end"):
+                    with partial.open("ab") as stream:
+                        stream.write(fixture)
+                else:
+                    partial.replace(output)
+                return _terminal_error_exit(recording) or 0
             if recording.get("early_exit") and time.monotonic() - started >= float(recording.get("early_exit_after", 0)):
                 return 0
             time.sleep(0.2)
