@@ -4,7 +4,9 @@ import os
 import subprocess
 import tempfile
 import shutil
-from datetime import datetime, timedelta
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import object_session
@@ -16,6 +18,10 @@ from .services.policy import classify_remote, compare_fingerprints, has_prior_su
 from .services.fingerprints import sample, video_phash, audio_fingerprint, POSITIONS
 from .services.ffmpeg import launch_ffmpeg
 from .services.youtube import inspect, cookie_args, run_ytdlp, popen_ytdlp, ytdlp_command, classify_ytdlp_error
+
+_manual_video_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="manual-video")
+_manual_video_lock = threading.Lock()
+_manual_video_inflight: set[int] = set()
 from .services.download import downloader_args
 from .services.locks import default_locks, recorder_lock, retention_lock
 from .services.backfill import media_file
@@ -219,12 +225,12 @@ def verify_video(db, video: Video, *, final: bool = False, _lease=None) -> bool:
     return True
 
 
-def channel_monitor():
+def channel_monitor(background: bool = False):
     from .services.monitor import channel_monitor as run_channel_monitor
-    run_channel_monitor()
+    run_channel_monitor(background=background)
 
 
-def manual_video_worker():
+def manual_video_worker(background: bool = False):
     """Advance manually-added scheduled videos without requiring channel monitoring."""
     from .services.youtube import inspect, classify_ytdlp_error
     from .services.monitor import _cooldown_active, _apply_rate_limit
@@ -253,56 +259,94 @@ def manual_video_worker():
         due = due[:5]
         db.commit()
     for video_pk in due:
-        with SessionLocal() as db:
-            video = db.get(Video, video_pk)
-            if not video or video.status != "WAITING_LIVE":
+        with _manual_video_lock:
+            if video_pk in _manual_video_inflight:
                 continue
-            scheduled = video.scheduled_start_at
-            metadata = dict(video.raw_metadata or {})
-            if scheduled is None:
-                interval = timedelta(minutes=10)
-            else:
-                delta = (scheduled - at).total_seconds()
-                interval = (timedelta(minutes=30) if delta > 600 else
-                            timedelta(minutes=1) if delta >= -7200 else timedelta(minutes=10))
-            metadata["manual_next_check_at"] = (at + interval).isoformat()
-            video.raw_metadata = metadata
-            video_id = video.youtube_video_id
-            cookie = video.channel.cookie_profile if video.channel else None
-            db.commit()
-        try:
-            result = inspect(canonical_video_url(video_id), cookie)
-            state = result.get("live_status")
-            failure = ""
-        except Exception as exc:
-            result = {}
-            failure = classify_ytdlp_error(str(exc))
-            if failure == "RATE_LIMITED":
-                _apply_rate_limit(at)
-                return
-            state = None
-        with SessionLocal() as db:
-            video = db.get(Video, video_pk)
-            if not video or video.status != "WAITING_LIVE":
-                continue
-            metadata = dict(video.raw_metadata or {})
-            if state == "is_live":
-                video.status = "DISCOVERED"
-                metadata["live_status"] = "is_live"
-            elif state in ("was_live", "post_live"):
-                video.status = "DISCOVERED"
-                metadata["live_status"] = "was_live"
-            elif state == "is_upcoming":
-                timestamp = result.get("release_timestamp") or result.get("timestamp")
-                if timestamp:
-                    video.scheduled_start_at = datetime.fromtimestamp(timestamp, timezone.utc)
-            elif failure in ("PRIVATE", "DELETED"):
-                video.status = "CANCELLED"
-                metadata["cancel_reason"] = failure
-            if result.get("title"):
-                video.title = result["title"]
-            video.raw_metadata = metadata
-            db.commit()
+            _manual_video_inflight.add(video_pk)
+        future = _manual_video_pool.submit(_inspect_manual_video, video_pk, at)
+        if background:
+            future.add_done_callback(lambda completed, pk=video_pk: _finish_manual_inspect(pk, completed))
+        else:
+            try:
+                future.result()
+            except Exception:
+                log.exception("manual video inspection worker failed video_id=%s", video_pk)
+            finally:
+                with _manual_video_lock:
+                    _manual_video_inflight.discard(video_pk)
+
+
+def _finish_manual_inspect(video_pk: int, future) -> None:
+    try:
+        future.result()
+    except Exception:
+        log.exception("manual video inspection worker failed video_id=%s", video_pk)
+    finally:
+        with _manual_video_lock:
+            _manual_video_inflight.discard(video_pk)
+
+
+def _inspect_manual_video(video_pk: int, at: datetime) -> None:
+    from .services.youtube import inspect, classify_ytdlp_error
+    from .services.monitor import _apply_rate_limit, _cooldown_active
+    from .services.manual_video import canonical_video_url
+    if _cooldown_active(now()):
+        return
+    with SessionLocal() as db:
+        video = db.get(Video, video_pk)
+        if not video or video.status != "WAITING_LIVE":
+            return
+        scheduled = video.scheduled_start_at
+        metadata = dict(video.raw_metadata or {})
+        if scheduled is None:
+            interval = timedelta(minutes=10)
+        else:
+            delta = (scheduled - at).total_seconds()
+            interval = (timedelta(minutes=30) if delta > 600 else
+                        timedelta(minutes=1) if delta >= -7200 else timedelta(minutes=10))
+        metadata["manual_next_check_at"] = (at + interval).isoformat()
+        video.raw_metadata = metadata
+        video_id = video.youtube_video_id
+        channel_id = video.channel.youtube_channel_id if video.channel else "unknown"
+        cookie = video.channel.cookie_profile if video.channel else None
+        db.commit()
+    try:
+        result = inspect(canonical_video_url(video_id), cookie)
+        state = result.get("live_status")
+        failure = ""
+    except Exception as exc:
+        result = {}
+        failure = classify_ytdlp_error(str(exc))
+        if failure == "RATE_LIMITED":
+            _apply_rate_limit(at, channel_id, video_id)
+            return
+        state = None
+    with SessionLocal() as db:
+        video = db.get(Video, video_pk)
+        if not video or video.status != "WAITING_LIVE":
+            return
+        metadata = dict(video.raw_metadata or {})
+        if state == "is_live":
+            video.status = "DISCOVERED"
+            metadata["live_status"] = "is_live"
+            log.info("manual video is live; queued recording youtube_video_id=%s channel_id=%s",
+                     video.youtube_video_id, channel_id)
+        elif state in ("was_live", "post_live"):
+            video.status = "DISCOVERED"
+            metadata["live_status"] = "was_live"
+        elif state == "is_upcoming":
+            timestamp = result.get("release_timestamp") or result.get("timestamp")
+            if timestamp:
+                video.scheduled_start_at = datetime.fromtimestamp(timestamp, timezone.utc)
+            log.debug("manual video remains scheduled youtube_video_id=%s channel_id=%s",
+                      video.youtube_video_id, channel_id)
+        elif failure in ("PRIVATE", "DELETED"):
+            video.status = "CANCELLED"
+            metadata["cancel_reason"] = failure
+        if result.get("title"):
+            video.title = result["title"]
+        video.raw_metadata = metadata
+        db.commit()
 
 
 def recorder_worker():
@@ -355,6 +399,10 @@ def recovery_worker():
                     video.next_recovery_at = None
                     db.add(AuditLog(video_id=video.id, action="RECOVERY_QUEUED", reason=decision.action,
                                     details={"recovery_attempts": video.recovery_attempts}))
+                    log.warning("recording recovery queued youtube_video_id=%s channel_id=%s action=%s",
+                                video.youtube_video_id,
+                                video.channel.youtube_channel_id if video.channel else "unknown",
+                                decision.action)
                 elif decision.action == "WAIT_LIVE":
                     video.status = "WAITING_LIVE"
                     video.raw_metadata = {**(video.raw_metadata or {}), "live_status": "is_upcoming"}
@@ -397,6 +445,9 @@ def _recover_stale_recordings() -> None:
                 stale.recording_heartbeat_at = None
                 stale.next_recovery_at = now()
                 db.commit()
+                log.warning("stale recording detected youtube_video_id=%s channel_id=%s",
+                            stale.youtube_video_id,
+                            stale.channel.youtube_channel_id if stale.channel else "unknown")
 
 def retention_worker():
     with SessionLocal() as db:

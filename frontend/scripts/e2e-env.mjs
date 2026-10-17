@@ -189,7 +189,7 @@ export async function startE2E() {
     }
     run(py, ['-m', 'alembic', '-c', 'alembic.ini', 'upgrade', 'head'], { cwd: backendDir, env })
     run(py, [join(backendDir, 'tests', 'e2e_seed.py')], { cwd: backendDir, env })
-    state.apiPort = await freePort()
+    state.apiPort = process.env.YLA_E2E_API_PORT ? Number(process.env.YLA_E2E_API_PORT) : await freePort()
     const api = child(
       py,
       ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(state.apiPort)],

@@ -23,7 +23,8 @@ def api_status(db: Session = Depends(get_db)):
         stats = job_stats.get(job.id, {})
         scheduler_jobs.append({"id": job.id, "next_run_at": job.next_run_time,
                                **{key: stats.get(key, 0 if key in ("run_count", "error_count") else None)
-                                  for key in ("last_started_at", "last_finished_at", "last_duration_ms", "last_error", "run_count", "error_count")}})
+                                  for key in ("last_started_at", "last_finished_at", "last_success_at", "last_delay_ms",
+                                              "last_duration_ms", "last_error", "run_count", "error_count")}})
     tools = main_module._tool_cache
     if tools is None:
         from ..services.youtube import run_ytdlp
@@ -37,6 +38,18 @@ def api_status(db: Session = Depends(get_db)):
         tools.update(ffmpeg_available=bool(shutil.which(settings.ffmpeg_path) or Path(settings.ffmpeg_path).is_file()),
                      ffprobe_available=bool(shutil.which(settings.ffprobe_path) or Path(settings.ffprobe_path).is_file()))
         main_module._tool_cache = tools
+    from ..services.ytdlp_update import status as ytdlp_status
+    version_status = ytdlp_status()
+    tools.update({"yt_dlp_version": version_status.get("version") or tools.get("yt_dlp_version"),
+                  "yt_dlp_release_date": version_status.get("release_date"),
+                  "yt_dlp_latest_version": version_status.get("latest_version"),
+                  "yt_dlp_latest_release_date": version_status.get("latest_release_date"),
+                  "yt_dlp_update_available": version_status.get("stale"),
+                  "yt_dlp_update_overdue": version_status.get("update_overdue"),
+                  "yt_dlp_latest_check_failed": version_status.get("latest_check_failed"),
+                  "yt_dlp_checked_at": version_status.get("checked_at"),
+                  "yt_dlp_auto_update": version_status.get("update_enabled", settings.yt_dlp_auto_update),
+                  "yt_dlp_update_error": version_status.get("update_error")})
     active_channels = db.scalar(select(func.count(Channel.id)).where(Channel.enabled.is_(True), Channel.archived.is_(False))) or 0
     error_channels = db.scalar(select(func.count(Channel.id)).where(Channel.enabled.is_(True), Channel.consecutive_failures > 0)) or 0
     oldest_success = db.scalar(select(func.min(Channel.last_success_at)).where(Channel.enabled.is_(True), Channel.archived.is_(False)))
@@ -71,6 +84,11 @@ def api_status(db: Session = Depends(get_db)):
     for name in warning_space: attention.append({"level": "warning", "code": "storage_warning_space", "message": f"保存先 {name} の空き容量が警告しきい値を下回っています"})
     if error_channels: attention.append({"level": "warning", "code": "monitor_errors", "message": f"{error_channels} チャンネルで監視エラー"})
     if not tools["yt_dlp_available"]: attention.append({"level": "error", "code": "yt_dlp_missing", "message": "yt-dlp が見つかりません"})
+    if version_status.get("stale"):
+        overdue = version_status.get("update_overdue")
+        message = (f"yt-dlp {version_status.get('latest_version')} が7日以上前に公開済みです。更新を確認してください"
+                   if overdue else f"yt-dlp の新しい版 {version_status.get('latest_version')} が公開されています")
+        attention.append({"level": "warning", "code": "yt_dlp_outdated", "message": message})
     if not tools["ffmpeg_available"]: attention.append({"level": "error", "code": "ffmpeg_missing", "message": "ffmpeg が見つかりません"})
     if not tools["ffprobe_available"]: attention.append({"level": "error", "code": "ffprobe_missing", "message": "ffprobe が見つかりません"})
     failed_count = state_counts.get("RECORDING_FAILED", 0) + state_counts.get("WAITING_FOR_STORAGE", 0)

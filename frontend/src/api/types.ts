@@ -263,6 +263,9 @@ export interface StatusInfo {
       name: string
       next_run_at?: string | null
       last_finished_at?: string | null
+      last_success_at?: string | null
+      last_delay_ms?: number | null
+      last_duration_ms?: number | null
       last_error?: string | null
     }>
   }

@@ -24,20 +24,28 @@ test('all screens fit the viewport in light and dark themes', async ({ page }, t
       expect(dimensions.body, `${testInfo.project.name} ${theme} ${tab}`).toBeLessThanOrEqual(
         dimensions.viewport,
       )
+      if (testInfo.project.name === 'mobile') {
+        const shortTargets = await page
+          .locator('button,a[href],input:not([type="checkbox"]),select,[role="button"]')
+          .evaluateAll((elements) =>
+            elements
+              .filter((element) => {
+                if (element.closest('details:not([open])')) return false
+                for (let parent: Element | null = element; parent; parent = parent.parentElement) {
+                  const style = getComputedStyle(parent)
+                  if (style.display === 'none' || style.visibility === 'hidden') return false
+                }
+                const rect = element.getBoundingClientRect()
+                return rect.width > 0 && rect.height > 0 && (rect.width < 44 || rect.height < 44)
+              })
+              .map((element) => {
+                const rect = element.getBoundingClientRect()
+                return `${element.tagName}.${element.className}: ${Math.round(rect.width)}x${Math.round(rect.height)}`
+              }),
+          )
+        expect(shortTargets, `${testInfo.project.name} ${theme} ${tab}`).toEqual([])
+      }
     }
-  }
-  if (testInfo.project.name === 'mobile') {
-    const shortTargets = await page
-      .locator('button,input:not([type="checkbox"]),select,a.button')
-      .evaluateAll((elements) =>
-        elements
-          .filter((element) => {
-            const rect = element.getBoundingClientRect()
-            return rect.width > 0 && rect.height > 0 && (rect.width < 44 || rect.height < 44)
-          })
-          .map((element) => (element as HTMLElement).innerText || element.getAttribute('aria-label')),
-      )
-    expect(shortTargets, JSON.stringify(shortTargets)).toEqual([])
   }
   expect(errors, errors.join('\n')).toEqual([])
 })

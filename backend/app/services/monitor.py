@@ -21,6 +21,10 @@ log = logging.getLogger(__name__)
 _cooldown_lock = threading.Lock()
 _cooldown_until: datetime | None = None
 _rate_limit_streak = 0
+_rate_limit_context = ("unknown", "unknown")
+_scan_pool = ThreadPoolExecutor(max_workers=max(1, settings.monitor_concurrency), thread_name_prefix="channel-scan")
+_scan_lock = threading.Lock()
+_scan_inflight: set[int] = set()
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -73,7 +77,6 @@ def calculate_next_interval(poll_interval: str | None, scheduled_times: list[dat
         profile = profile or build_profile([])
         normal_low, normal_high = {"hot": (900.0, 1800.0), "warm": (1800.0, 3600.0),
                                    "cold": (7200.0, 14400.0), "normal": (1800.0, 3600.0)}[profile.level_at(current)]
-        numeric_poll = False
     else:
         try:
             minutes = int(raw_poll)
@@ -82,7 +85,6 @@ def calculate_next_interval(poll_interval: str | None, scheduled_times: list[dat
         except (TypeError, ValueError):
             minutes = 30
         normal_low = normal_high = float(minutes * 60)
-        numeric_poll = True
     normal_jitter = (normal_low, normal_high) if normal_low != normal_high else (normal_low * .9, normal_high * 1.1)
     interval = normal_jitter
     if raw_poll == "AUTO" and profile is not None and profile.level_at(current) != "hot":
@@ -318,7 +320,7 @@ def _handle_scan(db: Session, ch: Channel, entries: list[dict], channel_data: di
             if probe:
                 data, kind = inspect_once(probe.youtube_video_id)
                 if kind == "RATE_LIMITED":
-                    _apply_rate_limit(at)
+                    _apply_rate_limit(at, ch.youtube_channel_id, probe.youtube_video_id)
                 elif data is not None:
                     release = _timestamp(data.get("release_timestamp"))
                     metadata = {**(probe.raw_metadata or {}), "start_probe_attempted": True}
@@ -347,12 +349,18 @@ def _cooldown_active(at: datetime) -> bool:
         return bool(_cooldown_until and _cooldown_until > at)
 
 
-def _apply_rate_limit(at: datetime) -> None:
-    global _cooldown_until, _rate_limit_streak
+def _apply_rate_limit(at: datetime, channel_id: str = "unknown", video_id: str = "unknown") -> None:
+    global _cooldown_until, _rate_limit_streak, _rate_limit_context
     with _cooldown_lock:
+        was_active = bool(_cooldown_until and _cooldown_until > at)
         _rate_limit_streak += 1
         minutes = min(60, 10 * 2 ** (_rate_limit_streak - 1))
         _cooldown_until = at + timedelta(minutes=minutes)
+        if not was_active:
+            _rate_limit_context = (channel_id, video_id)
+    if not was_active:
+        log.warning("YouTube rate limit entered for %s minutes channel_id=%s youtube_video_id=%s",
+                    minutes, channel_id, video_id)
 
 
 def _clear_rate_limit() -> None:
@@ -360,8 +368,13 @@ def _clear_rate_limit() -> None:
     with _cooldown_lock:
         if _cooldown_until and _cooldown_until > now():
             return
+        was_active = _cooldown_until is not None
+        channel_id, video_id = _rate_limit_context
         _cooldown_until = None
         _rate_limit_streak = 0
+    if was_active:
+        log.info("YouTube rate limit cooldown cleared channel_id=%s youtube_video_id=%s",
+                 channel_id, video_id)
 
 
 def _scan_one(channel_pk: int) -> None:
@@ -429,7 +442,7 @@ def _scan_one(channel_pk: int) -> None:
                 backoff = max(60, min(normal, 60 * 2 ** min(ch.consecutive_failures - 1, 20)))
                 if kind == "RATE_LIMITED":
                     backoff = max(backoff, 15 * 60)
-                    _apply_rate_limit(at)
+                    _apply_rate_limit(at, ch.youtube_channel_id, "unknown")
                 minimum_backoff = 15 * 60 if kind == "RATE_LIMITED" else 60
                 delay = max(minimum_backoff, random.uniform(backoff * .9, backoff * 1.1))
                 ch.next_check_at = at + timedelta(seconds=delay)
@@ -443,7 +456,7 @@ def _scan_one(channel_pk: int) -> None:
         db.close()
 
 
-def channel_monitor() -> None:
+def channel_monitor(background: bool = False) -> None:
     at = now()
     if _cooldown_active(at):
         return
@@ -455,10 +468,49 @@ def channel_monitor() -> None:
             .limit(max(1, settings.monitor_batch_size))).all()
     if not channel_ids:
         return
-    with ThreadPoolExecutor(max_workers=max(1, settings.monitor_concurrency)) as pool:
-        futures = [pool.submit(_scan_one, channel_id) for channel_id in channel_ids]
-        for future in futures:
-            try:
-                future.result()
-            except Exception as exc:
-                log.warning("channel monitor worker failed: %s", exc)
+    if not background:
+        concurrency = max(1, settings.monitor_concurrency)
+        for offset in range(0, len(channel_ids), concurrency):
+            group = channel_ids[offset:offset + concurrency]
+            futures = []
+            for channel_id in group:
+                with _scan_lock:
+                    if channel_id in _scan_inflight:
+                        continue
+                    _scan_inflight.add(channel_id)
+                futures.append((channel_id, _scan_pool.submit(_scan_one, channel_id)))
+            for channel_id, future in futures:
+                try:
+                    future.result()
+                except Exception as exc:
+                    log.warning("channel monitor worker failed: %s", exc)
+                finally:
+                    with _scan_lock:
+                        _scan_inflight.discard(channel_id)
+            if _cooldown_active(now()):
+                break
+        return
+    with _scan_lock:
+        available = max(0, max(1, settings.monitor_concurrency) - len(_scan_inflight))
+    futures = []
+    for channel_id in channel_ids:
+        if not available:
+            break
+        with _scan_lock:
+            if channel_id in _scan_inflight:
+                continue
+            _scan_inflight.add(channel_id)
+            available -= 1
+        future = _scan_pool.submit(_scan_one, channel_id)
+        future.add_done_callback(lambda completed, pk=channel_id: _finish_scan(pk, completed))
+        futures.append(future)
+
+
+def _finish_scan(channel_id: int, future) -> None:
+    try:
+        future.result()
+    except Exception as exc:
+        log.warning("channel monitor worker failed: %s", exc)
+    finally:
+        with _scan_lock:
+            _scan_inflight.discard(channel_id)

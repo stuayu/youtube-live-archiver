@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.models import Channel, Video, ChatMessage, ProcessingJob, now
 from app.api import dplayer_danmaku
-from app.api.videos import chat_messages
+from app.api.videos import chat_danmaku, chat_messages
 from app.services.chat import (argb_to_hex, ingest_jsonl, ingest_records, parse_amount,
                               parse_record, parse_renderer, parse_runs, playback_offset_ms,
                               rebase_live_chat_offsets, reparse_video_chat)
@@ -56,6 +56,23 @@ def test_failed_fetch_does_not_mark_missing(db, tmp_path):
     with pytest.raises(Exception): ingest_jsonl(session,video.id,bad,complete_snapshot=True)
     session.commit()
     assert session.query(ChatMessage).one().is_deleted is False
+
+
+def test_live_asset_prefetch_bounds_rows_and_download_count(db, tmp_path, monkeypatch):
+    from app.services import chat_assets
+
+    session, video = db
+    for index in range(5):
+        session.add(ChatMessage(video_id=video.id, message_id=f"asset-{index}",
+                                message_runs=[{"type": "emoji", "url": f"https://yt3.ggpht.com/{index}.png"}]))
+    session.commit()
+    fetched = []
+    monkeypatch.setattr(chat_assets, "cache_asset", lambda url, root, **kwargs: fetched.append(url))
+
+    chat_assets.prefetch_video_assets(session, video.id, tmp_path, limit=1, row_limit=2)
+
+    assert len(fetched) == 1
+    assert fetched[0] in {"https://yt3.ggpht.com/3.png", "https://yt3.ggpht.com/4.png"}
 
 
 def test_replay_failure_states_preserve_existing_comments(db, monkeypatch):
@@ -159,6 +176,50 @@ def test_live_chat_offsets_wait_for_release_timestamp(db):
     video.raw_metadata = {"release_timestamp": 1_000.0}
     assert rebase_live_chat_offsets(session, video.id) == 1
     assert message.offset_ms == 32_015
+
+
+@pytest.mark.parametrize(
+    ("release", "recording_offset", "recording_delay", "published_epoch", "expected_stream_offset"),
+    [
+        (1_000.0, 0, 0, 1_035, 35_000),
+        (1_000.0, 7_200_000, 7_200, 8_235, 7_235_000),
+        (None, 40_000, 40, 1_075, 75_000),
+    ],
+)
+def test_live_chat_offsets_match_recording_position_and_snapshot(db, tmp_path, release,
+                                                                  recording_offset,
+                                                                  recording_delay,
+                                                                  published_epoch,
+                                                                  expected_stream_offset):
+    from datetime import datetime, timezone
+    from app.services.chat import ingest_jsonl_delta
+
+    session, video = db
+    video.recorded_at = datetime.fromtimestamp(1_000 + recording_delay, tz=timezone.utc)
+    video.raw_metadata = {"recording_start_offset_ms": recording_offset}
+    if release is not None:
+        video.raw_metadata["release_timestamp"] = release
+    renderer = {
+        "id": f"live-{recording_delay}-{release}",
+        "timestampUsec": str(int(published_epoch * 1_000_000)),
+        "authorName": {"simpleText": "A"},
+        "message": {"runs": [{"text": "aligned"}]},
+    }
+    record = {"isLive": True, "liveChatTextMessageRenderer": renderer}
+    path = tmp_path / "video.live_chat.json"
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    ingest_jsonl_delta(session, video.id, path)
+    message = session.query(ChatMessage).one()
+    before_snapshot = message.offset_ms
+    ingest_jsonl(session, video.id, path, complete_snapshot=True)
+    assert message.offset_ms == before_snapshot == expected_stream_offset
+
+    expected_local_seconds = published_epoch - (1_000 + recording_delay)
+    danmaku = dplayer_danmaku(video.id, "all-0", db=session)
+    assert danmaku["data"][0][0] == pytest.approx(expected_local_seconds, abs=2)
+    listing = chat_messages(video.id, db=session)
+    assert listing["messages"][0]["time_seconds"] == pytest.approx(expected_local_seconds, abs=2)
 
 
 def test_parse_mixed_standard_and_custom_emoji_runs():
@@ -577,15 +638,29 @@ def test_dplayer_v3_rows_are_arrays_in_seconds_and_hide_deleted_by_default(db):
     assert isinstance(result["data"][0][0],float)
     assert dplayer_danmaku(video.id,"all-1",session)["data"][-1][-1]=="[削除済] gone"
 
-def test_dplayer_v3_returns_all_rows_over_1000(db):
+def test_dplayer_v3_caps_results_and_supports_time_windows(db):
     session,video=db
     session.add_all(ChatMessage(video_id=video.id,message_id=f"many-{i}",offset_ms=i*1000,
         author_name="viewer",message_text=f"message {i}") for i in range(1205))
     session.flush()
-    result=dplayer_danmaku(video.id,"all-0",session)
-    assert len(result["data"])==1205
+    result=dplayer_danmaku(video.id,"all-0",db=session)
+    assert len(result["data"])==1000
     assert result["data"][0][0]==0.0
-    assert result["data"][-1][0]==1204.0
+    assert result["data"][-1][0]==999.0
+    next_window=dplayer_danmaku(video.id,"all-0",after_ms=1_000_000,before_ms=1_204_000,db=session)
+    assert len(next_window["data"])==205
+    assert next_window["data"][0][0]==1000.0
+    path_window = dplayer_danmaku(video.id, "all-0-window-1000000-1204000", session)
+    assert len(path_window["data"])==205
+
+
+def test_chat_danmaku_legacy_endpoint_accepts_bounded_windows(db):
+    session, video = db
+    session.add_all(ChatMessage(video_id=video.id, message_id=f"window-{i}", offset_ms=i * 1000,
+                                author_name="viewer", message_text=f"message {i}") for i in range(1205))
+    session.flush()
+    result = chat_danmaku(video.id, after_ms=10_000, before_ms=11_000, limit=3, db=session)
+    assert [row[0] for row in result["data"]] == [10.0, 11.0]
 
 def test_dplayer_membership_heading_is_localized(db):
     session, video = db

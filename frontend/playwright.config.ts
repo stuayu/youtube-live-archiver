@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test'
 const external = process.env.YLA_E2E_URL
 export default defineConfig({
   testDir: './e2e',
+  outputDir: process.env.YLA_PLAYWRIGHT_OUTPUT_DIR || 'test-results',
   fullyParallel: false,
   workers: 1,
   reporter: 'list',
@@ -19,6 +20,11 @@ export default defineConfig({
     {
       name: 'webkit',
       use: { ...devices['Desktop Safari'], browserName: 'webkit', viewport: { width: 1440, height: 1000 } },
+    },
+    {
+      name: 'webkit-iphone',
+      testMatch: /player-settings-layout\.spec\.ts/,
+      use: { ...devices['iPhone 13'], browserName: 'webkit', viewport: { width: 390, height: 844 } },
     },
     { name: 'tablet', use: { ...devices['Desktop Chrome'], viewport: { width: 820, height: 1120 } } },
     {

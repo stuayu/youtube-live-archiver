@@ -52,6 +52,7 @@ active_chats: dict[int, subprocess.Popen] = {}
 _stderr_tails: dict[int, tuple[deque[bytes], list[int], threading.Thread]] = {}
 STDERR_TAIL_LIMIT = 64 * 1024
 RECORDER_HEARTBEAT_SECONDS = 20
+TEE_YTDLP_EXIT_TIMEOUT_SECONDS = 30
 
 
 def stopping(video_id: int) -> bool:
@@ -301,7 +302,10 @@ def _capture_live_from_start_offset(db: Session, video: Video, target: Path, ste
         **(video.raw_metadata or {}),
         "attempts": attempts,
         "live_from_start_start_time_ms": start_time_ms,
+        "recording_start_offset_ms": start_time_ms,
     }
+    from .chat import rebase_live_chat_offsets
+    rebase_live_chat_offsets(db, video.id)
     db.commit()
     return True
 
@@ -342,8 +346,18 @@ def _wait_for_attempt(db: Session, video: Video, target: Path, stem: str,
             raise RuntimeError("recorder advisory lock lost during recording")
         if stopping(video.id):
             request_process_interrupt(process)
-        _ingest_live_chat_delta(db, video, target, stem, chat_offsets)
         elapsed = time.monotonic() - last_heartbeat
+        if elapsed >= RECORDER_HEARTBEAT_SECONDS:
+            try:
+                video.recording_heartbeat_at = now()
+                _audit_low_disk_space(db, video)
+                db.commit()
+            except Exception:
+                db.rollback()
+                log.warning("recording heartbeat write failed for %s; retrying on next interval",
+                            video.youtube_video_id)
+            last_heartbeat = time.monotonic()
+        _ingest_live_chat_delta(db, video, target, stem, chat_offsets)
         if elapsed >= 1 and time.monotonic() - last_start_time_probe >= 1:
             attempt = next((item for item in reversed((video.raw_metadata or {}).get("attempts", []))
                             if item.get("stem") == stem), {})
@@ -355,16 +369,6 @@ def _wait_for_attempt(db: Session, video: Video, target: Path, stem: str,
                     log.warning("live start offset probe failed for %s; retrying while recording",
                                 video.youtube_video_id)
                 last_start_time_probe = time.monotonic()
-        if elapsed >= RECORDER_HEARTBEAT_SECONDS:
-            try:
-                video.recording_heartbeat_at = now()
-                _audit_low_disk_space(db, video)
-                db.commit()
-            except Exception:
-                db.rollback()
-                log.warning("recording heartbeat write failed for %s; retrying on next interval",
-                            video.youtube_video_id)
-            last_heartbeat = time.monotonic()
     return stderr_tail(process)
 
 
@@ -444,6 +448,7 @@ def classify_attempt_result(exit_code: int | None, media_available: bool,
 
 def _stem_media_paths(directory: Path, stem: str) -> list[Path]:
     paths = [directory / f"{stem}.{extension}" for extension in ("mkv", "mp4", "ts", "webm", "m4v", "mov")]
+    paths.append(directory / f"{stem}.tee.ts")
     paths.extend(directory / f"{stem}.{extension}.part" for extension in ("mkv", "mp4", "ts", "webm"))
     paths.append(directory / f"{stem}.partial.mkv")
     return [path for path in paths if path.is_file() and path.stat().st_size > 0]
@@ -657,6 +662,27 @@ def finish_attempt(metadata: dict, stem: str, profile: str, outcome: str, ended_
     return {**(metadata or {}), "attempts": attempts}
 
 
+def _wait_for_tee_downloader(process: subprocess.Popen, video_id: str, channel_id: str) -> None:
+    try:
+        process.wait(timeout=TEE_YTDLP_EXIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        log.error("yt-dlp did not exit after tee recording youtube_video_id=%s channel_id=%s",
+                  video_id, channel_id)
+        stop_process(process)
+        raise RuntimeError("yt-dlp did not exit after tee recording") from exc
+
+
+def _tee_ytdlp_arguments(args: list[str], target: Path, output_stem: str) -> list[str]:
+    """Keep media on stdout while sidecar files use their typed templates."""
+    tee_args = list(args)
+    output_arg = tee_args.index("-o")
+    tee_args[output_arg + 1] = "-"
+    typed_template = str(target / f"{output_stem}.%(ext)s")
+    tee_args[-1:-1] = ["-P", f"thumbnail:{target}",
+                       "-o", f"thumbnail:{typed_template}", "-o", f"description:{typed_template}"]
+    return tee_args
+
+
 def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Path,
                      output_stem: str, profile: str, is_live: bool, selector: str | None,
                      lease: Any, chat_offsets: dict[str, int]) -> tuple[subprocess.Popen, bytes]:
@@ -686,12 +712,10 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
     if tee_enabled:
         from .live_playback import tee_args
         v.live_hls_path = str(hls_dir)
-        tee_ytdlp = list(args)
-        output_arg = tee_ytdlp.index("-o")
-        tee_ytdlp[output_arg + 1] = "-"
-        tee_ytdlp[output_arg:output_arg] = ["--paths", str(target)]
+        tee_ytdlp = _tee_ytdlp_arguments(args, target, output_stem)
         # Tee only the media stream. yt-dlp remains responsible for YouTube URL refresh and metadata.
         yt_proc = None
+        ff_proc = None
         try:
             yt_proc = popen_recording(tee_ytdlp[len(ytdlp_command()):], stdout=subprocess.PIPE)
             active_upstreams[v.id] = yt_proc
@@ -718,52 +742,89 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                         stop_process(yt_proc)
                         raise RuntimeError("recorder advisory lock lost during tee recording")
                     if stopping(v.id):
-                        stop_process(ff_proc)
                         stop_process(yt_proc)
+                        stop_process(ff_proc)
                     try:
                         from .live_playback import prune_hls
                         prune_hls(hls_dir, ch.live_playback_limit_bytes)
                     except Exception:
                         log.exception("HLS rolling cleanup failed for %s", v.youtube_video_id)
-                    _ingest_live_chat_delta(db, v, target, output_stem, chat_offsets)
                     v.recording_heartbeat_at = now()
                     _audit_low_disk_space(db, v)
                     db.commit()
-            yt_proc.wait()
+                    _ingest_live_chat_delta(db, v, target, output_stem, chat_offsets)
+            _wait_for_tee_downloader(yt_proc, v.youtube_video_id, ch.youtube_channel_id)
             yt_stderr = stderr_tail(yt_proc)
             active_upstreams.pop(v.id, None)
             active_recorders.pop(v.id, None)
             tee_rc = ff_proc.returncode or yt_proc.returncode
-            if tee_rc:
+            requested_stop = stop_reason(v.id) is not None or stopping(v.id)
+            transport_stream = target / f"{output_stem}.tee.ts"
+            tee_media = transport_stream.is_file() and transport_stream.stat().st_size > 0
+            remuxed = False
+            if tee_media:
+                from .live_playback import finalize_tee_archive
+                remuxed = finalize_tee_archive(
+                    settings.ffmpeg_path, transport_stream, target / f"{output_stem}.mkv"
+                )
+            if requested_stop:
+                proc = ff_proc
+                proc.returncode = 0 if tee_media or remuxed else (tee_rc or 1)
+            elif tee_rc:
                 from .live_playback import fallback_to_direct
                 def record_tee_failure(error, return_code):
                     db.add(AuditLog(video_id=v.id, action="LIVE_PLAYBACK_FALLBACK", reason="TEE_FAILED",
                         details={"error": str(error) if error else None, "return_code": return_code,
                           "ffmpeg": (ff_stderr or b"").decode(errors="replace")[-2000:], "yt_dlp": (yt_stderr or b"").decode(errors="replace")[-2000:]}))
+                fallback_stem = _next_output_stem(v, target, profile)
+                fallback_args = [arg.replace(f"{output_stem}.", f"{fallback_stem}.") for arg in args]
+                v.raw_metadata = finish_attempt(v.raw_metadata or {}, output_stem, profile, "tee_failed", now())
+                v.raw_metadata = begin_attempt(v.raw_metadata or {}, fallback_stem, profile, now(),
+                                               from_start=from_start)
+                proc = fallback_to_direct(RuntimeError("tee process failed"), tee_rc,
+                    lambda: popen_recording(fallback_args[len(ytdlp_command()):], stdout=subprocess.DEVNULL),
+                    record_tee_failure)
+                setattr(proc, "recording_stem", fallback_stem)
                 v.live_hls_path = None
                 shutil.rmtree(hls_dir, ignore_errors=True)
-                proc = fallback_to_direct(RuntimeError("tee process failed"), tee_rc,
-                    lambda: popen_recording(args[len(ytdlp_command()):], stdout=subprocess.DEVNULL), record_tee_failure)
                 write_process_manifest(target, proc, "yt-dlp")
                 if stopping(v.id):
                     stop_process(proc)
                 db.commit()
-            else:
+            elif not remuxed:
                 from .live_playback import finalize_tee_archive
                 transport_stream = target / f"{output_stem}.tee.ts"
-                if not finalize_tee_archive(settings.ffmpeg_path, transport_stream, target / f"{output_stem}.mkv"):
-                    raise RuntimeError("tee output could not be remuxed to Matroska")
+                proc = ff_proc
+                proc.returncode = 0 if tee_media else 1
+            else:
                 proc = ff_proc
                 proc.returncode = 0
         except Exception as tee_error:
-            log.exception("tee launch failed for %s; falling back to direct yt-dlp", v.youtube_video_id)
+            log.exception("tee launch failed for %s", v.youtube_video_id)
             if yt_proc and yt_proc.poll() is None:
                 stop_process(yt_proc)
             active_upstreams.pop(v.id, None)
-            from .live_playback import fallback_to_direct
-            proc = fallback_to_direct(tee_error, None,
-                lambda: popen_recording(args[len(ytdlp_command()):], stdout=subprocess.DEVNULL),
-                lambda error, rc: db.add(AuditLog(video_id=v.id, action="LIVE_PLAYBACK_FALLBACK", reason="TEE_LAUNCH_FAILED", details={"error": str(error)})))
+            transport_stream = target / f"{output_stem}.tee.ts"
+            if transport_stream.is_file() and transport_stream.stat().st_size > 0:
+                from .live_playback import finalize_tee_archive
+                finalize_tee_archive(settings.ffmpeg_path, transport_stream, target / f"{output_stem}.mkv")
+            if stop_reason(v.id) is not None or stopping(v.id):
+                proc = ff_proc or yt_proc
+                if proc is None:
+                    raise tee_error
+                proc.returncode = 0 if transport_stream.is_file() and transport_stream.stat().st_size > 0 else 1
+            else:
+                from .live_playback import fallback_to_direct
+                fallback_stem = _next_output_stem(v, target, profile)
+                fallback_args = [arg.replace(f"{output_stem}.", f"{fallback_stem}.") for arg in args]
+                v.raw_metadata = finish_attempt(v.raw_metadata or {}, output_stem, profile, "tee_launch_failed", now())
+                v.raw_metadata = begin_attempt(v.raw_metadata or {}, fallback_stem, profile, now(),
+                                               from_start=from_start)
+                proc = fallback_to_direct(tee_error, None,
+                    lambda: popen_recording(fallback_args[len(ytdlp_command()):], stdout=subprocess.DEVNULL),
+                    lambda error, rc: db.add(AuditLog(video_id=v.id, action="LIVE_PLAYBACK_FALLBACK",
+                        reason="TEE_LAUNCH_FAILED", details={"error": str(error)})))
+                setattr(proc, "recording_stem", fallback_stem)
             v.live_hls_path = None
             if proc:
                 write_process_manifest(target, proc, "yt-dlp")
@@ -1070,8 +1131,14 @@ def _complete_recording(db: Session, v: Video, ch: Channel, target: Path, output
         len(live_interval_stems) > 1 and archive_media is None)
     if _archive_backfill_completed(v.raw_metadata or {}, profile) and not incomplete_archive:
         v.raw_metadata["archive_backfill"] = "completed"
-    if has_complete_from_start and not user_stopped:
-        v.is_partial = False
+    if has_complete_from_start:
+        metadata = v.raw_metadata or {}
+        live_still_running = metadata.get("live_status") == "is_live"
+        release = _timestamp_seconds(metadata.get("release_timestamp"))
+        attempts = metadata.get("attempts", [])
+        late_live_start = (live_still_running and release is not None
+                           and release <= time.time() and len(attempts) == 1)
+        v.is_partial = user_stopped or late_live_start
         v.raw_metadata["live_from_start"] = "used"
     v.retention_expires_at = (v.recording_finished_at + timedelta(days=v.retention_days)) if v.retention_days is not None and not v.is_partial else None
     _write_recording_index(v, ch, target, primary, segments, live_interval_stems)
@@ -1110,6 +1177,8 @@ def _complete_recording(db: Session, v: Video, ch: Channel, target: Path, output
         v.status = "PROTECTED" if v.protected else "ACTIVE"
     db.add(AuditLog(video_id=v.id, action="RECORD", reason="Recording completed"))
     v = _commit_completed_recording(db, v)
+    log.info("recording completed youtube_video_id=%s channel_id=%s path=%s",
+             v.youtube_video_id, ch.youtube_channel_id, primary)
     # Queue derived transcription only after the recording is committed.
     # Any queue problem is isolated and cannot change recording success.
     try:
@@ -1272,12 +1341,16 @@ def _live_start_too_old(release_timestamp: float, now_timestamp: float) -> bool:
 def _select_live_from_start(db: Session, video: Video, channel: Channel, is_live: bool) -> str | None:
     if not is_live:
         return None
+    metadata = video.raw_metadata or {}
+    release = _timestamp_seconds(metadata.get("release_timestamp"))
+    if (channel.live_from_start and settings.live_from_start and release is not None
+            and _live_start_too_old(release, time.time())):
+        video.raw_metadata = {**metadata, "live_from_start": "skipped_too_old"}
+        return "skipped_too_old"
     if not channel.live_from_start or not settings.live_from_start or channel.live_playback_enabled:
         video.raw_metadata = {**(video.raw_metadata or {}), "live_from_start": "fallback"}
         return "fallback"
 
-    metadata = video.raw_metadata or {}
-    release = _timestamp_seconds(metadata.get("release_timestamp"))
     inspected: dict = {}
     if release is None:
         db.commit()
@@ -1327,13 +1400,13 @@ def record_video(video_id: int) -> None:
             storage = _choose_storage(db, v, ch)
             if storage is None:
                 if v.status != "WAITING_FOR_STORAGE":
-                    log.warning("storage unavailable for channel %s", ch.youtube_channel_id)
+                    log.warning("storage unavailable for channel channel_id=%s youtube_video_id=%s",
+                                ch.youtube_channel_id, v.youtube_video_id)
                 v.status = "WAITING_FOR_STORAGE"
                 v.next_recovery_at = now() + timedelta(seconds=settings.storage_retry_seconds)
                 db.commit()
                 return
             root = Path(storage.root_path)
-            lock_lost = False
             chat_offsets: dict[str, int] = {}
             try:
                 target = _recording_directory(v, ch, root)
@@ -1348,13 +1421,24 @@ def record_video(video_id: int) -> None:
                 v.format_selector = selector or ""
                 v.format_profile = profile
                 v.format_fallback = False
-                log.info("recording %s profile=%s selector=%r source=%s", v.youtube_video_id, profile, selector, source)
+                log.info("recording started youtube_video_id=%s channel_id=%s profile=%s selector=%r source=%s",
+                         v.youtube_video_id, ch.youtube_channel_id, profile, selector, source)
                 v.file_path = str(target)
                 v.storage_id = storage.id
                 v.recorded_at = now()
                 v.status = "RECORDING"
                 v.recording_heartbeat_at = now()
                 v.next_recovery_at = None
+                release_epoch = _timestamp_seconds((v.raw_metadata or {}).get("release_timestamp"))
+                if is_live:
+                    recording_offset_ms = (
+                        0 if live_from_start == "used" or release_epoch is None
+                        else max(0, int(((v.recorded_at or now()).timestamp() - release_epoch) * 1000))
+                    )
+                    v.raw_metadata = {
+                        **(v.raw_metadata or {}),
+                        "recording_start_offset_ms": recording_offset_ms,
+                    }
                 db.commit()
                 output_stem = _next_output_stem(v, target, profile)
                 v.raw_metadata = begin_attempt(v.raw_metadata or {}, output_stem, profile, v.recorded_at or now(),
@@ -1363,6 +1447,7 @@ def record_video(video_id: int) -> None:
                 proc, stderr = _execute_attempt(
                     db, v, ch, root, target, output_stem, profile, is_live, selector,
                     lease, chat_offsets)
+                output_stem = getattr(proc, "recording_stem", output_stem)
                 stop_kind = stop_reason(v.id)
                 media_candidates = _stem_media_paths(target, output_stem)
                 if stop_kind in {"user", "shutdown", "lock_lost"} and is_live and not any(
@@ -1399,6 +1484,10 @@ def record_video(video_id: int) -> None:
                     return
                 if proc.returncode:
                     error_kind = classify_ytdlp_error(stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr or ""))
+                    log.error("recording failed youtube_video_id=%s channel_id=%s reason=%s",
+                              v.youtube_video_id, ch.youtube_channel_id,
+                              stderr.decode("utf-8", "replace")[-1000:] if isinstance(stderr, bytes)
+                              else str(stderr or error_kind)[-1000:])
                     if error_kind == "UPCOMING":
                         v.raw_metadata = finish_attempt(v.raw_metadata or {}, output_stem, profile, "upcoming", now())
                         v.status = "WAITING_LIVE"
@@ -1447,6 +1536,9 @@ def record_video(video_id: int) -> None:
                 media = next((target / f"{output_stem}.{ext}" for ext in ("mkv", "mp4", "ts", "webm", "m4v", "mov")
                               if (target / f"{output_stem}.{ext}").is_file()), None)
                 if not media or media.stat().st_size <= 0:
+                    log.error("recording failed youtube_video_id=%s channel_id=%s reason=%s",
+                              v.youtube_video_id, ch.youtube_channel_id,
+                              "yt-dlp exited successfully but no non-empty media file was found")
                     v.raw_metadata = finish_attempt(v.raw_metadata or {}, output_stem, profile, "missing_media", now())
                     if is_live:
                         from .recovery import salvage_live_part
@@ -1502,8 +1594,8 @@ def record_video(video_id: int) -> None:
                 for process in (active_recorders.pop(video_id, None), active_upstreams.pop(video_id, None)):
                     stop_process(process)
                 _finish_chat_process(video_id)
-                log.error("completed recording %s is preserved for database recovery: %s",
-                          worker_youtube_id, exc)
+                log.error("completed recording preserved for database recovery youtube_video_id=%s channel_id=%s: %s",
+                          worker_youtube_id, ch.youtube_channel_id, exc)
                 return
             except Exception as exc:
                 # A failed query/commit leaves SQLAlchemy's transaction unusable.
@@ -1546,4 +1638,5 @@ def record_video(video_id: int) -> None:
                     (Path(v.file_path) / ".recorder.json").unlink(missing_ok=True)
                     _write_recording_error(Path(v.file_path), v.youtube_video_id, str(exc))
                 db.commit()
-                log.exception("recording failed for %s", worker_youtube_id)
+                log.exception("recording failed youtube_video_id=%s channel_id=%s: %s",
+                              worker_youtube_id, ch.youtube_channel_id, exc)

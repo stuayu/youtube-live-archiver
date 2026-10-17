@@ -4,7 +4,9 @@ import { resolve, join } from 'node:path'
 import { startE2E, stopE2E } from './e2e-env.mjs'
 const context = await startE2E()
 let browser
-const output = resolve('shots', process.argv[2] === 'review' ? 'review' : 'latest')
+const output = process.env.YLA_SHOT_DIR
+  ? resolve(process.env.YLA_SHOT_DIR)
+  : resolve('shots', process.argv[2] === 'review' ? 'review' : 'latest')
 await mkdir(output, { recursive: true })
 const screens = [
   ['home', 'ホーム'],
@@ -90,10 +92,10 @@ try {
             })
             await page.waitForTimeout(600)
             await page.screenshot({ path: join(output, `${device}-player-${color}.png`) })
-            if (width === 1440 || width === 390) {
+            if (width === 1440 || width === 820 || width === 390) {
               const fullScreen = page.locator('.dplayer-full-icon')
               await fullScreen.hover()
-              await page.waitForTimeout(350)
+              await page.waitForTimeout(400)
               const controller = await page.locator('.dplayer-controller').boundingBox()
               const playerBox = await page.locator('.dplayer').boundingBox()
               if (controller && playerBox) {

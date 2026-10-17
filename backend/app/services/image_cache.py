@@ -26,7 +26,7 @@ def cached_path(key: str, root: str | Path) -> Path | None:
 
 
 def fetch_image(url: str, root: str | Path, *, allowed, max_bytes: int,
-                context: str, opener=None) -> Path:
+                context: str, opener=None, timeout_seconds: float = IMAGE_TIMEOUT_SECONDS) -> Path:
     """Fetch an image with caller-specific host policy and shared safety checks."""
     if not allowed(url):
         raise ValueError(f"unsupported {context} URL")
@@ -38,7 +38,7 @@ def fetch_image(url: str, root: str | Path, *, allowed, max_bytes: int,
         return existing
     request = Request(url, headers={"User-Agent": "YouTubeLiveArchiver/1.0"})
     try:
-        with (opener or urlopen)(request, timeout=IMAGE_TIMEOUT_SECONDS) as response:
+        with (opener or urlopen)(request, timeout=timeout_seconds) as response:
             if not allowed(response.geturl()):
                 raise ValueError(f"{context} redirect rejected")
             length = response.headers.get("Content-Length")
@@ -82,7 +82,6 @@ def resolve_thumbnail(url: str | None, root: str | Path,
     existing = thumbnail_path(url, root)
     if existing or not fetch_enabled:
         return existing
-    key = asset_key(url)
     with _failure_lock:
         if _failed_until.get(url, 0) > time.monotonic():
             return None

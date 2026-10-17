@@ -3,11 +3,17 @@
 import json
 import re
 import tempfile
+import threading
+import time
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select, exists, and_, or_, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..db import SessionLocal
 from ..models import ChatMessage, Channel, ProcessingJob, Video, now
@@ -21,6 +27,11 @@ RENDERER_TYPES = {
     "liveChatSponsorshipsGiftPurchaseAnnouncementRenderer": "membership_gift",
     "liveChatSponsorshipsGiftRedemptionAnnouncementRenderer": "membership_gift_received",
 }
+_asset_prefetch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chat-assets")
+_asset_prefetch_lock = threading.Lock()
+_asset_prefetch_pending: set[int] = set()
+_oversized_chat_warnings: set[int] = set()
+log = logging.getLogger(__name__)
 IGNORED_RENDERERS = {
     "liveChatViewerEngagementMessageRenderer",
     "liveChatModeChangeMessageRenderer",
@@ -79,10 +90,35 @@ def _live_record(raw: Any) -> dict[str, Any]:
     return record if isinstance(record, dict) else {}
 
 
-def _correct_live_offset(parsed: dict[str, Any], raw: Any, release_epoch: float | None) -> None:
+def _recording_start_epoch(video: Video | None) -> float | None:
+    if video is None:
+        return None
+    attempts = (video.raw_metadata or {}).get("attempts", [])
+    started = next((item.get("started_at") for item in attempts
+                    if isinstance(item, dict) and item.get("started_at")), None)
+    value = started or video.recorded_at
+    if value is None:
+        return None
+    try:
+        from datetime import datetime
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return _epoch_seconds(parsed)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _correct_live_offset(parsed: dict[str, Any], raw: Any, release_epoch: float | None,
+                         recording_start_epoch: float | None, recording_offset_ms: int) -> None:
     published_at = parsed.get("published_at")
-    if _live_record(raw).get("isLive") is True and release_epoch is not None and published_at:
-        parsed["offset_ms"] = max(0, int((_epoch_seconds(published_at) - release_epoch) * 1000))
+    if _live_record(raw).get("isLive") is not True or not published_at:
+        return
+    published_epoch = _epoch_seconds(published_at)
+    if release_epoch is not None:
+        parsed["offset_ms"] = max(0, int((published_epoch - release_epoch) * 1000))
+    elif recording_start_epoch is not None:
+        parsed["offset_ms"] = max(
+            0, recording_offset_ms + int((published_epoch - recording_start_epoch) * 1000)
+        )
 
 
 def _resolve_release_epoch(db, video: Video, *, inspect_missing: bool) -> float | None:
@@ -392,47 +428,69 @@ def ingest_records(db, video_id: int, records: list[dict[str, Any]], *, complete
     timestamp = now()
     video = db.get(Video, video_id) if db is not None else None
     release_epoch = _resolve_release_epoch(db, video, inspect_missing=False) if video else None
+    recording_start_epoch = _recording_start_epoch(video)
+    recording_offset_ms = max(0, int((video.raw_metadata or {}).get("recording_start_offset_ms", 0))) if video else 0
+    parsed_messages: dict[str, dict[str, Any]] = {}
     for record in records:
         for parsed in parse_record(record):
-            _correct_live_offset(parsed, record, release_epoch)
+            _correct_live_offset(parsed, record, release_epoch, recording_start_epoch, recording_offset_ms)
             mid = parsed["message_id"]
-            if mid in seen:
-                continue
             seen.add(mid)
-            old = db.scalar(select(ChatMessage).where(ChatMessage.message_id == mid))
-            if old:
-                for key in ("author_channel_id", "author_name", "author_badges", "author_role", "message_text", "message_runs", "amount_display", "superchat_amount", "superchat_currency", "superchat_color", "message_type", "header_text", "sticker_url"):
-                    setattr(old, key, parsed[key])
-                old.offset_ms = parsed["offset_ms"]
-                old.published_at = parsed.get("published_at")
-                old.raw = parsed["raw"]
-                old.last_seen_at = timestamp
-            else:
-                db.add(ChatMessage(
-                    video_id=video_id,
-                    message_id=mid,
-                    published_at=parsed.get("published_at"),
-                    first_seen_at=timestamp,
-                    last_seen_at=timestamp,
-                    is_deleted=False,
-                    deleted_at=None,
-                    deletion_source=None,
-                    offset_ms=parsed["offset_ms"],
-                    raw=parsed["raw"],
-                    **{
-                        key: value
-                        for key, value in parsed.items()
-                        if key not in {"message_id", "offset_ms", "published_at", "raw"}
-                    },
-                ))
+            parsed_messages.setdefault(mid, parsed)
+    old_rows = db.scalars(select(ChatMessage).where(ChatMessage.message_id.in_(seen))).all() if db is not None and seen else []
+    old_by_id = {message.message_id: message for message in old_rows}
+    update_keys = ("author_channel_id", "author_name", "author_badges", "author_role", "message_text",
+                   "message_runs", "amount_display", "superchat_amount", "superchat_currency",
+                   "superchat_color", "message_type", "header_text", "sticker_url")
+    for mid, parsed in parsed_messages.items():
+        old = old_by_id.get(mid)
+        if old:
+            for key in update_keys:
+                setattr(old, key, parsed[key])
+            # Keep offsets stable across delta ingest and final snapshot parses.
+            # Both are derived from the same published timestamp and recording metadata.
+            old.offset_ms = parsed["offset_ms"]
+            old.published_at = parsed.get("published_at")
+            old.raw = parsed["raw"]
+            old.last_seen_at = timestamp
+    new_rows = [
+        {
+            "video_id": video_id, "message_id": mid, "published_at": parsed.get("published_at"),
+            "first_seen_at": timestamp, "last_seen_at": timestamp, "is_deleted": False,
+            "deleted_at": None, "deletion_source": None, "offset_ms": parsed["offset_ms"],
+            "raw": parsed["raw"],
+            **{key: value for key, value in parsed.items()
+               if key not in {"message_id", "offset_ms", "published_at", "raw"}},
+        }
+        for mid, parsed in parsed_messages.items() if mid not in old_by_id
+    ]
+    if new_rows and db is not None:
+        dialect = db.get_bind().dialect.name
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert if dialect == "sqlite" else None
+        if insert is None:
+            db.add_all(ChatMessage(**row) for row in new_rows)
+        else:
+            db.execute(insert(ChatMessage).values(new_rows).on_conflict_do_nothing(index_elements=["message_id"]))
     db.flush()
-    rows = db.scalars(select(ChatMessage).where(ChatMessage.video_id == video_id)).all()
-    for message in rows:
-        if message.message_id in removed or message.author_channel_id in removed_authors:
-            message.is_deleted = True
-            message.deleted_at = timestamp
-            message.deletion_source = "判定不能"
-        elif complete_snapshot and message.message_id not in seen and not message.is_deleted:
+    if complete_snapshot:
+        rows = db.scalars(select(ChatMessage).where(ChatMessage.video_id == video_id)).all()
+        for message in rows:
+            if message.message_id in removed or message.author_channel_id in removed_authors:
+                message.is_deleted = True
+                message.deleted_at = timestamp
+                message.deletion_source = "判定不能"
+            elif complete_snapshot and message.message_id not in seen and not message.is_deleted:
+                message.is_deleted = True
+                message.deleted_at = timestamp
+                message.deletion_source = "判定不能"
+    elif removed or removed_authors:
+        delete_stmt = select(ChatMessage).where(ChatMessage.video_id == video_id)
+        predicates = []
+        if removed:
+            predicates.append(ChatMessage.message_id.in_(removed))
+        if removed_authors:
+            predicates.append(ChatMessage.author_channel_id.in_(removed_authors))
+        for message in db.scalars(delete_stmt.where(or_(*predicates))).all():
             message.is_deleted = True
             message.deleted_at = timestamp
             message.deletion_source = "判定不能"
@@ -446,13 +504,15 @@ def reparse_video_chat(db, video_id: int) -> int:
     video = db.get(Video, video_id)
     needs_release = any(_live_record(row.raw).get("isLive") is True for row in rows)
     release_epoch = _resolve_release_epoch(db, video, inspect_missing=True) if video and needs_release else None
+    recording_start_epoch = _recording_start_epoch(video)
+    recording_offset_ms = max(0, int((video.raw_metadata or {}).get("recording_start_offset_ms", 0))) if video else 0
     for row in rows:
         parsed = parse_raw_message(row.raw, row.message_type)
         if not parsed:
             continue
         if _live_record(row.raw).get("isLive") is True:
             if release_epoch is not None:
-                _correct_live_offset(parsed, row.raw, release_epoch)
+                _correct_live_offset(parsed, row.raw, release_epoch, recording_start_epoch, recording_offset_ms)
             else:
                 parsed["offset_ms"] = row.offset_ms
         for name in ("author_channel_id", "author_name", "author_badges", "author_role", "message_text",
@@ -467,15 +527,21 @@ def reparse_video_chat(db, video_id: int) -> int:
 def rebase_live_chat_offsets(db, video_id: int) -> int:
     video = db.get(Video, video_id)
     release_epoch = _release_epoch(video)
-    if not release_epoch:
-        return 0
     rows = db.scalars(select(ChatMessage).where(ChatMessage.video_id == video_id)).all()
+    recording_start_epoch = _recording_start_epoch(video)
+    recording_offset_ms = max(0, int((video.raw_metadata or {}).get("recording_start_offset_ms", 0)))
     changed = 0
     for row in rows:
         record = (row.raw or {}).get("record", {})
         if not record.get("isLive") or not row.published_at:
             continue
-        row.offset_ms = max(0, int(_epoch_seconds(row.published_at) * 1000 - release_epoch * 1000))
+        published_epoch = _epoch_seconds(row.published_at)
+        if release_epoch is not None:
+            row.offset_ms = max(0, int((published_epoch - release_epoch) * 1000))
+        elif recording_start_epoch is not None:
+            row.offset_ms = max(0, recording_offset_ms + int((published_epoch - recording_start_epoch) * 1000))
+        else:
+            continue
         changed += 1
     db.flush()
     return changed
@@ -666,15 +732,47 @@ def ingest_jsonl(db, video_id: int, path: str | Path, *, complete_snapshot: bool
     return count
 
 
-def ingest_jsonl_delta(db, video_id: int, path: str | Path, offset: int = 0) -> int:
+def ingest_jsonl_delta(db, video_id: int, path: str | Path, offset: int = 0, *,
+                       max_bytes: int = 1024 * 1024, max_records: int = 250,
+                       max_seconds: float = 0.2) -> int:
     """Ingest only complete JSONL lines appended during recording."""
-    data = Path(path).read_bytes()
-    start = min(max(0, offset), len(data))
-    boundary = data.rfind(b"\n") + 1
-    if boundary <= start:
+    source = Path(path)
+    size = source.stat().st_size
+    start = min(max(0, offset), size)
+    if start >= size:
         return offset
+    with source.open("rb") as file:
+        file.seek(start)
+        data = file.read(max(1, max_bytes))
+    boundary = data.rfind(b"\n") + 1
+    if boundary <= 0:
+        if len(data) >= max(1, max_bytes) and size > start + len(data):
+            if video_id not in _oversized_chat_warnings:
+                _oversized_chat_warnings.add(video_id)
+                log.warning("skipping oversized or malformed live chat line video_id=%s bytes=%s",
+                            video_id, size - start)
+            with source.open("rb") as file:
+                file.seek(start + len(data))
+                skipped = len(data)
+                while True:
+                    chunk = file.read(64 * 1024)
+                    if not chunk:
+                        return start
+                    newline = chunk.find(b"\n")
+                    if newline >= 0:
+                        skipped += newline + 1
+                        break
+                    skipped += len(chunk)
+            return start + skipped
+        return start
     records = []
-    for line in data[start:boundary].splitlines():
+    consumed = 0
+    deadline = time.monotonic() + max(0.01, max_seconds)
+    for line in data[:boundary].splitlines(keepends=True):
+        consumed += len(line)
+        if time.monotonic() > deadline:
+            consumed -= len(line)
+            break
         if not line.strip():
             continue
         try:
@@ -683,14 +781,42 @@ def ingest_jsonl_delta(db, video_id: int, path: str | Path, offset: int = 0) -> 
             continue
         if isinstance(value, dict):
             records.append(value)
+            if len(records) >= max(1, max_records):
+                break
     if records:
         if db is None:
             ingest_records(db, video_id, records, complete_snapshot=False)
         else:
             with db.begin_nested():
                 ingest_records(db, video_id, records, complete_snapshot=False)
-            _prefetch_assets(db, video_id)
-    return boundary
+        _schedule_asset_prefetch(video_id)
+    return start + consumed
+
+
+def _schedule_asset_prefetch(video_id: int) -> None:
+    """Prefetch a small chat asset batch off the recorder's polling thread."""
+    with _asset_prefetch_lock:
+        if video_id in _asset_prefetch_pending:
+            return
+        _asset_prefetch_pending.add(video_id)
+
+    def run() -> None:
+        try:
+            time.sleep(0.1)  # Let the recorder commit the delta before opening a fresh session.
+            from ..config import settings
+            from ..db import SessionLocal
+            from .chat_assets import prefetch_video_assets
+
+            with SessionLocal() as session:
+                prefetch_video_assets(session, video_id, Path(settings.data_dir) / "chat-assets",
+                                      limit=20, max_seconds=2.0)
+        except Exception:
+            log.debug("live chat asset prefetch failed for video_id=%s", video_id, exc_info=True)
+        finally:
+            with _asset_prefetch_lock:
+                _asset_prefetch_pending.discard(video_id)
+
+    _asset_prefetch_pool.submit(run)
 
 
 def _prefetch_assets(db, video_id: int) -> None:

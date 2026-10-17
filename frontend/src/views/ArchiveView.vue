@@ -3,6 +3,7 @@ import { reactive } from 'vue'
 import { useWorkspaceContext } from '../composables/workspaceContext'
 import Icon from '../components/ui/Icon.vue'
 import type { QueryKey } from '../composables/useQueryState'
+import { missingOpeningLabel } from '../lib/recording'
 const ctx = reactive(useWorkspaceContext())
 function filterName(key: QueryKey) {
   return {
@@ -229,9 +230,9 @@ function hasFilter(key: QueryKey) {
                 >{{ badge.label }}</span
               >
             </div>
-            <span v-if="(video.recording_start_offset_ms || 0) > 0 && video.live_from_start !== 'used'"
-              >冒頭 {{ Math.ceil((video.recording_start_offset_ms || 0) / 60_000) }} 分欠け</span
-            >
+            <span v-if="missingOpeningLabel(video.recording_start_offset_ms || 0, video.live_from_start)">
+              {{ missingOpeningLabel(video.recording_start_offset_ms || 0, video.live_from_start) }}
+            </span>
             <span v-if="video.archive_backfill === 'queued'">アーカイブ補完中</span>
             <span
               >{{ ctx.formatBytes(video.file_size) }} · {{ video.storage_name || '保存先なし' }} ·

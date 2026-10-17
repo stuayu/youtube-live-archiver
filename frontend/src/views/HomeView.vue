@@ -193,13 +193,32 @@ const ctx = reactive(useWorkspaceContext())
         <span v-if="ctx.status?.database.data_dir">DB データ {{ ctx.status.database.data_dir }}</span>
         <span>スケジューラー {{ ctx.status?.scheduler.running ? '稼働中' : '停止中' }}</span>
         <span>yt-dlp {{ String(ctx.status?.tools.yt_dlp_version ?? '不明') }}</span>
+        <span v-if="ctx.status?.tools.yt_dlp_latest_version">
+          最新 {{ String(ctx.status.tools.yt_dlp_latest_version) }}
+        </span>
+        <span v-if="ctx.status?.tools.yt_dlp_update_available === true" class="error-text">
+          新しい yt-dlp 版あり{{ ctx.status.tools.yt_dlp_update_overdue ? '・7日以上経過' : '' }}
+        </span>
+        <span v-else-if="ctx.status?.tools.yt_dlp_latest_check_failed === true">
+          yt-dlp 最新版を確認できず
+        </span>
+        <span v-if="ctx.status?.tools.yt_dlp_checked_at">
+          版確認 {{ ctx.formatDate(String(ctx.status.tools.yt_dlp_checked_at)) }}
+        </span>
+        <span v-if="ctx.status?.tools.yt_dlp_release_date">
+          リリース {{ ctx.formatDate(String(ctx.status.tools.yt_dlp_release_date)) }}
+        </span>
+        <span v-if="ctx.status?.tools.yt_dlp_auto_update">yt-dlp 自動更新: 有効</span>
+        <span v-if="ctx.status?.tools.yt_dlp_update_error" class="error-text">
+          yt-dlp 更新エラー: {{ String(ctx.status.tools.yt_dlp_update_error) }}
+        </span>
         <span>ffmpeg {{ ctx.status?.tools.ffmpeg_available ? '利用可能' : '未検出' }}</span>
       </div>
       <div v-for="job in ctx.status?.scheduler.jobs ?? []" :key="job.id" class="event-row">
         <b>{{ job.name }}</b>
         <span
-          >次回 {{ ctx.formatDate(job.next_run_at) }} · 前回 {{ ctx.formatDate(job.last_finished_at) }}
-          {{ job.last_error || '' }}</span
+          >次回 {{ ctx.formatDate(job.next_run_at) }} · 成功 {{ ctx.formatDate(job.last_success_at) }} · 遅延
+          {{ job.last_delay_ms ?? 0 }} ms {{ job.last_error || '' }}</span
         >
       </div>
     </details>

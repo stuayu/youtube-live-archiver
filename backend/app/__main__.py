@@ -6,7 +6,9 @@ from pathlib import Path
 
 import uvicorn
 
-from .config import settings
+from .config import configure_logging, settings
+
+configure_logging()
 
 
 def _watchdog(host: str, port: int, grace: float = 30.0, interval: float = 15.0, failures: int = 3) -> None:

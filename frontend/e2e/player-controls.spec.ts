@@ -14,6 +14,7 @@ test('player sliders and fullscreen controls stay usable inside the player', asy
   await settingsButton.click()
   const panel = dialog.locator('.dplayer-setting-box')
   await expect(panel).toHaveClass(/dplayer-setting-box-open/)
+  await page.waitForTimeout(400)
   await expect(panel).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
   await expect
     .poll(() => settingsButton.evaluate((element) => getComputedStyle(element, '::after').display))
@@ -99,6 +100,10 @@ test('player sliders and fullscreen controls stay usable inside the player', asy
     expect(rect!.height).toBeGreaterThan(0)
     expect(rect!.x).toBeGreaterThanOrEqual(rects[4]!.x)
     expect(rect!.x + rect!.width).toBeLessThanOrEqual(rects[4]!.x + rects[4]!.width)
+    if ((page.viewportSize()?.width ?? 1440) <= 620) {
+      expect(rect!.width).toBeGreaterThanOrEqual(44)
+      expect(rect!.height).toBeGreaterThanOrEqual(44)
+    }
   }
   await webFull.click()
   await expect(player).toHaveClass(/dplayer-fulled/)

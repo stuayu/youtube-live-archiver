@@ -85,8 +85,21 @@ def _recording(argv: list[str], video: dict, video_id: str) -> int:
         target = Path(argv[argv.index("--print-to-file") + 2])
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(metadata), encoding="utf-8")
-    if template != "-" and "--write-thumbnail" in argv:
-        (stem_path.parent / f"{stem}.webp").write_bytes(b"fake-thumbnail")
+    if "--write-thumbnail" in argv:
+        thumbnail_template = next((argv[index + 1].split(":", 1)[1]
+                                   for index, value in enumerate(argv[:-1])
+                                   if value == "-o" and argv[index + 1].startswith("thumbnail:")), None)
+        thumbnail_path = (Path(thumbnail_template.replace("%(ext)s", "webp"))
+                          if thumbnail_template else stem_path.parent / f"{stem}.webp")
+        thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+        thumbnail_path.write_bytes(b"fake-thumbnail")
+    description_template = next((argv[index + 1].split(":", 1)[1]
+                                 for index, value in enumerate(argv[:-1])
+                                 if value == "-o" and argv[index + 1].startswith("description:")), None)
+    if description_template:
+        description_path = Path(description_template.replace("%(ext)s", "description"))
+        description_path.parent.mkdir(parents=True, exist_ok=True)
+        description_path.write_text(str(metadata.get("description") or ""), encoding="utf-8")
     if "--skip-download" in argv and "--write-subs" in argv:
         state = load_state().get("videos", {}).get(video_id, {})
         replay = state.get("chat_replay")

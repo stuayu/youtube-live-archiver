@@ -1006,11 +1006,12 @@ legend {
   width: min(220px, calc(100vw - 24px)) !important;
 }
 .dplayer-mount .dplayer-setting-item.yla-setting-range-item,
+.dplayer-mount .dplayer-setting-item,
 .dplayer-mount .dplayer-setting-item.yla-setting-choice,
 .dplayer-mount .dplayer-setting-item.yla-setting-deleted,
 .dplayer-mount .dplayer-setting-item.yla-setting-live-follow {
   box-sizing: border-box;
-  min-height: 38px;
+  min-height: 32px;
 }
 .dplayer-mount .yla-setting-choice .yla-setting-value {
   position: static;
@@ -1253,6 +1254,15 @@ legend {
 @media (max-width: 420px) {
   .dplayer-controller .dplayer-icons-right {
     right: 0 !important;
+  }
+  .dplayer-controller .dplayer-icons-left .dplayer-live-badge {
+    position: absolute;
+    top: -30px;
+    left: 0;
+    border-radius: 6px;
+    background: #111e;
+    line-height: 24px;
+    padding: 0 8px;
   }
 }
 .dplayer-controller .dplayer-icons-right .dplayer-full .dplayer-full-in-icon,
@@ -1594,13 +1604,24 @@ legend {
 }
 
 @media (pointer: coarse) {
+  button,
+  select,
+  textarea,
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='hidden']),
   .button,
   .icon-button,
   .field input,
   .field select,
+  .menu-items a,
+  .meta a.labeled-value,
+  .segmented button,
   .nav-item,
   .mobile-tab {
     min-height: 44px;
+  }
+  button,
+  .menu-items a {
+    min-width: 44px;
   }
   .check-field {
     min-height: 44px;
@@ -1608,6 +1629,31 @@ legend {
   .icon-button {
     height: 44px;
     width: 44px;
+  }
+  .meta a.labeled-value {
+    align-items: center;
+    min-width: 44px;
+    padding: 4px 8px;
+  }
+  .dplayer-controller .dplayer-icons-right > .dplayer-airplay-icon,
+  .dplayer-controller .dplayer-icons-right > .dplayer-setting,
+  .dplayer-controller .dplayer-icons-right .dplayer-full {
+    flex-basis: 44px;
+    height: 44px;
+    width: 44px;
+  }
+  .dplayer-controller .dplayer-icons-right .dplayer-full {
+    flex-basis: 92px;
+    width: 92px;
+  }
+  .dplayer-controller .dplayer-icons-right > .dplayer-airplay-icon,
+  .dplayer-controller .dplayer-icons-right .dplayer-setting-icon,
+  .dplayer-controller .dplayer-icons-right .dplayer-full .dplayer-icon {
+    height: 44px;
+    width: 44px;
+  }
+  .dplayer-controller .dplayer-icons-right .dplayer-full .dplayer-icon {
+    flex-basis: 44px;
   }
 }
 
@@ -1994,5 +2040,12 @@ legend {
 @media (pointer: coarse) {
   .button.small {
     min-height: 44px;
+  }
+  .dplayer-controller .dplayer-icons-right > .dplayer-airplay-icon,
+  .dplayer-controller .dplayer-icons-right > .dplayer-setting,
+  .dplayer-controller .dplayer-icons-right .dplayer-full,
+  .dplayer-controller .dplayer-icons-right .dplayer-full .dplayer-icon {
+    height: 44px !important;
+    min-height: 44px !important;
   }
 }

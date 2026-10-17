@@ -137,9 +137,13 @@ test('danmaku filters reload with a valid address and no 404', async ({ page }, 
   const row = page.locator('.video-row').filter({ hasText: '歌枠 / Singing Stream' })
   await row.getByRole('button', { name: '再生', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: /再生:/ })
-  await expect.poll(() => danmaku.some((url) => url.includes('/chat/danmaku/all-0/v3/'))).toBe(true)
+  await expect
+    .poll(() => danmaku.some((url) => url.includes('/chat/danmaku/all-0-window-0-180000/v3/')))
+    .toBe(true)
   await dialog.getByLabel('種別').selectOption('membership')
   await dialog.getByRole('checkbox', { name: '削除済みを表示' }).last().check()
-  await expect.poll(() => danmaku.some((url) => url.includes('/chat/danmaku/membership-1/v3/'))).toBe(true)
+  await expect
+    .poll(() => danmaku.some((url) => url.includes('/chat/danmaku/membership-1-window-0-180000/v3/')))
+    .toBe(true)
   expect(failures).toEqual([])
 })

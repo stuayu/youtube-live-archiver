@@ -179,9 +179,11 @@ notepad C:\yla\backend\.env
 | --- | --- | --- |
 | `APP_HOST` | `0.0.0.0` | 待受アドレス。この PC だけで使うなら `127.0.0.1` にします。 |
 | `APP_PORT` | `8000` | 待受ポート。 |
+| `LOG_LEVEL` | `INFO` | app logger のレベル。標準エラーに時刻・レベル・logger 名付きで記録します。 |
 | `STORAGE_ROOT` | `./data/archive` | 既定の保存先。例: `D:/yla-archive` |
 | `DATA_DIR` | `./data` | アイコン、チャット画像、配信予定サムネイル（`thumbnails`）、組み込み PostgreSQL の保存先。 |
 | `REMOTE_IMAGE_FETCH_ENABLED` | `true` | 配信予定サムネイルを許可された画像ホストから取得する設定。`false` では未キャッシュ画像を取得しません。 |
+| `YT_DLP_AUTO_UPDATE` | `false` | 録画停止中の yt-dlp 自動更新。更新前後の版確認と失敗時の復元を行います。 |
 | `DATABASE_URL` | 空（組み込み PostgreSQL） | 外部の PostgreSQL を使う場合の接続 URL（手順 7）。 |
 | `TRANSCRIPTION_ENABLED` | `true` | 文字起こし。GPU が無い PC では時間がかかるため、不要なら `false` にします。 |
 
@@ -265,6 +267,7 @@ Restart-Service YouTubeLiveArchiver    # backend\.env を変更したあとな�
 **サービス運用での注意**
 
 - サービスは `LocalSystem` アカウントで動きます。ログインしているユーザーとは別の環境です。
+  - Windows サービスの標準出力・標準エラーは `logs\service-stdout.log` / `logs\service-stderr.log` に記録されます。
   - 保存先はローカルドライブ（`D:\yla-archive` など）にします。エクスプローラーで割り当てたネットワークドライブ（`Z:` など）は、サービスからは見えません。NAS を使う場合は UNC パス（`\\nas\share\yla`）で登録し、共有にアクセスできるアカウントでサービスを動かします（`nssm set YouTubeLiveArchiver ObjectName .\ユーザー名 パスワード`。未検証）。
   - Cookie Profile には、ブラウザー名ではなく Netscape 形式の Cookie ファイルのパスを指定します（サービスからはブラウザーのプロファイルを読めません）。
 - `ffmpeg` と `ffprobe` は、サービスの PATH から見つかる必要があります（yt-dlp も PATH から探します）。winget 以外の方法で入れた場合は、そのフォルダーをシステム環境変数の `PATH` に追加してください。
@@ -340,6 +343,12 @@ YouTube 側の仕様変更で録画やチャンネル確認が失敗するよう
 ```powershell
 C:\yla\backend\.venv\Scripts\python.exe -m pip install -U yt-dlp
 ```
+
+`YT_DLP_AUTO_UPDATE=true` を設定すると、起動時と24時間ごとの確認で録画中でないことを確かめ、
+サービスが使う `sys.executable -m pip install -U yt-dlp` で自動更新します。既定は `false` です。
+更新後の `yt-dlp --version` 確認に失敗した場合、更新前の版へ戻します。`/api/status` とホーム画面の
+システム詳細に、使用版・リリース日・確認時刻を表示します。使用版のリリースから30日以上経過すると、
+ホーム画面の「対応が必要な項目」に警告を表示します。
 
 #### 11. 旧版から更新する場合
 

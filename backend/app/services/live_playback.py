@@ -8,6 +8,24 @@ from ..config import settings
 
 SAFE_ASSET = re.compile(r"^(?:index\.m3u8|segment_[0-9]{6,}\.ts)$")
 
+
+def hls_playlist_ready(hls_dir: Path) -> bool:
+    """Expose live playback only after FFmpeg has atomically published a segment."""
+    playlist = hls_dir / "index.m3u8"
+    try:
+        lines = playlist.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    for line in lines:
+        if not SAFE_ASSET.fullmatch(line) or not line.endswith(".ts"):
+            continue
+        try:
+            if (hls_dir / line).stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
 def fallback_to_direct(error, return_code, direct_start, record_fallback):
     """Start the trusted direct recorder after any tee launch/runtime failure."""
     if error is None and not return_code:
@@ -42,8 +60,14 @@ def prune_hls(hls_dir: Path, limit_bytes: int) -> int:
 def tee_args(ffmpeg_path: str, hls_dir: Path, output_file: Path) -> list[str]:
     hls_dir.mkdir(parents=True, exist_ok=True)
     transport_stream = output_file.with_suffix(".tee.ts")
+    hls_output = (
+        f"[f=hls:hls_time=6:hls_list_size=0:"
+        f"hls_flags=append_list+independent_segments+temp_file:"
+        f"hls_segment_filename={hls_dir / 'segment_%06d.ts'}]"
+        f"{hls_dir / 'index.m3u8'}"
+    )
     return [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-y", "-i", "pipe:0", "-map", "0", "-c", "copy", "-f", "tee",
-            f"[f=mpegts]{transport_stream}|[f=hls:hls_time=6:hls_list_size=0:hls_flags=append_list+independent_segments:hls_segment_filename={hls_dir / 'segment_%06d.ts'}]{hls_dir / 'index.m3u8'}"]
+            f"[f=mpegts]{transport_stream}|{hls_output}"]
 
 
 def finalize_tee_archive(ffmpeg_path: str, transport_stream: Path, output_file: Path) -> bool:
@@ -75,6 +99,8 @@ def safe_hls_asset(video, asset: str) -> Path:
     target = (root / asset).resolve()
     if target.parent != root or not target.is_file():
         raise ValueError("HLS asset unavailable")
+    if asset == "index.m3u8" and not hls_playlist_ready(root):
+        raise ValueError("HLS playlist has no completed segment")
     return target
 
 def archive_is_complete(media: Path, ffprobe_path: str | None = None) -> bool:

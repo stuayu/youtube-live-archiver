@@ -107,6 +107,15 @@ def test_manual_inspect_classifies_errors(client, fake_youtube, kind, message):
 
 @pytest.mark.integration
 def test_manual_worker_advances_live_and_cancels_private(client, fake_youtube):
+    import logging
+
+    records = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record)
+    logger = logging.getLogger("app.workers")
+    previous_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
     channel_id = "UC" + "w" * 22
     ids = ("workerlive1", "workerpriv1")
     fake_youtube.set_state({"channels": {}, "videos": {
@@ -122,10 +131,61 @@ def test_manual_worker_advances_live_and_cancels_private(client, fake_youtube):
             db.add(Video(youtube_video_id=vid, channel_id=channel.id, title=vid, status="WAITING_LIVE",
                          raw_metadata={"manual": True, "schedule_enabled": True, "live_status": "is_upcoming"}))
         db.commit()
-    manual_video_worker()
+    from app.main import _job_stats, _tracked_job
+    _job_stats.pop("test-manual-video", None)
+    _tracked_job("test-manual-video", manual_video_worker)()
     with SessionLocal() as db:
         rows = {row.youtube_video_id: row for row in db.scalars(select(Video)).all()}
         assert rows[ids[0]].status == "DISCOVERED"
         assert rows[ids[0]].raw_metadata["live_status"] == "is_live"
         assert rows[ids[1]].status == "CANCELLED"
         assert rows[ids[1]].raw_metadata["cancel_reason"] == "PRIVATE"
+    assert _job_stats["test-manual-video"]["error_count"] == 0
+    logger.removeHandler(handler)
+    logger.setLevel(previous_level)
+    assert any("manual video is live; queued recording" in record.getMessage() for record in records)
+
+
+@pytest.mark.parametrize("aware", [False, True])
+def test_manual_worker_handles_next_check_and_upcoming_release(client, fake_youtube, aware):
+    from datetime import datetime, timedelta, timezone
+    import logging
+
+    video_id = "upcomchk001"
+    channel_id = "UC" + "x" * 22
+    fake_youtube.set_state({"channels": {}, "videos": {
+        video_id: {"id": video_id, "channel_id": channel_id, "live_status": "is_upcoming",
+                   "release_timestamp": int(time.time()) + 7200},
+    }})
+    response = client.post("/api/videos/manual", json={"url": f"https://youtu.be/{video_id}"})
+    assert response.status_code == 200, response.text
+    assert response.json()["video"]["status"] == "WAITING_LIVE"
+    next_check = datetime.now(timezone.utc) - timedelta(minutes=1)
+    if not aware:
+        next_check = next_check.replace(tzinfo=None)
+    with SessionLocal() as db:
+        video = db.scalar(select(Video).where(Video.youtube_video_id == video_id))
+        video.raw_metadata = {**video.raw_metadata, "manual_next_check_at": next_check.isoformat()}
+        db.commit()
+    from app.main import _job_stats, _tracked_job
+    _job_stats.pop("test-manual-upcoming", None)
+    records = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record)
+    logger = logging.getLogger("app.workers")
+    previous_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        _tracked_job("test-manual-upcoming", manual_video_worker)()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    with SessionLocal() as db:
+        video = db.scalar(select(Video).where(Video.youtube_video_id == video_id))
+        assert video.status == "WAITING_LIVE"
+        assert video.scheduled_start_at is not None
+        assert video.scheduled_start_at.year > 2020
+    assert _job_stats["test-manual-upcoming"]["error_count"] == 0
+    assert any(record.levelno == logging.DEBUG and "manual video remains scheduled" in record.getMessage()
+               for record in records)

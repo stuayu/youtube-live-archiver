@@ -66,6 +66,57 @@ def test_first_tick_scans_immediately_and_backfill_limit(fake_youtube):
     assert rows["old-c"].raw_metadata["start_probe_attempted"] is True
 
 
+def test_twenty_slow_channels_are_dispatched_without_blocking_scheduler(fake_youtube, monkeypatch):
+    monkeypatch.setattr(settings, "monitor_batch_size", 20)
+    monkeypatch.setattr(settings, "monitor_concurrency", 3)
+    monkeypatch.setattr(settings, "remote_timeout_seconds", 0.15)
+    channel_ids = [f"UCslow{index:018d}" for index in range(20)]
+    for channel_id in channel_ids:
+        add_channel(channel_id)
+        set_due_by_youtube_id(channel_id)
+    fake_youtube.set_state({"channels": {
+        channel_id: {"sleep": 0.35 if index % 5 == 0 else 0.05, "entries": []}
+        for index, channel_id in enumerate(channel_ids)
+    }, "videos": {}})
+    started = time.monotonic()
+    monitor.channel_monitor(background=True)
+    dispatch_seconds = time.monotonic() - started
+    assert dispatch_seconds < 0.25
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if len([item for item in fake_youtube.calls() if "--flat-playlist" in item["argv"]]) < 20:
+            monitor.channel_monitor(background=True)
+        with monitor._scan_lock:
+            if not monitor._scan_inflight and len(fake_youtube.calls()) >= 20:
+                break
+        time.sleep(0.05)
+    with monitor._scan_lock:
+        assert not monitor._scan_inflight
+    calls = fake_youtube.calls()
+    scanned = [item for item in calls if "--flat-playlist" in item["argv"]]
+    assert len(scanned) == 20
+    total_seconds = time.monotonic() - started
+    assert total_seconds < 5
+    with SessionLocal() as db:
+        deadlines = db.scalars(select(Channel.next_check_at).where(
+            Channel.youtube_channel_id.in_(channel_ids))).all()
+    assert len(deadlines) == 20
+    assert all(deadline > now() for deadline in deadlines)
+    with SessionLocal() as db:
+        failed_deadlines = db.scalars(select(Channel.next_check_at).where(
+            Channel.youtube_channel_id.in_(channel_ids), Channel.last_error.is_not(None))).all()
+    assert failed_deadlines
+    assert all(deadline <= now() + timedelta(seconds=70) for deadline in failed_deadlines)
+    print(f"20 channels: dispatch={dispatch_seconds:.3f}s total={total_seconds:.3f}s, concurrency=3")
+
+
+def set_due_by_youtube_id(channel_id):
+    with SessionLocal() as db:
+        channel = db.scalar(select(Channel).where(Channel.youtube_channel_id == channel_id))
+        channel.next_check_at = now() - timedelta(seconds=1)
+        db.commit()
+
+
 
 def test_multiple_schedules_use_shortest_interval():
     now_at = now()

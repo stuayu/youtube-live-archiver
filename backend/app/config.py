@@ -1,4 +1,6 @@
 from pathlib import Path
+import logging
+import sys
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,6 +16,7 @@ class Settings(BaseSettings):
     auto_migrate: bool = True
     database_connect_retry_seconds: float = 30
     yt_dlp_path: str = "yt-dlp"
+    yt_dlp_auto_update: bool = False
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
     playable_cache_days: int = 14
@@ -24,6 +27,7 @@ class Settings(BaseSettings):
     # 再起動時に進行中の録画サブプロセスが巻き込まれるため、既定は無効。
     app_reload: bool = False
     app_reload_dirs: str = "app"
+    log_level: str = "INFO"
     scheduler_enabled: bool = True
     db_idle_in_transaction_timeout_ms: int = 60000
     downloader: Literal["native", "aria2c"] = "native"
@@ -71,6 +75,26 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def configure_logging() -> None:
+    """Configure app loggers without changing Uvicorn's own handlers."""
+    level = getattr(logging, str(settings.log_level).upper(), logging.INFO)
+    logger = logging.getLogger("app")
+
+    class CurrentStderrHandler(logging.StreamHandler):
+        def emit(self, record: logging.LogRecord) -> None:
+            self.stream = sys.stderr
+            super().emit(record)
+
+    logger.handlers.clear()
+    handler = CurrentStderrHandler()
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = False
 
 # Resolve relative data paths against the backend directory once, so service
 # and local launches use the same stable locations regardless of process cwd.

@@ -9,6 +9,10 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
+import logging
+from .config import configure_logging
+
+configure_logging()
 from .api import router
 from .workers import (channel_monitor, recorder_worker, retention_worker, protection_worker,
                       recovery_worker, integrity_worker, derived_cleanup_worker, manual_video_worker)
@@ -16,7 +20,6 @@ from .services.processing import processing_worker
 from .services.chat import chat_replay_worker
 
 scheduler = BackgroundScheduler(timezone="UTC")
-import logging
 import shutil
 import subprocess
 import threading
@@ -26,19 +29,29 @@ from datetime import datetime, timezone
 _job_lock = threading.Lock()
 _job_stats: dict[str, dict] = {}
 _tool_cache: dict | None = None
+_job_intervals = {"channel-monitor": 5, "recorder": 5, "manual-video": 60,
+                  "retention": 900, "derived-cleanup": 86400, "protection": 21600,
+                  "recording-recovery": 60, "recording-integrity": 1800,
+                  "processing-queue": 10, "chat-replay": 60, "yt-dlp-version": 86400}
 
 
 def _tracked_job(job_id: str, callback):
+    interval_seconds = _job_intervals.get(job_id, 0)
     def run():
         started = datetime.now(timezone.utc)
         with _job_lock:
             item = _job_stats.setdefault(job_id, {"run_count": 0, "error_count": 0})
+            previous_started = item.get("last_started_at")
+            expected = (previous_started.timestamp() + interval_seconds
+                        if previous_started and interval_seconds else started.timestamp())
+            item["last_delay_ms"] = max(0, int((started.timestamp() - expected) * 1000))
             item["last_started_at"] = started
             item["run_count"] += 1
         try:
             result = callback()
             with _job_lock:
                 item["last_error"] = None
+                item["last_success_at"] = datetime.now(timezone.utc)
             return result
         except Exception as exc:
             with _job_lock:
@@ -85,28 +98,35 @@ async def lifespan(app: FastAPI):
             from .services.recorder import cleanup_orphan_processes
             cleanup_orphan_processes()
         except Exception:
-            import logging
             logging.getLogger(__name__).exception("orphan recorder cleanup failed")
         try:
             from .workers import _recover_stale_recordings
             _recover_stale_recordings()
         except Exception:
-            import logging
             logging.getLogger(__name__).exception("startup recording recovery scan failed; scheduler will retry")
-        scheduler.add_job(_tracked_job("channel-monitor", channel_monitor), "interval", seconds=5, id="channel-monitor", max_instances=1, coalesce=True)
-        scheduler.add_job(_tracked_job("manual-video", manual_video_worker), "interval", seconds=60,
-                          id="manual-video", max_instances=1, coalesce=True)
-        scheduler.add_job(_tracked_job("recorder", recorder_worker), "interval", seconds=5, id="recorder", max_instances=1)
-        scheduler.add_job(_tracked_job("retention", retention_worker), "interval", minutes=15, id="retention", max_instances=1)
+        scheduler.add_job(_tracked_job("channel-monitor", lambda: channel_monitor(background=True)), "interval", seconds=5,
+                          id="channel-monitor", max_instances=1, coalesce=True, misfire_grace_time=3)
+        scheduler.add_job(_tracked_job("manual-video", lambda: manual_video_worker(background=True)), "interval", seconds=60,
+                          id="manual-video", max_instances=1, coalesce=True, misfire_grace_time=10)
+        scheduler.add_job(_tracked_job("recorder", recorder_worker), "interval", seconds=5, id="recorder", max_instances=1, coalesce=True, misfire_grace_time=3)
+        scheduler.add_job(_tracked_job("retention", retention_worker), "interval", minutes=15,
+                          id="retention", max_instances=1, coalesce=True, misfire_grace_time=60)
         scheduler.add_job(_tracked_job("derived-cleanup", derived_cleanup_worker), "interval", hours=24,
-                          id="derived-cleanup", max_instances=1)
-        scheduler.add_job(_tracked_job("protection", protection_worker), "interval", hours=6, id="protection", max_instances=1)
+                          id="derived-cleanup", max_instances=1, coalesce=True, misfire_grace_time=300)
+        scheduler.add_job(_tracked_job("protection", protection_worker), "interval", hours=6,
+                          id="protection", max_instances=1, coalesce=True, misfire_grace_time=300)
         scheduler.add_job(_tracked_job("recording-recovery", recovery_worker), "interval", minutes=1, id="recording-recovery", max_instances=1, coalesce=True,
-                          next_run_time=datetime.now(timezone.utc))
-        scheduler.add_job(_tracked_job("recording-integrity", integrity_worker), "interval", minutes=30, id="recording-integrity", max_instances=1, coalesce=True)
-        scheduler.add_job(_tracked_job("processing-queue", processing_worker), "interval", seconds=10, id="processing-queue", max_instances=1, coalesce=True)
+                          next_run_time=datetime.now(timezone.utc), misfire_grace_time=10)
+        scheduler.add_job(_tracked_job("recording-integrity", integrity_worker), "interval", minutes=30,
+                          id="recording-integrity", max_instances=1, coalesce=True, misfire_grace_time=60)
+        scheduler.add_job(_tracked_job("processing-queue", processing_worker), "interval", seconds=10,
+                          id="processing-queue", max_instances=1, coalesce=True, misfire_grace_time=5)
         scheduler.add_job(_tracked_job("chat-replay", chat_replay_worker), "interval", seconds=60,
-                          id="chat-replay", max_instances=1, coalesce=True)
+                          id="chat-replay", max_instances=1, coalesce=True, misfire_grace_time=10)
+        from .services.ytdlp_update import check_version
+        scheduler.add_job(_tracked_job("yt-dlp-version", check_version), "interval", hours=24,
+                          id="yt-dlp-version", max_instances=1, coalesce=True,
+                          misfire_grace_time=300, next_run_time=datetime.now(timezone.utc))
         scheduler.start()
     yield
     try:

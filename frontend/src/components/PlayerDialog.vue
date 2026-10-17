@@ -5,7 +5,7 @@ import type { ChatPage, Transcript, Video } from '../api/types'
 import { installDPlayerSettings } from '../lib/dplayerSettings'
 import type { DPlayerSettingsHandle } from '../lib/dplayerSettings'
 import { readDanmakuPreferences, writeDanmakuPreferences } from '../lib/playerSettings'
-import { chatReplayRange } from '../lib/playerPlayback'
+import { chatReplayRange, danmakuRange } from '../lib/playerPlayback'
 import { choosePlayback, type PlaybackRendition } from '../lib/playback'
 import PlayerHeader from './player/PlayerHeader.vue'
 import PlayerPanels from './player/PlayerPanels.vue'
@@ -64,6 +64,7 @@ const conversionNote = ref('')
 const delay = ref<number | null>(null)
 let player: import('dplayer').default | undefined
 let hls: import('hls.js').default | undefined
+let hlsRetryTimer: ReturnType<typeof setTimeout> | undefined
 let playerSettings: DPlayerSettingsHandle | undefined
 let chatTimer = 0
 let chatRequestSequence = 0
@@ -74,6 +75,14 @@ let focusBefore: HTMLElement | null = null
 let metadataTimer = 0
 let prepareSequence = 0
 let backgroundSequence = 0
+let danmakuWindow = { afterMs: -1, beforeMs: -1 }
+function danmakuAddress(seconds = playbackSeconds.value) {
+  const range = danmakuRange(seconds)
+  danmakuWindow = range
+  return apiUrl(
+    `/videos/${props.video.id}/chat/danmaku/${chatKind.value || 'all'}-${includeDeleted.value ? '1' : '0'}-window-${range.afterMs}-${range.beforeMs}/`,
+  )
+}
 async function loadChat(atSeconds = playbackSeconds.value) {
   const p = new URLSearchParams({
     offset: String((chatQuery.value || chatKind.value ? chatPage.value : 0) * 200),
@@ -167,6 +176,7 @@ watch(
 watch(danmakuOn, (enabled) => playerSettings?.setDanmakuEnabled(enabled))
 function seek(seconds: number) {
   playbackSeconds.value = Math.max(0, seconds)
+  reloadDanmaku(seconds)
   if (followingChat.value && !chatQuery.value && !chatKind.value) void loadChat(seconds)
   const el = videoEl.value
   if (!el) return
@@ -228,12 +238,23 @@ async function makePlayer(renditionName?: PlaybackRendition['name'], startTime =
         ? {
             customHls: (element) => {
               videoEl.value = element
-              if (element.canPlayType('application/vnd.apple.mpegurl')) {
-                element.src = url
-              } else if (Hls.isSupported()) {
+              const preferHlsJs = Hls.isSupported() && /Chrome|Chromium/.test(navigator.userAgent)
+              if (preferHlsJs || !element.canPlayType('application/vnd.apple.mpegurl')) {
+                if (!Hls.isSupported()) return
                 hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 2 })
+                hls.on(Hls.Events.ERROR, (_event, data) => {
+                  if (!data.fatal) return
+                  if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                    hls?.recoverMediaError()
+                  } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                    if (hlsRetryTimer) clearTimeout(hlsRetryTimer)
+                    hlsRetryTimer = setTimeout(() => hls?.startLoad(), 1000)
+                  }
+                })
                 hls.loadSource(url)
                 hls.attachMedia(element)
+              } else {
+                element.src = url
               }
             },
           }
@@ -241,7 +262,7 @@ async function makePlayer(renditionName?: PlaybackRendition['name'], startTime =
     },
     danmaku: {
       id: props.video.id,
-      api: apiUrl(`/videos/${props.video.id}/chat/danmaku/all-${includeDeleted.value ? '1' : '0'}/`),
+      api: danmakuAddress(props.initialTime || 0),
       token: '',
       maximum:
         quantity.value === 'few'
@@ -301,6 +322,12 @@ async function makePlayer(renditionName?: PlaybackRendition['name'], startTime =
   const update = () => {
     const el = videoEl.value
     if (el) playbackSeconds.value = el.currentTime
+    if (
+      el &&
+      (el.currentTime * 1000 < danmakuWindow.afterMs ||
+        el.currentTime * 1000 > danmakuWindow.beforeMs - 30_000)
+    )
+      reloadDanmaku(el.currentTime)
     if (props.live && el?.seekable.length)
       delay.value = Math.max(0, el.seekable.end(el.seekable.length - 1) - el.currentTime)
     playerSettings?.setLiveDelay(delay.value)
@@ -528,6 +555,8 @@ function destroy() {
   window.clearInterval(monitorTimer)
   hls?.destroy()
   hls = undefined
+  if (hlsRetryTimer) clearTimeout(hlsRetryTimer)
+  hlsRetryTimer = undefined
   playerSettings?.dispose()
   playerSettings = undefined
   player?.destroy()
@@ -558,15 +587,13 @@ watch(includeDeleted, () => {
   void loadChat()
   reloadDanmaku()
 })
-watch(quantity, reloadDanmaku)
-watch([area, speed], reloadDanmaku)
-function reloadDanmaku() {
+watch(quantity, () => reloadDanmaku())
+watch([area, speed], () => reloadDanmaku())
+function reloadDanmaku(seconds = playbackSeconds.value) {
   try {
     player?.danmaku.reload({
       id: props.video.id,
-      address: apiUrl(
-        `/videos/${props.video.id}/chat/danmaku/${chatKind.value || 'all'}-${includeDeleted.value ? '1' : '0'}/`,
-      ),
+      address: danmakuAddress(seconds),
       token: '',
       maximum:
         quantity.value === 'few'

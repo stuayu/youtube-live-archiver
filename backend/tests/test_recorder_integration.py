@@ -188,7 +188,8 @@ def test_late_live_start_records_from_stream_start_without_backfill(tmp_path, fa
     assert row.raw_metadata.get("archive_backfill") != "queued"
     assert row.raw_metadata["recording_start_offset_ms"] == 0
     assert row.raw_metadata["live_from_start"] == "used"
-    assert not row.is_partial
+    assert row.is_partial, row.raw_metadata
+    assert row.retention_expires_at is None
     assert any(call["argv"].count("--live-from-start") for call in fake_youtube.calls())
     recording_calls = [call["argv"] for call in fake_youtube.calls()
                        if "--skip-download" not in call["argv"]]
@@ -228,6 +229,10 @@ def test_live_from_start_age_boundary_and_old_stream_skips(tmp_path, fake_youtub
     assert calls and all("--live-from-start" not in call for call in calls)
     assert row.raw_metadata["recording_start_offset_ms"] >= 12 * 3600 * 1000
     assert row.raw_metadata["archive_backfill"] == "queued"
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        video.channel.live_playback_enabled = True
+        assert recorder._select_live_from_start(db, video, video.channel, True) == "skipped_too_old"
 
 
 def test_live_from_start_nonzero_media_start_is_recorded_and_backfilled(tmp_path, fake_youtube):
@@ -728,7 +733,14 @@ def test_application_shutdown_stops_recording_process(tmp_path, fake_youtube):
     assert running_counts() == (0, 0)
 
 
-def test_storage_waiting_recovers_on_fallback_storage(tmp_path, fake_youtube, caplog):
+def test_storage_waiting_recovers_on_fallback_storage(tmp_path, fake_youtube):
+    import logging
+
+    records = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record)
+    logger = logging.getLogger("app")
+    logger.addHandler(handler)
     video_id = _create_video(tmp_path, "storage-retry", chat=False, live_status="was_live")
     fallback_path = tmp_path / "fallback"
     with SessionLocal() as db:
@@ -749,7 +761,8 @@ def test_storage_waiting_recovers_on_fallback_storage(tmp_path, fake_youtube, ca
     assert first_retry_at is not None
     recorder_worker()
     assert _get_video(video_id).next_recovery_at == first_retry_at
-    assert sum("storage unavailable for channel" in record.message for record in caplog.records) == 1
+    logger.removeHandler(handler)
+    assert sum("storage unavailable for channel" in record.getMessage() for record in records) == 1
     fallback_path.mkdir()
     from app.models import now
     with SessionLocal() as db:
@@ -1170,7 +1183,12 @@ def test_live_completion_keeps_idle_transaction_closed_during_slow_external_step
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg is required for tee integration")
-def test_tee_creates_archive_and_hls_segments(tmp_path, fake_youtube):
+def test_tee_creates_archive_and_hls_segments(tmp_path, fake_youtube, caplog):
+    import logging
+
+    logger = logging.getLogger("app.services.recorder")
+    caplog.set_level(logging.INFO, logger="app.services.recorder")
+    logger.addHandler(caplog.handler)
     video_id = _create_video(tmp_path, "tee-live", chat=False, playback=True)
     fake_youtube.set_state({"channels": {}, "videos": {"tee-live": {
         "live_status": "is_live", "recording": {"mode": "live", "ended": False}}}})
@@ -1186,5 +1204,123 @@ def test_tee_creates_archive_and_hls_segments(tmp_path, fake_youtube):
     assert _wait_for(lambda: _get_video(video_id).status == "ACTIVE", timeout=20)
     media = Path(_get_video(video_id).file_path) / "video.mkv"
     assert media.is_file() and media.stat().st_size > 0
+    folder = media.parent
+    assert list(folder.glob("*.webp"))
+    assert list(folder.glob("*.description"))
+    assert not Path("-.webp").exists()
+    logger.removeHandler(caplog.handler)
+    messages = {
+        id(record): record.getMessage()
+        for record in caplog.records
+    }.values()
+    assert sum("recording started" in message for message in messages) == 1
+    assert sum("recording completed" in message for message in messages) == 1
     from app.services.recorder import running_counts
     assert _wait_for(lambda: running_counts() == (0, 0))
+
+
+@pytest.mark.parametrize("stop_kind", ["user", "shutdown"])
+@pytest.mark.parametrize("remux_succeeds", [True, False])
+def test_tee_stop_finalizes_or_preserves_transport_stream_without_fallback(
+        tmp_path_factory, fake_youtube, monkeypatch, stop_kind, remux_succeeds):
+    from app.services.recorder import running_counts, shutdown, stop_recording
+
+    fake_ffmpeg = Path(__file__).parent / "fakes" / "fake_ffmpeg.py"
+    monkeypatch.setattr(settings, "ffmpeg_path", str(fake_ffmpeg.resolve()))
+    monkeypatch.setenv("FAKE_FFMPEG_REMUX_FAIL", "0" if remux_succeeds else "1")
+
+    key = "tee-user-stop"
+    recording_root = tmp_path_factory.mktemp("tee-stop")
+    video_id = _create_video(recording_root, key, chat=False, playback=True)
+    fake_youtube.set_state({"channels": {}, "videos": {key: {
+        "live_status": "is_live", "recording": {"mode": "live", "ended": False}}}})
+    recorder_worker()
+    assert _wait_for(lambda: _get_video(video_id).status == "RECORDING")
+    target = Path(_get_video(video_id).file_path)
+    hls_dir = recording_root / "archive" / "live" / key
+    assert _wait_for(lambda: (hls_dir / "index.m3u8").is_file()
+                     and any(hls_dir.glob("segment_*.ts")), timeout=18)
+    if stop_kind == "user":
+        assert stop_recording(video_id)
+        expected_status = "ACTIVE"
+    else:
+        shutdown(lambda pk: stop_recording(pk, user_requested=False), timeout=10)
+        expected_status = "RECORDING_FAILED"
+    assert _wait_for(lambda: _get_video(video_id).status == expected_status, timeout=30)
+    row = _get_video(video_id)
+    media = target / ("video.mkv" if remux_succeeds else "video.tee.ts")
+    assert media.is_file() and media.stat().st_size > 0
+    assert (target / "video.tee.ts").exists() is (not remux_succeeds)
+    if stop_kind == "user":
+        assert row.is_partial
+        assert row.retention_expires_at is None
+    else:
+        assert row.status == "RECORDING_FAILED"
+    if not remux_succeeds:
+        from app.services.backfill import media_file
+        from app.services.media import source_media
+        assert source_media(target) == media.resolve()
+        assert media_file(target) == media.resolve()
+        assert row.file_size == media.stat().st_size
+    assert _wait_for(lambda: running_counts() == (0, 0))
+    recording_calls = [call["argv"] for call in fake_youtube.calls()
+                       if "--print-to-file" in call["argv"]]
+    assert len(recording_calls) == 1
+    assert recording_calls[0][recording_calls[0].index("-o") + 1] == "-"
+
+
+def test_tee_ffmpeg_launch_failure_during_stop_does_not_reference_uninitialized_process(
+        tmp_path, fake_youtube, monkeypatch):
+    from app.services import recorder
+
+    key = "tee-ffmpeg-launch-failure-stop"
+    video_id = _create_video(tmp_path, key, chat=False, playback=True)
+    fake_youtube.set_state({"channels": {}, "videos": {key: {
+        "live_status": "is_live", "recording": {"mode": "live", "ended": False}}}})
+
+    def fail_ffmpeg_while_stopping(*args, **kwargs):
+        recorder.mark_stopping(video_id)
+        raise RuntimeError("fake ffmpeg launch failure")
+
+    monkeypatch.setattr(recorder, "launch_recording_ffmpeg", fail_ffmpeg_while_stopping)
+    monkeypatch.setattr(recorder, "write_process_manifest", lambda *_args, **_kwargs: None)
+    recorder_worker()
+    from app.services.recorder import running_counts
+    assert _wait_for(lambda: running_counts() == (0, 0))
+    row = _get_video(video_id)
+    assert row.raw_metadata["user_stopped"]
+    assert row.raw_metadata["attempts"][-1]["outcome"] == "user_stop_empty"
+
+
+def test_tee_downloader_failure_remuxes_and_falls_back_to_new_stem(
+        tmp_path_factory, fake_youtube, monkeypatch):
+    from app.services.recorder import active_upstreams, stop_recording
+
+    fake_ffmpeg = Path(__file__).parent / "fakes" / "fake_ffmpeg.py"
+    monkeypatch.setattr(settings, "ffmpeg_path", str(fake_ffmpeg.resolve()))
+    recording_root = tmp_path_factory.mktemp("tee-failure")
+    key = "tee-abnormal"
+    video_id = _create_video(recording_root, key, chat=False, playback=True)
+    fake_youtube.set_state({"channels": {}, "videos": {key: {
+        "live_status": "is_live", "recording": {"mode": "live", "ended": False}}}})
+    recorder_worker()
+    assert _wait_for(lambda: _get_video(video_id).status == "RECORDING")
+    target = Path(_get_video(video_id).file_path)
+    hls_dir = recording_root / "archive" / "live" / key
+    assert _wait_for(lambda: any(hls_dir.glob("segment_*.ts")), timeout=18)
+    upstream = active_upstreams[video_id]
+    upstream.terminate()
+    assert _wait_for(lambda: len([call for call in fake_youtube.calls()
+                                  if "--print-to-file" in call["argv"]]) >= 2, timeout=20)
+    assert (target / "video.mkv").is_file()
+    first_size = (target / "video.mkv").stat().st_size
+    fallback = [call["argv"] for call in fake_youtube.calls()
+                if "--print-to-file" in call["argv"]][-1]
+    assert fallback[fallback.index("-o") + 1].endswith("video-part-2.%(ext)s")
+    assert stop_recording(video_id)
+    assert _wait_for(lambda: _get_video(video_id).status == "ACTIVE", timeout=30)
+    assert (target / "video.mkv").stat().st_size == first_size
+    assert any(path.name.startswith("video-part-2.") and path.stat().st_size > 0
+               for path in target.iterdir())
+    assert _wait_for(lambda: __import__("app.services.recorder", fromlist=["running_counts"])
+                     .running_counts() == (0, 0))

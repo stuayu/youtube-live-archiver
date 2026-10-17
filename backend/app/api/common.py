@@ -91,7 +91,7 @@ def _patch_channel(ch: Channel, body: ChannelPatch, apply_existing: bool, db: Se
         from ..services.youtube import cookie_args
         try: cookie_args(values["cookie_profile"])
         except ValueError as exc: raise HTTPException(422, str(exc))
-    prior_enabled, prior_interval, prior_retention = ch.enabled, ch.poll_interval, ch.retention_days
+    prior_enabled, prior_interval = ch.enabled, ch.poll_interval
     for key, value in values.items(): setattr(ch, key, value)
     if "enabled" in values and values["enabled"] and not prior_enabled:
         ch.next_check_at = None

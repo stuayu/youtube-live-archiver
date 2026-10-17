@@ -63,15 +63,17 @@ def resolve_asset(key: str, root: str | Path) -> Path | None:
         return None
 
 
-def cache_asset(url: str, root: str | Path) -> Path:
+def cache_asset(url: str, root: str | Path, *, timeout_seconds: float = ASSET_TIMEOUT_SECONDS) -> Path:
     """Fetch a chat image while preserving chat's host and size policy."""
     return fetch_image(url, root, allowed=_allowed_url, max_bytes=MAX_ASSET_BYTES,
-                       context="chat asset", opener=urlopen)
+                       context="chat asset", opener=urlopen, timeout_seconds=timeout_seconds)
 
 
-def prefetch_video_assets(db, video_id: int, root: str | Path, limit: int = 500) -> int:
+def prefetch_video_assets(db, video_id: int, root: str | Path, limit: int = 20,
+                          max_seconds: float = 2.0, row_limit: int = 500) -> int:
     """Best-effort cache of unique image URLs referenced by a video's saved chat."""
-    rows = db.scalars(select(ChatMessage).where(ChatMessage.video_id == video_id)).all()
+    rows = db.scalars(select(ChatMessage).where(ChatMessage.video_id == video_id)
+                      .order_by(ChatMessage.id.desc()).limit(max(1, row_limit))).all()
     urls: set[str] = set()
 
     def visit(value):
@@ -93,9 +95,13 @@ def prefetch_video_assets(db, video_id: int, root: str | Path, limit: int = 500)
     if db.in_transaction():
         db.commit()
     cached = 0
-    for url in sorted(urls)[:limit]:
+    deadline = time.monotonic() + max(0.1, max_seconds)
+    for url in sorted(urls)[:max(1, limit)]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            cache_asset(url, root)
+            cache_asset(url, root, timeout_seconds=min(ASSET_TIMEOUT_SECONDS, remaining))
             cached += 1
         except ValueError:
             continue

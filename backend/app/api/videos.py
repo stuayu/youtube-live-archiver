@@ -64,7 +64,6 @@ def preview_manual_video(body: ManualVideoPreviewIn, db: Session = Depends(get_d
     existing = db.scalar(select(Video).where(Video.youtube_video_id == video_id))
     scheduled = data.get("release_timestamp") or data.get("timestamp")
     scheduled_at = datetime.fromtimestamp(scheduled, timezone.utc) if scheduled and live_status == "is_upcoming" else None
-    thumbnails = data.get("thumbnails") or []
     thumbnail = f"/api/videos/manual/thumbnail/{video_id}"
     title = data.get("title") or ""
     if live_status == "is_live":
@@ -267,7 +266,8 @@ def videos(offset: int = 0, limit: int = 50, status: str | None = None,
         directory = Path(v.file_path) if v.file_path else None
         directory = directory if directory and directory.is_dir() else None
         item["has_file"] = directory is not None
-        item["live_playback_available"] = bool(v.live_hls_path and (Path(v.live_hls_path) / "index.m3u8").is_file())
+        from ..services.live_playback import hls_playlist_ready
+        item["live_playback_available"] = bool(v.live_hls_path and hls_playlist_ready(Path(v.live_hls_path)))
         item["channel_name"] = v.channel.name if v.channel else ""
         item["channel_avatar"] = bool(v.channel and v.channel.avatar_cache_path and Path(v.channel.avatar_cache_path).is_file())
         item["storage_name"] = v.storage.name if v.storage else None
@@ -296,6 +296,8 @@ def videos(offset: int = 0, limit: int = 50, status: str | None = None,
 
 @router.get("/videos/{video_id}", response_model=VideoOut)
 def video_detail(video_id: int, db: Session = Depends(get_db)):
+    from ..services.live_playback import hls_playlist_ready
+
     video = _video_or_404(db, video_id)
     directory = Path(video.file_path) if video.file_path and Path(video.file_path).is_dir() else None
     metadata = dict(video.raw_metadata or {})
@@ -306,7 +308,7 @@ def video_detail(video_id: int, db: Session = Depends(get_db)):
     item = VideoOut.model_validate(video).model_dump()
     item.update(channel_name=video.channel.name if video.channel else "", storage_name=video.storage.name if video.storage else None,
                 has_file=bool(video.file_path and Path(video.file_path).is_dir()),
-                live_playback_available=bool(video.live_hls_path and (Path(video.live_hls_path) / "index.m3u8").is_file()),
+                live_playback_available=bool(video.live_hls_path and hls_playlist_ready(Path(video.live_hls_path))),
                 channel_avatar=bool(video.channel and video.channel.avatar_cache_path and Path(video.channel.avatar_cache_path).is_file()))
     metadata = video.raw_metadata or {}
     item.update(user_stopped=bool(metadata.get("user_stopped")),
@@ -551,21 +553,28 @@ def chat_asset(key: str):
     return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 @router.get("/videos/{video_id}/chat/danmaku")
-def chat_danmaku(video_id: int, include_deleted: bool = False, kind: str | None = None, db: Session = Depends(get_db)):
+def chat_danmaku(video_id: int, include_deleted: bool = False, kind: str | None = None,
+                 db: Session = Depends(get_db), *,
+                 after_ms: int | None = None, before_ms: int | None = None,
+                 limit: int = 1000):
     video = _video_or_404(db, video_id)
     stmt = select(ChatMessage).where(ChatMessage.video_id == video_id)
     if not include_deleted: stmt = stmt.where(ChatMessage.is_deleted.is_(False))
     if kind == "superchat": stmt = stmt.where(ChatMessage.message_type.in_(("superchat", "supersticker")))
     elif kind == "membership": stmt = stmt.where(ChatMessage.message_type.in_(("membership", "membership_gift", "membership_gift_received")))
-    rows = db.scalars(stmt.order_by(ChatMessage.offset_ms)).all()
     recording_offset = int((video.raw_metadata or {}).get("recording_start_offset_ms", 0))
+    if after_ms is not None: stmt = stmt.where(ChatMessage.offset_ms >= max(0, after_ms) + recording_offset)
+    if before_ms is not None: stmt = stmt.where(ChatMessage.offset_ms <= max(0, before_ms) + recording_offset)
+    rows = db.scalars(stmt.order_by(ChatMessage.offset_ms, ChatMessage.id).limit(min(1000, max(1, limit)))).all()
     data = [[max(0,m.offset_ms-recording_offset)/1000, "right", m.superchat_color or "#ffffff", m.author_name,
         ("[削除済] " if m.is_deleted else "") + m.message_text] for m in rows]
     db.commit()
     return {"code":0,"recording_offset_ms":recording_offset,"data":data}
 
 @router.get("/videos/{video_id}/chat/danmaku/{filter_key}/v3/")
-def dplayer_danmaku(video_id: int, filter_key: str, db: Session = Depends(get_db)):
+def dplayer_danmaku(video_id: int, filter_key: str, db: Session = Depends(get_db), *,
+                    after_ms: int | None = None, before_ms: int | None = None,
+                    limit: int = 1000):
     """DPlayer v3 danmaku protocol adapter for saved live chat."""
     from re import sub
 
@@ -573,6 +582,12 @@ def dplayer_danmaku(video_id: int, filter_key: str, db: Session = Depends(get_db
     parts = filter_key.split("-")
     kind = parts[0] if parts and parts[0] in ("all", "superchat", "membership") else "all"
     include_deleted = len(parts) > 1 and parts[1] == "1"
+    window_after = window_before = None
+    if len(parts) == 5 and parts[2] == "window":
+        try:
+            window_after, window_before = max(0, int(parts[3])), max(0, int(parts[4]))
+        except ValueError:
+            window_after = window_before = None
     recording_offset = max(0, int((video.raw_metadata or {}).get("recording_start_offset_ms", 0)))
     stmt = select(ChatMessage).where(ChatMessage.video_id == video_id)
     if not include_deleted: stmt = stmt.where(ChatMessage.is_deleted.is_(False))
@@ -586,7 +601,11 @@ def dplayer_danmaku(video_id: int, filter_key: str, db: Session = Depends(get_db
     # Exclude them instead of clamping every one to zero (which creates a
     # large burst at playback start).
     if recording_offset: stmt = stmt.where(ChatMessage.offset_ms >= recording_offset)
-    rows = db.scalars(stmt.order_by(ChatMessage.offset_ms)).all()
+    after_ms = window_after if window_after is not None else after_ms
+    before_ms = window_before if window_before is not None else before_ms
+    if after_ms is not None: stmt = stmt.where(ChatMessage.offset_ms >= recording_offset + max(0, after_ms))
+    if before_ms is not None: stmt = stmt.where(ChatMessage.offset_ms <= recording_offset + max(0, before_ms))
+    rows = db.scalars(stmt.order_by(ChatMessage.offset_ms, ChatMessage.id).limit(min(1000, max(1, limit)))).all()
     # DPlayer 1.27's built-in v3 reader indexes each row as
     # [time, type, color, author, text]. Object rows pass the code check but
     # become undefined fields in that reader, so no danmaku is drawn.
