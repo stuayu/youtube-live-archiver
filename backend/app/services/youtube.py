@@ -23,15 +23,24 @@ def ytdlp_command() -> list[str]:
 
 
 def run_ytdlp(args: list[str], *, timeout: float | None = None, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run([*ytdlp_command(), *args], timeout=timeout, **kwargs)
+    from .youtube_ip import note_ipv6_failure, ytdlp_ip_args
+    command = [*ytdlp_command(), *ytdlp_ip_args(args), *args]
+    result = subprocess.run(command, timeout=timeout, **kwargs)
+    if result.returncode:
+        note_ipv6_failure(str(getattr(result, "stderr", "") or ""))
+    return result
 
 
 def popen_ytdlp(args: list[str], **kwargs) -> subprocess.Popen:
+    from .youtube_ip import ytdlp_ip_args
+    command = [*ytdlp_command(), *ytdlp_ip_args(args), *args]
     if os.name == "nt":
         kwargs.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
     else:
         kwargs.setdefault("start_new_session", True)
-    return subprocess.Popen([*ytdlp_command(), *args], **kwargs)
+    process = subprocess.Popen(command, **kwargs)
+    process._youtube_force_ipv6 = "--force-ipv6" in command
+    return process
 
 
 def classify_ytdlp_error(stderr: str) -> str:

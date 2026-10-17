@@ -39,6 +39,7 @@ def api_status(db: Session = Depends(get_db)):
                      ffprobe_available=bool(shutil.which(settings.ffprobe_path) or Path(settings.ffprobe_path).is_file()))
         main_module._tool_cache = tools
     from ..services.ytdlp_update import status as ytdlp_status
+    from ..services.youtube_ip import status as youtube_ip_status
     version_status = ytdlp_status()
     tools.update({"yt_dlp_version": version_status.get("version") or tools.get("yt_dlp_version"),
                   "yt_dlp_release_date": version_status.get("release_date"),
@@ -102,6 +103,7 @@ def api_status(db: Session = Depends(get_db)):
     return utc_json_value({"database": database,
             "scheduler": {"running": main_module.scheduler.running, "jobs": scheduler_jobs},
             "tools": tools,
+            "youtube_ip": youtube_ip_status(),
             "monitor": {"enabled_channel_count": active_channels, "error_channel_count": error_channels,
                         "cooldown_remaining_seconds": cooldown_seconds, "oldest_last_success_at": oldest_success},
             "recordings": {"count": len(recordings), "items": [{"video_id": str(v.id), "youtube_video_id": v.youtube_video_id,

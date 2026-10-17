@@ -71,6 +71,8 @@ def _tracked_job(job_id: str, callback):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from .config import settings
+    from .services.youtube_ip import start_probe
+    start_probe()
     try:
         from .db import SessionLocal
         from .models import Video

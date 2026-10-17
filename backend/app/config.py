@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     auto_migrate: bool = True
     database_connect_retry_seconds: float = 30
     yt_dlp_path: str = "yt-dlp"
+    youtube_ip_mode: Literal["prefer_ipv6", "ipv6", "ipv4", "auto"] = "prefer_ipv6"
     yt_dlp_auto_update: bool = False
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"

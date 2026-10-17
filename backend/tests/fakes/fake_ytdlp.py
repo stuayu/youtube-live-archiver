@@ -98,14 +98,20 @@ def _recording(argv: list[str], video: dict, video_id: str) -> int:
         thumbnail_template = next((argv[index + 1].split(":", 1)[1]
                                    for index, value in enumerate(argv[:-1])
                                    if value == "-o" and argv[index + 1].startswith("thumbnail:")), None)
-        thumbnail_path = (Path(thumbnail_template.replace("%(ext)s", "webp"))
-                          if thumbnail_template else stem_path.parent / f"{stem}.webp")
+        if template == "-":
+            thumbnail_path = Path.cwd() / "-.webp"
+        else:
+            thumbnail_path = (Path(thumbnail_template.replace("%(ext)s", "webp"))
+                              if thumbnail_template else stem_path.parent / f"{stem}.webp")
         thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
         thumbnail_path.write_bytes(b"fake-thumbnail")
     description_template = next((argv[index + 1].split(":", 1)[1]
                                  for index, value in enumerate(argv[:-1])
                                  if value == "-o" and argv[index + 1].startswith("description:")), None)
-    if description_template:
+    if template == "-" and "--write-description" in argv:
+        (Path.cwd() / "-.description").write_text(
+            str(metadata.get("description") or ""), encoding="utf-8")
+    elif description_template:
         description_path = Path(description_template.replace("%(ext)s", "description"))
         description_path.parent.mkdir(parents=True, exist_ok=True)
         description_path.write_text(str(metadata.get("description") or ""), encoding="utf-8")

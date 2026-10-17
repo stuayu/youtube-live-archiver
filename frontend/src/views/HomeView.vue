@@ -192,6 +192,15 @@ const ctx = reactive(useWorkspaceContext())
         >
         <span v-if="ctx.status?.database.data_dir">DB データ {{ ctx.status.database.data_dir }}</span>
         <span>スケジューラー {{ ctx.status?.scheduler.running ? '稼働中' : '停止中' }}</span>
+        <span>
+          YouTube IP {{ ctx.status?.youtube_ip?.mode ?? '不明' }} ·
+          {{ ctx.status?.youtube_ip?.address_family ?? '不明' }}
+        </span>
+        <span v-if="ctx.status?.youtube_ip?.checked_at">
+          IPv6 到達性 {{ ctx.status.youtube_ip.ipv6_reachable ? 'あり' : 'なし' }} ·
+          {{ ctx.formatDate(ctx.status.youtube_ip.checked_at) }}
+        </span>
+        <span v-else-if="ctx.status?.youtube_ip?.mode === 'prefer_ipv6'"> IPv6 到達性を確認中 </span>
         <span>yt-dlp {{ String(ctx.status?.tools.yt_dlp_version ?? '不明') }}</span>
         <span v-if="ctx.status?.tools.yt_dlp_latest_version">
           最新 {{ String(ctx.status.tools.yt_dlp_latest_version) }}

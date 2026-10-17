@@ -5,7 +5,7 @@ import threading
 import time
 from urllib.parse import urlparse
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 IMAGE_TIMEOUT_SECONDS = 4
@@ -17,6 +17,12 @@ _failure_lock = threading.Lock()
 
 def asset_key(url: str) -> str:
     return sha256(url.encode("utf-8")).hexdigest()
+
+
+def urlopen(request, *, timeout: float):
+    """Compatibility seam backed by the configured address-family transport."""
+    from .http_ip import open_url
+    return open_url(request, timeout=timeout)
 
 
 def cached_path(key: str, root: str | Path) -> Path | None:
@@ -38,7 +44,9 @@ def fetch_image(url: str, root: str | Path, *, allowed, max_bytes: int,
         return existing
     request = Request(url, headers={"User-Agent": "YouTubeLiveArchiver/1.0"})
     try:
-        with (opener or urlopen)(request, timeout=timeout_seconds) as response:
+        if opener is None:
+            opener = urlopen
+        with opener(request, timeout=timeout_seconds) as response:
             if not allowed(response.geturl()):
                 raise ValueError(f"{context} redirect rejected")
             length = response.headers.get("Content-Length")

@@ -4,12 +4,11 @@ from pathlib import Path
 import threading
 import time
 from urllib.parse import urlparse
-from urllib.request import urlopen
 
 from sqlalchemy import select
 
 from ..models import ChatMessage
-from .image_cache import asset_key, cached_path, fetch_image
+from .image_cache import asset_key, cached_path, fetch_image, urlopen
 
 MAX_ASSET_BYTES = 1024 * 1024
 ASSET_TIMEOUT_SECONDS = 4
@@ -66,7 +65,8 @@ def resolve_asset(key: str, root: str | Path) -> Path | None:
 def cache_asset(url: str, root: str | Path, *, timeout_seconds: float = ASSET_TIMEOUT_SECONDS) -> Path:
     """Fetch a chat image while preserving chat's host and size policy."""
     return fetch_image(url, root, allowed=_allowed_url, max_bytes=MAX_ASSET_BYTES,
-                       context="chat asset", opener=urlopen, timeout_seconds=timeout_seconds)
+                       context="chat asset", opener=urlopen,
+                       timeout_seconds=timeout_seconds)
 
 
 def prefetch_video_assets(db, video_id: int, root: str | Path, limit: int = 20,

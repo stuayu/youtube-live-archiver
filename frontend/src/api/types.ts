@@ -256,6 +256,13 @@ export interface EventItem {
 }
 export interface StatusInfo {
   database: { available: boolean; mode?: 'external' | 'embedded'; data_dir?: string }
+  youtube_ip?: {
+    mode: 'prefer_ipv6' | 'ipv6' | 'ipv4' | 'auto'
+    address_family: 'IPv6' | 'IPv4' | 'OS 任せ'
+    ipv6_reachable: boolean | null
+    checked_at: string | null
+    probe_error: string | null
+  }
   scheduler: {
     running: boolean
     jobs: Array<{

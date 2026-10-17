@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import mimetypes
 import os
-from urllib.request import urlopen
 from ..config import settings
 from sqlalchemy.orm import Session, object_session
 from ..db import get_db
@@ -68,6 +67,7 @@ def refresh_channel_metadata(ch: Channel):
             try:
                 folder = Path(settings.data_dir).resolve() / "channel-icons"
                 folder.mkdir(parents=True, exist_ok=True)
+                from ..services.image_cache import urlopen
                 with urlopen(ch.avatar_url, timeout=10) as response:
                     payload = response.read(5 * 1024 * 1024 + 1)
                     if len(payload) <= 5 * 1024 * 1024:

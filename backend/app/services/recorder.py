@@ -192,7 +192,11 @@ def stderr_tail(process, *, wait: bool = True) -> bytes:
         reader.join(timeout=2)
     with _lock:
         _stderr_tails.pop(process.pid, None)
-    return b"".join(chunks)[-STDERR_TAIL_LIMIT:]
+    result = b"".join(chunks)[-STDERR_TAIL_LIMIT:]
+    if getattr(process, "_youtube_force_ipv6", False):
+        from .youtube_ip import note_ipv6_failure
+        note_ipv6_failure(result.decode("utf-8", "replace"))
+    return result
 
 
 def popen_recording(args: list[str], **kwargs):
@@ -766,6 +770,15 @@ def _tee_ytdlp_arguments(args: list[str], target: Path, output_stem: str) -> lis
     return tee_args
 
 
+def _normalize_tee_sidecars(target: Path, output_stem: str) -> None:
+    """Move yt-dlp's stdout-template sidecars from '-.<ext>' into named files."""
+    for path in target.glob("-.*"):
+        if path.is_file():
+            destination = target / f"{output_stem}{path.suffix}"
+            if not destination.exists():
+                path.replace(destination)
+
+
 def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Path,
                      output_stem: str, profile: str, is_live: bool, selector: str | None,
                      lease: Any, chat_offsets: dict[str, int]) -> tuple[subprocess.Popen, bytes]:
@@ -800,7 +813,8 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
         yt_proc = None
         ff_proc = None
         try:
-            yt_proc = popen_recording(tee_ytdlp[len(ytdlp_command()):], stdout=subprocess.PIPE)
+            yt_proc = popen_recording(tee_ytdlp[len(ytdlp_command()):], stdout=subprocess.PIPE,
+                                      cwd=target)
             active_upstreams[v.id] = yt_proc
             write_process_manifest(target, yt_proc, "yt-dlp")
             if stopping(v.id):
@@ -838,6 +852,7 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                     _ingest_live_chat_delta(db, v, target, output_stem, chat_offsets)
             _wait_for_tee_downloader(yt_proc, v.youtube_video_id, ch.youtube_channel_id)
             yt_stderr = stderr_tail(yt_proc)
+            _normalize_tee_sidecars(target, output_stem)
             active_upstreams.pop(v.id, None)
             active_recorders.pop(v.id, None)
             tee_rc = ff_proc.returncode or yt_proc.returncode
@@ -1627,7 +1642,9 @@ def record_video(video_id: int) -> None:
                                 lambda path: db.add(AuditLog(video_id=v.id, action="SALVAGE_PARTIAL",
                                     reason="VERIFIED_DURATION", details={"path": path})),
                                 ffmpeg_path=settings.ffmpeg_path)
+                        db.commit()
                         inspected = _inspect_live_after_exit(v.youtube_video_id, ch.cookie_profile)
+                        db.refresh(v)
                         verified_media = _verified_live_end_media(
                             v, target, output_stem, inspected, media, allow_is_live=True)
                         if verified_media is not None:
@@ -1742,6 +1759,7 @@ def record_video(video_id: int) -> None:
                 if is_live:
                     db.commit()
                     inspected = _inspect_live_after_exit(v.youtube_video_id, ch.cookie_profile)
+                    db.refresh(v)
                     if inspected.get("live_status") == "is_live":
                         from .recovery import probe_duration
                         duration = probe_duration(media)

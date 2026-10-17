@@ -184,6 +184,7 @@ notepad C:\yla\backend\.env
 | `DATA_DIR` | `./data` | アイコン、チャット画像、配信予定サムネイル（`thumbnails`）、組み込み PostgreSQL の保存先。 |
 | `REMOTE_IMAGE_FETCH_ENABLED` | `true` | 配信予定サムネイルを許可された画像ホストから取得する設定。`false` では未キャッシュ画像を取得しません。 |
 | `YT_DLP_AUTO_UPDATE` | `false` | 録画停止中の yt-dlp 自動更新。更新前後の版確認と失敗時の復元を行います。 |
+| `YOUTUBE_IP_MODE` | `prefer_ipv6` | YouTube の IP。prefer_ipv6 は IPv6 到達性を確認して選択、ipv6 / ipv4 固定、auto は OS 任せ。 |
 | `DATABASE_URL` | 空（組み込み PostgreSQL） | 外部の PostgreSQL を使う場合の接続 URL（手順 7）。 |
 | `TRANSCRIPTION_ENABLED` | `true` | 文字起こし。GPU が無い PC では時間がかかるため、不要なら `false` にします。 |
 
