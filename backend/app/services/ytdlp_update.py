@@ -2,6 +2,8 @@
 from datetime import datetime, timezone
 import json
 import logging
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
@@ -13,6 +15,7 @@ from .youtube import run_ytdlp
 
 log = logging.getLogger(__name__)
 _lock = threading.Lock()
+_update_in_progress = False
 _state: dict = {"checked_at": None, "version": None, "release_date": None,
                 "latest_version": None, "latest_release_date": None, "stale": None,
                 "latest_check_failed": None, "update_overdue": False,
@@ -47,6 +50,33 @@ def _version() -> str:
     return version
 
 
+def is_update_in_progress() -> bool:
+    with _lock:
+        return _update_in_progress
+
+
+def _standalone_target() -> bool:
+    target = settings.yt_dlp_path.strip()
+    if not target:
+        return False
+    path = Path(target)
+    if not path.is_file():
+        resolved = shutil.which(target)
+        path = Path(resolved) if resolved else path
+    if path.suffix.lower() == ".exe":
+        script = path.with_name(f"{path.stem}-script.py")
+        try:
+            return not (script.is_file() and "yt_dlp" in script.read_text(encoding="utf-8"))
+        except OSError:
+            return True
+    if not path.is_file():
+        return False
+    try:
+        return not path.read_bytes()[:2] == b"#!"
+    except OSError:
+        return False
+
+
 def check_version() -> dict:
     checked_at = datetime.now(timezone.utc)
     error = None
@@ -61,30 +91,39 @@ def check_version() -> dict:
             released = datetime.fromisoformat(latest_date.replace("Z", "+00:00"))
             update_overdue = (checked_at - released).total_seconds() >= 7 * 86400
         previous_version = None
-        if settings.yt_dlp_auto_update and stale:
+        if settings.yt_dlp_auto_update and stale and _standalone_target():
+            error = "単体版のため自動更新対象外（yt-dlp -U で更新）"
+        if settings.yt_dlp_auto_update and stale and not _standalone_target():
             from ..db import SessionLocal
             from ..models import Video
             from sqlalchemy import select
-            with SessionLocal() as db:
-                recording = db.scalar(select(Video.id).where(Video.status == "RECORDING").limit(1))
-            if recording is None:
-                previous_version = version
+            global _update_in_progress
+            with _lock:
+                _update_in_progress = True
+            try:
+                with SessionLocal() as db:
+                    recording = db.scalar(select(Video.id).where(Video.status == "RECORDING").limit(1))
+                if recording is None:
+                    previous_version = version
+                    with _lock:
+                        _state["previous_version"] = previous_version
+                    _update(version)
+                    version = _version()
+                    _, release_date = _release(version)
+                    stale = None if latest_version is None else Version(latest_version) > Version(version)
+                    if stale and latest_date:
+                        released = datetime.fromisoformat(latest_date.replace("Z", "+00:00"))
+                        update_overdue = (checked_at - released).total_seconds() >= 7 * 86400
+                    else:
+                        update_overdue = False
+            finally:
                 with _lock:
-                    _state["previous_version"] = previous_version
-                _update(version)
-                version = _version()
-                _, release_date = _release(version)
-                stale = None if latest_version is None else Version(latest_version) > Version(version)
-                if stale and latest_date:
-                    released = datetime.fromisoformat(latest_date.replace("Z", "+00:00"))
-                    update_overdue = (checked_at - released).total_seconds() >= 7 * 86400
-                else:
-                    update_overdue = False
+                    _update_in_progress = False
         state = {"checked_at": checked_at, "version": version, "release_date": release_date,
                  "latest_version": latest_version, "latest_release_date": latest_date,
                  "stale": stale, "latest_check_failed": latest_check_failed,
                  "update_overdue": update_overdue, "update_enabled": settings.yt_dlp_auto_update,
-                 "update_error": None, "previous_version": previous_version}
+                 "update_error": error, "previous_version": previous_version}
     except Exception as exc:
         error = str(exc)[:500]
         log.exception("yt-dlp version check failed")

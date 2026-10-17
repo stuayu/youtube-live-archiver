@@ -131,3 +131,32 @@ def test_failed_updated_version_check_runs_rollback(monkeypatch):
     assert commands[1][-1] == "yt-dlp==2026.1.1"
     assert status["previous_version"] == "2026.1.1"
     assert "restored 2026.1.1" in status["update_error"]
+    assert ytdlp_update.is_update_in_progress() is False
+
+
+def test_standalone_executable_is_excluded_from_pip_update(tmp_path, monkeypatch):
+    executable = tmp_path / "yt-dlp.exe"
+    executable.write_bytes(b"MZ standalone")
+    monkeypatch.setattr(settings, "yt_dlp_path", str(executable))
+    monkeypatch.setattr(settings, "yt_dlp_auto_update", True)
+    monkeypatch.setattr(ytdlp_update, "run_ytdlp", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout="2026.1.1", stderr=""))
+    monkeypatch.setattr(ytdlp_update, "_release", lambda version: (
+        (version or "2026.2.1"), datetime.now(timezone.utc).isoformat()))
+    monkeypatch.setattr(ytdlp_update.subprocess, "run", lambda *_args, **_kwargs: pytest.fail(
+        "standalone binary must not be updated with pip"))
+
+    result = ytdlp_update.check_version()
+
+    assert result["update_error"] == "単体版のため自動更新対象外（yt-dlp -U で更新）"
+
+
+def test_recorder_dispatch_stops_during_ytdlp_update(monkeypatch):
+    from app.services import recorder
+
+    monkeypatch.setattr(ytdlp_update, "_update_in_progress", True)
+    monkeypatch.setattr(recorder, "running_counts", lambda: pytest.fail("dispatch must return early"))
+
+    recorder.dispatch_recordings()
+
+    assert ytdlp_update.is_update_in_progress()

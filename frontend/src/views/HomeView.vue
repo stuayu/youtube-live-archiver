@@ -221,6 +221,7 @@ const ctx = reactive(useWorkspaceContext())
         <span v-if="ctx.status?.tools.yt_dlp_update_error" class="error-text">
           yt-dlp 更新エラー: {{ String(ctx.status.tools.yt_dlp_update_error) }}
         </span>
+        <span v-if="ctx.status?.tools.yt_dlp_update_in_progress">yt-dlp 更新中</span>
         <span>ffmpeg {{ ctx.status?.tools.ffmpeg_available ? '利用可能' : '未検出' }}</span>
       </div>
       <div v-for="job in ctx.status?.scheduler.jobs ?? []" :key="job.id" class="event-row">

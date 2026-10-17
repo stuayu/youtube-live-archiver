@@ -76,9 +76,11 @@ let metadataTimer = 0
 let prepareSequence = 0
 let backgroundSequence = 0
 let danmakuWindow = { afterMs: -1, beforeMs: -1 }
+let requestedDanmakuKey = ''
 function danmakuAddress(seconds = playbackSeconds.value) {
   const range = danmakuRange(seconds)
   danmakuWindow = range
+  requestedDanmakuKey = `${range.afterMs}:${range.beforeMs}:${chatKind.value}:${includeDeleted.value}`
   return apiUrl(
     `/videos/${props.video.id}/chat/danmaku/${chatKind.value || 'all'}-${includeDeleted.value ? '1' : '0'}-window-${range.afterMs}-${range.beforeMs}/`,
   )
@@ -590,6 +592,9 @@ watch(includeDeleted, () => {
 watch(quantity, () => reloadDanmaku())
 watch([area, speed], () => reloadDanmaku())
 function reloadDanmaku(seconds = playbackSeconds.value) {
+  const range = danmakuRange(seconds)
+  const requestKey = `${range.afterMs}:${range.beforeMs}:${chatKind.value}:${includeDeleted.value}`
+  if (requestKey === requestedDanmakuKey) return
   try {
     player?.danmaku.reload({
       id: props.video.id,

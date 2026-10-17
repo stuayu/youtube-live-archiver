@@ -122,6 +122,33 @@ def test_jsonl_import_keeps_valid_records_around_malformed_lines(db, tmp_path):
     assert ingest_jsonl(session, video.id, source, complete_snapshot=False) == 2
     assert session.query(ChatMessage).filter_by(video_id=video.id).count() == 2
 
+
+def test_danmaku_window_returns_more_than_one_thousand_comments(db):
+    session, video = db
+    session.add_all(ChatMessage(video_id=video.id, message_id=f"dense-{index}",
+                                offset_ms=index * 100, message_text="hello")
+                    for index in range(1800))
+    session.commit()
+    result = dplayer_danmaku(video.id, "all-0-window-0-180000", db=session)
+    assert len(result["data"]) == 1800
+
+
+def test_postgres_ingests_ten_thousand_messages_in_one_snapshot():
+    from app.db import SessionLocal
+
+    with SessionLocal() as session:
+        channel = Channel(youtube_channel_id="UCchat-load-test", url="https://youtube.com/@load",
+                          name="load")
+        session.add(channel)
+        session.flush()
+        video = Video(youtube_video_id="chat-load-test", channel_id=channel.id, title="load")
+        session.add(video)
+        session.flush()
+        records = [entry(f"load-{index}", offset=index) for index in range(10_000)]
+        assert ingest_records(session, video.id, records, complete_snapshot=False) == 10_000
+        session.commit()
+        assert session.query(ChatMessage).filter_by(video_id=video.id).count() == 10_000
+
 def test_chat_finalization_only_removes_fragments_after_part_rename(tmp_path):
     from app.services.recorder import finalize_chat_file
     part = tmp_path / "video.live_chat.json.part"
@@ -638,15 +665,15 @@ def test_dplayer_v3_rows_are_arrays_in_seconds_and_hide_deleted_by_default(db):
     assert isinstance(result["data"][0][0],float)
     assert dplayer_danmaku(video.id,"all-1",session)["data"][-1][-1]=="[削除済] gone"
 
-def test_dplayer_v3_caps_results_and_supports_time_windows(db):
+def test_dplayer_v3_returns_full_windows_and_supports_time_ranges(db):
     session,video=db
     session.add_all(ChatMessage(video_id=video.id,message_id=f"many-{i}",offset_ms=i*1000,
         author_name="viewer",message_text=f"message {i}") for i in range(1205))
     session.flush()
     result=dplayer_danmaku(video.id,"all-0",db=session)
-    assert len(result["data"])==1000
+    assert len(result["data"])==1205
     assert result["data"][0][0]==0.0
-    assert result["data"][-1][0]==999.0
+    assert result["data"][-1][0]==1204.0
     next_window=dplayer_danmaku(video.id,"all-0",after_ms=1_000_000,before_ms=1_204_000,db=session)
     assert len(next_window["data"])==205
     assert next_window["data"][0][0]==1000.0

@@ -23,7 +23,7 @@ export default defineConfig({
     },
     {
       name: 'webkit-iphone',
-      testMatch: /player-settings-layout\.spec\.ts/,
+      testMatch: /(player-settings-layout|player-danmaku-load)\.spec\.ts/,
       use: { ...devices['iPhone 13'], browserName: 'webkit', viewport: { width: 390, height: 844 } },
     },
     { name: 'tablet', use: { ...devices['Desktop Chrome'], viewport: { width: 820, height: 1120 } } },

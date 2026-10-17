@@ -175,6 +175,9 @@ def test_live_zero_exit_while_still_live_restarts_another_interval(
 def test_late_live_start_records_from_stream_start_without_backfill(tmp_path, fake_youtube):
     key = "late-live-start"
     video_id = _create_video(tmp_path, key, chat=False)
+    with SessionLocal() as db:
+        db.get(Video, video_id).retention_days = 30
+        db.commit()
     release_timestamp = int(time.time()) - 180
     fake_youtube.set_state({"channels": {}, "videos": {key: {
         "live_status": "is_live", "release_timestamp": release_timestamp,
@@ -192,8 +195,8 @@ def test_late_live_start_records_from_stream_start_without_backfill(tmp_path, fa
     assert row.raw_metadata.get("archive_backfill") != "queued"
     assert row.raw_metadata["recording_start_offset_ms"] == 0
     assert row.raw_metadata["live_from_start"] == "used"
-    assert row.is_partial, row.raw_metadata
-    assert row.retention_expires_at is None
+    assert not row.is_partial, row.raw_metadata
+    assert row.retention_expires_at is not None
     assert any(call["argv"].count("--live-from-start") for call in fake_youtube.calls())
     recording_calls = [call["argv"] for call in fake_youtube.calls()
                        if "--skip-download" not in call["argv"]]
@@ -1019,6 +1022,55 @@ def test_retention_rejects_directory_without_matching_video_id(tmp_path, monkeyp
     assert channel_root.is_dir()
 
 
+@pytest.mark.parametrize("missing", ["folder", "file", "legacy-file"],
+                         ids=["missing-folder", "missing-file", "legacy-file"])
+def test_retention_completes_missing_folder_or_unlinks_legacy_video_file(
+        tmp_path, monkeypatch, missing):
+    from datetime import timedelta
+    from app import workers
+    from app.models import RemoteCheck, now
+
+    video_id, directory = _make_expired_video(tmp_path, f"retention-gone-{missing}")
+    root = tmp_path / "archive"
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        video.edit_detection_mode = "off"
+        video.status = "DELETE_ELIGIBLE"
+        video.deletion_candidate_at = now() - timedelta(days=5)
+        video.deletion_after = now() - timedelta(seconds=1)
+        db.add(RemoteCheck(video_id=video.id, remote_status="PUBLIC", checked_at=now(),
+                           error=None, edit_detected=False))
+        if missing == "folder":
+            video.file_path = str(directory)
+        elif missing == "file":
+            video.file_path = str(root / f"video-{video.youtube_video_id}.mp4")
+        else:
+            direct_file = root / f"video-{video.youtube_video_id}.mp4"
+            direct_file.write_bytes(b"media")
+            (root / "unrelated.txt").write_text("keep", encoding="utf-8")
+            video.file_path = str(direct_file)
+        db.commit()
+    if missing == "folder":
+        shutil.rmtree(directory)
+    monkeypatch.setattr(workers, "_inspection", lambda *_args, **_kwargs: (
+        "PUBLIC", 100, None, {"availability": "public", "duration": 100}))
+
+    with SessionLocal() as db:
+        assert workers.verify_video(db, db.get(Video, video_id), final=True) is True
+        db.commit()
+
+    row = _get_video(video_id)
+    assert row.status == "DELETED_BY_RETENTION"
+    with SessionLocal() as db:
+        audit = db.scalar(select(AuditLog).where(
+            AuditLog.video_id == video_id, AuditLog.action == "DELETE"))
+        if missing != "legacy-file":
+            assert audit.details["file_state"] == "already_missing"
+    if missing == "legacy-file":
+        assert not Path(row.file_path).exists()
+        assert (root / "unrelated.txt").exists()
+
+
 @pytest.mark.parametrize(("remote", "expected", "reason"), [
     ({"status": "private"}, "PROTECTED", "REMOTE_PRIVATE"),
     ({"error": "network_error"}, "PROTECTION_PENDING", "REMOTE_CHECK_FAILED"),
@@ -1369,7 +1421,8 @@ def test_live_end_error_completion_still_queues_archive_backfill(
                       "terminal_error": "Did not get any data blocks"},
     }}})
 
-    assert _wait_for(lambda: _get_video(video_id).status == "DISCOVERED", timeout=30)
+    assert _wait_for(lambda: _get_video(video_id).status != "RECORDING", timeout=30), (
+        _get_video(video_id).status, _get_video(video_id).raw_metadata)
     row = _get_video(video_id)
     assert row.raw_metadata["attempts"][-1]["outcome"] == "success"
     assert row.raw_metadata["archive_backfill"] == "queued"
@@ -1380,7 +1433,7 @@ def test_live_end_error_completion_still_queues_archive_backfill(
     assert _wait_for(lambda: recorder.running_counts() == (0, 0))
 
 
-def test_live_end_inspection_retries_stale_is_live_before_restarting(
+def test_live_end_inspection_retries_stale_status_with_terminal_evidence(
         tmp_path, fake_youtube, monkeypatch):
     from app.services import recorder
 
@@ -1389,18 +1442,22 @@ def test_live_end_inspection_retries_stale_is_live_before_restarting(
     video_id = _create_video(tmp_path, key, chat=False, from_start=False)
     fake_youtube.set_state({"channels": {}, "videos": {key: {
         "live_status": "is_live", "release_timestamp": int(time.time()) - 1,
-        "recording": {"mode": "live", "ended": False},
+        "recording": {"mode": "live", "ended": False,
+                      "terminal_error": "Did not get any data blocks"},
     }}})
     recorder_worker()
     assert _wait_for(lambda: _get_video(video_id).status == "RECORDING")
     target = Path(_get_video(video_id).file_path)
     assert _wait_for(lambda: (target / "video.mkv.part").is_file())
-    responses = iter(({"live_status": "is_live"}, {"live_status": "was_live", "duration": 3}))
+    responses = iter(({"live_status": "is_live", "duration": 3},
+                      {"live_status": "was_live", "duration": 3}))
     monkeypatch.setattr(recorder, "inspect", lambda *_args: next(responses))
+    monkeypatch.setattr("app.services.recovery.probe_duration", lambda _path: 3)
     fake_youtube.set_state({"channels": {}, "videos": {key: {
         "live_status": "was_live", "duration": 3,
         "release_timestamp": int(time.time()) - 2,
-        "recording": {"mode": "live", "ended": True},
+        "recording": {"mode": "live", "ended": True,
+                      "terminal_error": "Did not get any data blocks"},
     }}})
 
     assert _wait_for(lambda: _get_video(video_id).status == "ACTIVE", timeout=30)
@@ -1408,8 +1465,9 @@ def test_live_end_inspection_retries_stale_is_live_before_restarting(
     assert row.raw_metadata["attempts"][-1]["outcome"] == "success"
     assert row.raw_metadata["live_status"] == "was_live"
     with SessionLocal() as db:
-        assert not db.scalars(select(AuditLog).where(
+        interrupted = db.scalars(select(AuditLog).where(
             AuditLog.video_id == video_id, AuditLog.action == "LIVE_SEGMENT_INTERRUPTED")).all()
+        assert not interrupted
     assert _wait_for(lambda: recorder.running_counts() == (0, 0))
 
 
@@ -1519,6 +1577,41 @@ def test_tee_live_end_error_keeps_verified_remux_without_fallback(
     with SessionLocal() as db:
         assert not db.scalars(select(AuditLog).where(
             AuditLog.video_id == video_id, AuditLog.action == "LIVE_PLAYBACK_FALLBACK")).all()
+    assert _wait_for(lambda: recorder.running_counts() == (0, 0))
+
+
+def test_tee_fallback_format_retry_uses_fallback_stem_consistently(
+        tmp_path, fake_youtube, monkeypatch):
+    from app.services import recorder
+    from app.services import quality
+
+    fake_ffmpeg = Path(__file__).parent / "fakes" / "fake_ffmpeg.py"
+    monkeypatch.setattr(settings, "ffmpeg_path", str(fake_ffmpeg.resolve()))
+    monkeypatch.setattr(quality, "resolve_quality", lambda *_: ("requested-format", "test"))
+    monkeypatch.setattr(recorder, "_select_live_from_start", lambda *_args: "skipped_disabled")
+    monkeypatch.setenv("FAKE_FFMPEG_TEE_FAIL", "1")
+    key = "tee-fallback-format"
+    video_id = _create_video(tmp_path, key, chat=False, playback=True, from_start=False)
+    fake_youtube.set_state({"channels": {}, "videos": {key: {
+        "live_status": "is_live", "release_timestamp": int(time.time()) - 10,
+        "recording": {"mode": "live", "ended": True, "format_error": True},
+    }}})
+
+    recorder_worker()
+
+    assert _wait_for(lambda: _get_video(video_id).status == "ACTIVE", timeout=30), (
+        _get_video(video_id).status, _get_video(video_id).raw_metadata)
+    row = _get_video(video_id)
+    target = Path(row.file_path)
+    fallback_stem = row.raw_metadata["attempts"][-1]["stem"]
+    assert fallback_stem != "video"
+    assert (target / f"{fallback_stem}.mkv").is_file()
+    assert row.raw_metadata["attempts"][-1]["outcome"] == "success"
+    fallback_calls = [call["argv"] for call in fake_youtube.calls()
+                      if "--skip-download" not in call["argv"] and fallback_stem in " ".join(call["argv"])]
+    assert len(fallback_calls) == 2
+    assert "-f" in fallback_calls[0]
+    assert "-f" not in fallback_calls[1]
     assert _wait_for(lambda: recorder.running_counts() == (0, 0))
 
 

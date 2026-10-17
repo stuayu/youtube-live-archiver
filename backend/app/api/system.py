@@ -38,7 +38,7 @@ def api_status(db: Session = Depends(get_db)):
         tools.update(ffmpeg_available=bool(shutil.which(settings.ffmpeg_path) or Path(settings.ffmpeg_path).is_file()),
                      ffprobe_available=bool(shutil.which(settings.ffprobe_path) or Path(settings.ffprobe_path).is_file()))
         main_module._tool_cache = tools
-    from ..services.ytdlp_update import status as ytdlp_status
+    from ..services.ytdlp_update import is_update_in_progress, status as ytdlp_status
     from ..services.youtube_ip import status as youtube_ip_status
     version_status = ytdlp_status()
     tools.update({"yt_dlp_version": version_status.get("version") or tools.get("yt_dlp_version"),
@@ -50,7 +50,8 @@ def api_status(db: Session = Depends(get_db)):
                   "yt_dlp_latest_check_failed": version_status.get("latest_check_failed"),
                   "yt_dlp_checked_at": version_status.get("checked_at"),
                   "yt_dlp_auto_update": version_status.get("update_enabled", settings.yt_dlp_auto_update),
-                  "yt_dlp_update_error": version_status.get("update_error")})
+                  "yt_dlp_update_error": version_status.get("update_error"),
+                  "yt_dlp_update_in_progress": is_update_in_progress()})
     active_channels = db.scalar(select(func.count(Channel.id)).where(Channel.enabled.is_(True), Channel.archived.is_(False))) or 0
     error_channels = db.scalar(select(func.count(Channel.id)).where(Channel.enabled.is_(True), Channel.consecutive_failures > 0)) or 0
     oldest_success = db.scalar(select(func.min(Channel.last_success_at)).where(Channel.enabled.is_(True), Channel.archived.is_(False)))

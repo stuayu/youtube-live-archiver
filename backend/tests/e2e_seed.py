@@ -197,6 +197,20 @@ if av1_target:
         original_duration=8, recorded_at=now() - timedelta(days=50),
         recording_finished_at=now() - timedelta(days=50), retention_days=30,
     ))
+dense_target = media("densevideo001", seconds=180)
+dense_video = Video(
+    youtube_video_id="densevideo001", channel_id=channels[0].id, storage_id=storage.id,
+    title="高密度コメント配信", status="ACTIVE", file_path=str(dense_target),
+    file_size=(dense_target / "video.mp4").stat().st_size, original_duration=180,
+    recorded_at=now() - timedelta(days=1), recording_finished_at=now() - timedelta(days=1),
+    retention_days=30,
+)
+db.add(dense_video)
+db.flush()
+db.add_all(ChatMessage(
+    video_id=dense_video.id, message_id=f"dense-{n}", offset_ms=n * 100,
+    author_name=f"視聴者{n % 20}", message_text=f"高密度コメント {n}", message_type="normal",
+) for n in range(1800))
 broken_target = root / channels[0].youtube_channel_id / "2026" / "broken00001"
 broken_target.mkdir(parents=True, exist_ok=True)
 (broken_target / "video.mkv").write_bytes(b"not a media container")

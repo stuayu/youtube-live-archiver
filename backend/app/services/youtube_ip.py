@@ -105,6 +105,7 @@ def note_ipv6_failure(message: str) -> None:
         "errno 65", "errno 101",
         "cannot assign requested address", "address family not supported",
         "failed to create ipv6 connection", "ipv6 connection failed",
+        "timed out", "timeout",
     )):
         return
     with _lock:

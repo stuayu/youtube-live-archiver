@@ -516,15 +516,36 @@ def _verified_live_end_media(video: Video, target: Path, stem: str, inspected: d
     return media
 
 
-def _inspect_live_after_exit(video_id: str, cookie_profile: str | None) -> dict:
+def _inspect_live_after_exit(video_id: str, cookie_profile: str | None,
+                             terminal_stderr: bytes | str = b"", media: Path | None = None,
+                             database_video_id: int | None = None) -> dict:
     url = f"https://youtube.com/watch?v={video_id}"
     try:
         inspected = inspect(url, cookie_profile)
     except Exception:
         return {}
+    error_text = (terminal_stderr.decode("utf-8", "replace") if isinstance(terminal_stderr, bytes)
+                  else str(terminal_stderr)).lower()
+    terminal_hint = "did not get any data blocks" in error_text
+    if terminal_hint and media and media.is_file():
+        from .recovery import probe_duration
+        actual = probe_duration(media)
+        try:
+            expected = float(inspected.get("duration"))
+        except (TypeError, ValueError):
+            expected = 0
+        terminal_hint = bool(actual and expected > 0 and abs(actual - expected) <= max(30, expected * .01))
+    if not terminal_hint:
+        return inspected
     for delay in LIVE_END_INSPECT_DELAYS_SECONDS:
         if inspected.get("live_status") != "is_live":
             break
+        if database_video_id is not None:
+            with SessionLocal() as db:
+                heartbeat_video = db.get(Video, database_video_id)
+                if heartbeat_video and heartbeat_video.status == "RECORDING":
+                    heartbeat_video.recording_heartbeat_at = now()
+                    db.commit()
         time.sleep(delay)
         try:
             inspected = inspect(url, cookie_profile)
@@ -781,7 +802,7 @@ def _normalize_tee_sidecars(target: Path, output_stem: str) -> None:
 
 def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Path,
                      output_stem: str, profile: str, is_live: bool, selector: str | None,
-                     lease: Any, chat_offsets: dict[str, int]) -> tuple[subprocess.Popen, bytes]:
+                     lease: Any, chat_offsets: dict[str, int]) -> tuple[subprocess.Popen, bytes, str]:
     """Run yt-dlp, separated chat capture, heartbeats, and optional tee output."""
     import subprocess
 
@@ -893,6 +914,8 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                     lambda: popen_recording(fallback_args[len(ytdlp_command()):], stdout=subprocess.DEVNULL),
                     record_tee_failure)
                 setattr(proc, "recording_stem", fallback_stem)
+                output_stem = fallback_stem
+                args = fallback_args
                 v.live_hls_path = None
                 shutil.rmtree(hls_dir, ignore_errors=True)
                 write_process_manifest(target, proc, "yt-dlp")
@@ -933,6 +956,8 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                     lambda error, rc: db.add(AuditLog(video_id=v.id, action="LIVE_PLAYBACK_FALLBACK",
                         reason="TEE_LAUNCH_FAILED", details={"error": str(error)})))
                 setattr(proc, "recording_stem", fallback_stem)
+                output_stem = fallback_stem
+                args = fallback_args
             v.live_hls_path = None
             if proc:
                 write_process_manifest(target, proc, "yt-dlp")
@@ -992,7 +1017,7 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
         v.raw_metadata = {**(v.raw_metadata or {}), "live_from_start": "used"}
     db.commit()
     _finish_chat_process(v.id)
-    return proc, stderr
+    return proc, stderr, output_stem
 
 
 def _read_stem_metadata(target: Path, stem: str) -> dict:
@@ -1240,17 +1265,11 @@ def _complete_recording(db: Session, v: Video, ch: Channel, target: Path, output
         len(live_interval_stems) > 1 and archive_media is None)
     if _archive_backfill_completed(v.raw_metadata or {}, profile) and not incomplete_archive:
         v.raw_metadata["archive_backfill"] = "completed"
-    if has_complete_from_start:
-        metadata = v.raw_metadata or {}
-        live_still_running = metadata.get("live_status") == "is_live"
-        release = _timestamp_seconds(metadata.get("release_timestamp"))
-        attempts = metadata.get("attempts", [])
-        late_live_start = (live_still_running and release is not None
-                           and release <= time.time() and len(attempts) == 1)
-        v.is_partial = user_stopped or late_live_start
-        v.raw_metadata["live_from_start"] = "used"
     if is_live and inspected and inspected.get("live_status") in {"post_live", "was_live", "not_live"}:
         v.raw_metadata["live_status"] = "was_live"
+    if has_complete_from_start:
+        v.is_partial = user_stopped
+        v.raw_metadata["live_from_start"] = "used"
     v.retention_expires_at = (v.recording_finished_at + timedelta(days=v.retention_days)) if v.retention_days is not None and not v.is_partial else None
     _write_recording_index(v, ch, target, primary, segments, live_interval_stems)
     for removed in remove_intermediates_after_success(target, media,
@@ -1331,6 +1350,9 @@ def recorder_worker() -> None:
 
 def dispatch_recordings() -> None:
     """Dispatch due candidates in live-first order without waiting for recording."""
+    from .ytdlp_update import is_update_in_progress
+    if is_update_in_progress():
+        return
     live_count, archive_count = running_counts()
     with SessionLocal() as dispatch_db:
         candidates = dispatch_db.scalars(select(Video).where(
@@ -1419,15 +1441,17 @@ def _choose_storage(db: Session, video: Video, channel: Channel) -> Storage | No
 
 def _recording_directory(video: Video, channel: Channel, storage_root: Path) -> Path:
     from .recording_paths import (CHANNEL_DIRECTORY_MAX_LENGTH, is_video_directory,
-                                  sanitize_folder_name, video_directory_name)
+                                  recording_directory_parts, sanitize_folder_name,
+                                  video_directory_name)
     date_anchor = video.scheduled_start_at or video.created_at or now()
     existing = Path(video.file_path) if video.file_path else None
     if existing and is_video_directory(existing, storage_root, video.youtube_video_id):
         return existing
     channel_name = sanitize_folder_name(channel.name or "", CHANNEL_DIRECTORY_MAX_LENGTH)
     channel_name = channel_name or sanitize_folder_name(channel.youtube_channel_id, CHANNEL_DIRECTORY_MAX_LENGTH)
-    return storage_root / channel_name / video_directory_name(
-        video.youtube_video_id, video.title, date_anchor)
+    channel_name, folder_name = recording_directory_parts(
+        storage_root, channel_name, video.youtube_video_id, video.title or "", date_anchor)
+    return storage_root / channel_name / folder_name
 
 
 def _next_output_stem(video: Video, target: Path, profile: str) -> str:
@@ -1560,7 +1584,7 @@ def record_video(video_id: int) -> None:
                 v.raw_metadata = begin_attempt(v.raw_metadata or {}, output_stem, profile, v.recorded_at or now(),
                                                from_start=live_from_start == "used")
                 db.commit()
-                proc, stderr = _execute_attempt(
+                proc, stderr, output_stem = _execute_attempt(
                     db, v, ch, root, target, output_stem, profile, is_live, selector,
                     lease, chat_offsets)
                 output_stem = getattr(proc, "recording_stem", output_stem)
@@ -1643,7 +1667,8 @@ def record_video(video_id: int) -> None:
                                     reason="VERIFIED_DURATION", details={"path": path})),
                                 ffmpeg_path=settings.ffmpeg_path)
                         db.commit()
-                        inspected = _inspect_live_after_exit(v.youtube_video_id, ch.cookie_profile)
+                        inspected = _inspect_live_after_exit(v.youtube_video_id, ch.cookie_profile,
+                                                            stderr, media, v.id)
                         db.refresh(v)
                         verified_media = _verified_live_end_media(
                             v, target, output_stem, inspected, media, allow_is_live=True)
@@ -1758,7 +1783,8 @@ def record_video(video_id: int) -> None:
                 inspected = {}
                 if is_live:
                     db.commit()
-                    inspected = _inspect_live_after_exit(v.youtube_video_id, ch.cookie_profile)
+                    inspected = _inspect_live_after_exit(v.youtube_video_id, ch.cookie_profile,
+                                                        stderr, media, v.id)
                     db.refresh(v)
                     if inspected.get("live_status") == "is_live":
                         from .recovery import probe_duration

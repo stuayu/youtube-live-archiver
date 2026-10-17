@@ -69,6 +69,25 @@ def video_directory_name(video_id: str, title: str, date_anchor: datetime) -> st
     return f"{stem}{suffix}"
 
 
+def recording_directory_parts(root: Path, channel_name: str, video_id: str,
+                              title: str, date_anchor: datetime) -> tuple[str, str]:
+    """Fit the full directory path within the Windows recorder path budget."""
+    channel = sanitize_folder_name(channel_name, CHANNEL_DIRECTORY_MAX_LENGTH)
+    channel = channel or sanitize_folder_name("unknown", CHANNEL_DIRECTORY_MAX_LENGTH)
+    safe_id = sanitize_folder_name(video_id, 32) or "unknown"
+    date = date_anchor.astimezone().date().strftime("%Y-%m-%d")
+    suffix = f" [{safe_id}]"
+    fallback = f"{date}{suffix}"
+    clusters = list(_clusters(sanitize_folder_name(title or "", TITLE_MAX_LENGTH)))
+    for count in range(len(clusters), -1, -1):
+        short_title = "".join(clusters[:count])
+        name = f"{date} {short_title}{suffix}" if short_title else fallback
+        units = len(str(root / channel / name).encode("utf-16-le", "surrogatepass")) // 2
+        if units + 64 <= 260:
+            return channel, name
+    return "_", fallback
+
+
 def is_video_directory(path: Path, storage_root: Path, video_id: str) -> bool:
     """Check a registered directory belongs to storage and is named for its video."""
     try:

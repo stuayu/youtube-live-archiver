@@ -437,7 +437,12 @@ def ingest_records(db, video_id: int, records: list[dict[str, Any]], *, complete
             mid = parsed["message_id"]
             seen.add(mid)
             parsed_messages.setdefault(mid, parsed)
-    old_rows = db.scalars(select(ChatMessage).where(ChatMessage.message_id.in_(seen))).all() if db is not None and seen else []
+    old_rows = []
+    if db is not None:
+        seen_ids = sorted(seen)
+        for start in range(0, len(seen_ids), 500):
+            old_rows.extend(db.scalars(select(ChatMessage).where(
+                ChatMessage.message_id.in_(seen_ids[start:start + 500]))).all())
     old_by_id = {message.message_id: message for message in old_rows}
     update_keys = ("author_channel_id", "author_name", "author_badges", "author_role", "message_text",
                    "message_runs", "amount_display", "superchat_amount", "superchat_currency",
@@ -470,7 +475,9 @@ def ingest_records(db, video_id: int, records: list[dict[str, Any]], *, complete
         if insert is None:
             db.add_all(ChatMessage(**row) for row in new_rows)
         else:
-            db.execute(insert(ChatMessage).values(new_rows).on_conflict_do_nothing(index_elements=["message_id"]))
+            for start in range(0, len(new_rows), 500):
+                db.execute(insert(ChatMessage).values(new_rows[start:start + 500])
+                           .on_conflict_do_nothing(index_elements=["message_id"]))
     db.flush()
     if complete_snapshot:
         rows = db.scalars(select(ChatMessage).where(ChatMessage.video_id == video_id)).all()

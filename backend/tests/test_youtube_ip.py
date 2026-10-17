@@ -98,6 +98,7 @@ def test_application_https_tries_ipv6_before_ipv4(monkeypatch):
                  if family == socket.AF_INET6 else ("127.0.0.1", 443))]
 
     monkeypatch.setattr(settings, "youtube_ip_mode", "prefer_ipv6")
+    monkeypatch.setattr(youtube_ip, "_reachable", True)
     monkeypatch.setattr(socket, "getaddrinfo", addresses)
     monkeypatch.setattr(socket, "socket", FakeSocket)
     connection = http_ip._FamilyHTTPSConnection("www.youtube.com", 443)
@@ -105,6 +106,51 @@ def test_application_https_tries_ipv6_before_ipv4(monkeypatch):
     connection.connect()
     assert families == [socket.AF_INET6, socket.AF_INET]
     assert connection.sock.family == socket.AF_INET
+
+
+def test_cached_ipv6_failure_skips_ipv6_for_application_https(monkeypatch):
+    import socket
+    from app.services import http_ip
+
+    families = []
+
+    class FakeSocket:
+        def __init__(self, family, *_args):
+            self.family = family
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _address):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeContext:
+        @staticmethod
+        def wrap_socket(sock, server_hostname):
+            return sock
+
+    def addresses(_host, _port, family, _socktype):
+        families.append(family)
+        return [(family, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+
+    monkeypatch.setattr(settings, "youtube_ip_mode", "prefer_ipv6")
+    monkeypatch.setattr(youtube_ip, "_reachable", False)
+    monkeypatch.setattr(socket, "getaddrinfo", addresses)
+    monkeypatch.setattr(socket, "socket", FakeSocket)
+    connection = http_ip._FamilyHTTPSConnection("www.youtube.com", 443)
+    connection._context = FakeContext()
+    connection.connect()
+    assert families == [socket.AF_INET]
+
+
+def test_ipv6_connection_timeout_disables_preference_but_429_does_not(monkeypatch):
+    monkeypatch.setattr(settings, "youtube_ip_mode", "prefer_ipv6")
+    monkeypatch.setattr(youtube_ip, "_reachable", True)
+    youtube_ip.note_ipv6_failure("TimeoutError: timed out")
+    assert youtube_ip.ytdlp_ip_args(["--dump-single-json"]) == []
 
 
 @pytest.mark.parametrize("mode,expected", [

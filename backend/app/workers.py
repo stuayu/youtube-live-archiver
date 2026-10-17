@@ -204,19 +204,39 @@ def verify_video(db, video: Video, *, final: bool = False, _lease=None) -> bool:
         p = Path(video.file_path).resolve()
         configured_storage = video.storage or (video.channel.storage if video.channel else None)
         root = Path(configured_storage.root_path if configured_storage else settings.storage_root).resolve()
-        if not is_video_directory(p, root, video.youtube_video_id):
+        if not root.is_dir():
+            raise ValueError("保存先ルートに到達できません")
+        contained = root in p.parents
+        missing_recording = (not p.exists() and contained and (
+            p.name == video.youtube_video_id or
+            p.name.endswith(f" [{video.youtube_video_id}]") or
+            (p.suffix.lower() in {".mkv", ".mp4", ".webm", ".ts", ".m4v", ".mov"}
+             and video.youtube_video_id in p.name)))
+        legacy_video_file = (p.is_file() and contained and video.youtube_video_id in p.name)
+        if missing_recording:
+            if not _lease.still_owned():
+                video.status = "PROTECTION_PENDING"
+                return False
+        elif legacy_video_file:
+            if not _lease.still_owned():
+                video.status = "PROTECTION_PENDING"
+                return False
+            db.commit()
+            p.unlink()
+        elif not is_video_directory(p, root, video.youtube_video_id):
             raise ValueError("録画フォルダーが保存先配下の動画IDフォルダーではありません")
-        if not _lease.still_owned():
+        elif not _lease.still_owned():
             video.status = "PROTECTION_PENDING"
             log.error("retention lock lost before deleting %s; keeping file", video.youtube_video_id)
             return False
-        db.commit()
-        shutil.rmtree(p)
-        if p.parent != root and root in p.parent.parents:
-            try:
-                p.parent.rmdir()
-            except OSError:
-                pass
+        elif p.is_dir():
+            db.commit()
+            shutil.rmtree(p)
+            if p.parent != root and root in p.parent.parents:
+                try:
+                    p.parent.rmdir()
+                except OSError:
+                    pass
     except Exception as exc:
         video.status = "PROTECTION_PENDING"
         log.exception("retention file removal failed: %s", exc)
@@ -227,7 +247,8 @@ def verify_video(db, video: Video, *, final: bool = False, _lease=None) -> bool:
     from .services.derived import clear_transcript_segments
     clear_transcript_segments(db, video)
     db.add(AuditLog(video_id=video.id, action="DELETE", reason="Retention expired",
-                    details={"remote": status, "retention_days": video.retention_days}))
+                    details={"remote": status, "retention_days": video.retention_days,
+                             "file_state": "already_missing" if missing_recording else None}))
     return True
 
 

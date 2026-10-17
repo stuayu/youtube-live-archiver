@@ -565,7 +565,7 @@ def chat_danmaku(video_id: int, include_deleted: bool = False, kind: str | None 
     recording_offset = int((video.raw_metadata or {}).get("recording_start_offset_ms", 0))
     if after_ms is not None: stmt = stmt.where(ChatMessage.offset_ms >= max(0, after_ms) + recording_offset)
     if before_ms is not None: stmt = stmt.where(ChatMessage.offset_ms <= max(0, before_ms) + recording_offset)
-    rows = db.scalars(stmt.order_by(ChatMessage.offset_ms, ChatMessage.id).limit(min(1000, max(1, limit)))).all()
+    rows = db.scalars(stmt.order_by(ChatMessage.offset_ms, ChatMessage.id)).all()
     data = [[max(0,m.offset_ms-recording_offset)/1000, "right", m.superchat_color or "#ffffff", m.author_name,
         ("[削除済] " if m.is_deleted else "") + m.message_text] for m in rows]
     db.commit()
@@ -605,7 +605,7 @@ def dplayer_danmaku(video_id: int, filter_key: str, db: Session = Depends(get_db
     before_ms = window_before if window_before is not None else before_ms
     if after_ms is not None: stmt = stmt.where(ChatMessage.offset_ms >= recording_offset + max(0, after_ms))
     if before_ms is not None: stmt = stmt.where(ChatMessage.offset_ms <= recording_offset + max(0, before_ms))
-    rows = db.scalars(stmt.order_by(ChatMessage.offset_ms, ChatMessage.id).limit(min(1000, max(1, limit)))).all()
+    rows = db.scalars(stmt.order_by(ChatMessage.offset_ms, ChatMessage.id)).all()
     # DPlayer 1.27's built-in v3 reader indexes each row as
     # [time, type, color, author, text]. Object rows pass the code check but
     # become undefined fields in that reader, so no danmaku is drawn.

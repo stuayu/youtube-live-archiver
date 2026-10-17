@@ -15,6 +15,10 @@ class _FamilyHTTPSConnection(http.client.HTTPSConnection):
             "prefer_ipv6": (socket.AF_INET6, socket.AF_INET),
             "auto": (socket.AF_UNSPEC,),
         }[mode]
+        if mode == "prefer_ipv6":
+            from .youtube_ip import status
+            if status().get("ipv6_reachable") is False:
+                families = (socket.AF_INET,)
         errors = []
         for family in families:
             try:
@@ -25,7 +29,10 @@ class _FamilyHTTPSConnection(http.client.HTTPSConnection):
                 continue
             for af, socktype, proto, _, address in addresses:
                 sock = socket.socket(af, socktype, proto)
-                sock.settimeout(self.timeout)
+                if af == socket.AF_INET6:
+                    sock.settimeout(1.5)
+                elif isinstance(self.timeout, (int, float)):
+                    sock.settimeout(self.timeout)
                 try:
                     sock.connect(address)
                     self.sock = sock

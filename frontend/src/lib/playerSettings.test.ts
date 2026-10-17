@@ -35,6 +35,8 @@ describe('danmaku range', () => {
   it('keeps initial and seek requests bounded to playback time', () => {
     expect(danmakuRange(0)).toEqual({ afterMs: 0, beforeMs: 180000 })
     expect(danmakuRange(400)).toEqual({ afterMs: 345000, beforeMs: 525000 })
+    expect(danmakuRange(150)).toEqual({ afterMs: 165000, beforeMs: 345000 })
+    expect(danmakuRange(151)).toEqual(danmakuRange(150))
     expect(danmakuRange(Number.NaN)).toEqual({ afterMs: 0, beforeMs: 180000 })
   })
 })

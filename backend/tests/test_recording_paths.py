@@ -90,3 +90,19 @@ def test_recording_directory_date_fallback_order(tmp_path, monkeypatch):
     monkeypatch.setattr(recorder, "now", lambda: current)
     assert _recording_directory(video, channel, root).name.startswith(
         f"{current.astimezone().date():%Y-%m-%d}")
+
+
+def test_recording_directory_limits_full_utf16_path_with_long_names(tmp_path):
+    from app.services.recording_paths import recording_directory_parts
+
+    root = Path("C:/長い保存先") / ("archive" * 8)
+    channel_name = "長いチャンネル名😀" * 20
+    title = "配信😀" * 100
+    date = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    channel, folder = recording_directory_parts(root, channel_name, "video-archive-2",
+                                                title, date)
+    full_path = str(root / channel / folder)
+    units = len(full_path.encode("utf-16-le")) // 2
+    assert units <= 196
+    assert folder.startswith(date.astimezone().date().strftime("%Y-%m-%d"))
+    assert "[video-archive-2]" in folder
