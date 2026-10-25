@@ -8,6 +8,8 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 
 | パス | 役割 |
 | --- | --- |
+| `app/api/social.py` | Bluesky / Misskey の接続状態・設定、タグ検索、動画キャプチャ投稿の API。 |
+| `app/services/social.py` | SNS 認証情報の暗号化、タグ検索、投稿、画像の検証とアップロード。 |
 | `app/main.py` | FastAPI lifespan、scheduler の起動・停止、health、静的 frontend 配信、エラー応答。 |
 | `app/config.py` | `Settings` と環境変数既定値。 |
 | `app/db.py` | SQLAlchemy engine / session、DB 接続設定と request 終了時の rollback / close。 |
@@ -31,6 +33,8 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 
 公開 API の prefix は `/api` です。代表例: `/api/channels`、`/api/storages`、`/api/videos`、`/api/recording-rules`、`/api/settings/transcription`、`/api/settings/summary`、`/api/status`、`/api/events`、`/api/search/transcripts`、`/api/quality-presets`。health endpoint は `/health` です。完全な route 定義は `backend/app/api/` を参照してください。
 
+SNS API はアカウント設定、ハッシュタグ検索、動画への投稿を提供します。Bluesky の refresh token と Misskey token は DATA_DIR/social-credentials.key の鍵で Fernet 暗号化し、AppSetting には暗号文を保存します。キャプチャ画像は投稿要求の処理中だけメモリに置き、検証後に選択先へ中継します。
+
 ### Frontend
 
 - `src/views/`: Home / Channels / Upcoming / Archive / Search / Storages / Analysis / Activity / Settings の画面。
@@ -38,6 +42,8 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 - `src/composables/`: API と画面状態を結ぶ workspace、各画面の query / fetch / action。
 - `src/lib/`: API 表現補助、状態表示、format、player 設定、DPlayer adapter。
 - `src/api/`: API client、resource 関数、型。
+
+再生画面の SNS 操作は PlayerPanels.vue と PlayerSocialTimeline.vue が担当します。キャプチャは PlayerDialog.vue が現在の video frame を canvas で JPEG 化し、ブラウザー内で確認・削除できる一時データとして渡します。明示的な投稿要求の間だけ画像を backend へ送り、画像自体をローカルには保存しません。
 
 DPlayer の歯車メニューを拡張するときは `src/lib/dplayerSettings.ts` に項目と反映処理を追加し、設定の永続化・既定値は `src/lib/playerSettings.ts`、プレイヤーとの接続は `src/components/PlayerDialog.vue` に合わせます。DPlayer 内部 DOM を使う拡張は依存バージョンと unit test を合わせて確認します。
 

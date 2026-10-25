@@ -4,6 +4,7 @@ import { apiUrl } from '../../api/client'
 import type { ChatMessage, ChatPage, Transcript, Video } from '../../api/types'
 import { formatBytes, formatDate, formatDuration } from '../../lib/format'
 import { videoStatus } from '../../lib/status'
+import PlayerSocialTimeline from './PlayerSocialTimeline.vue'
 
 interface TimelineItem {
   start: number
@@ -29,6 +30,13 @@ const props = defineProps<{
   transcriptQuery: string
   playbackSeconds: number
   following: boolean
+  captureFrame?: () => Promise<{
+    data_base64: string
+    mime_type: 'image/jpeg'
+    width: number
+    height: number
+    playback_seconds: number
+  }>
   storageName?: string
   conversionNote?: string
 }>()
@@ -56,6 +64,7 @@ const emit = defineEmits<{
 const list = ref<HTMLElement | null>(null)
 const fallback = ref(new Set<string>())
 const mobileSearchOpen = ref(false)
+const timelineMode = ref<'highlights' | 'social'>('highlights')
 const tabs = [
   ['chat', 'チャット'],
   ['transcript', '文字起こし'],
@@ -444,16 +453,45 @@ watch(
         全体要約のみ再生成
       </button>
     </section>
-    <section v-else-if="tab === 'timeline'" class="panel-content">
-      <button
-        v-for="item in timeline"
-        :key="`${item.start}-${item.title}`"
-        class="transcript-row"
-        @click="emit('seek', item.start)"
-      >
-        {{ item.time }} · {{ item.title }}
-      </button>
-      <p v-if="!timeline.length" class="empty-state">タイムラインはありません</p>
+    <section v-else-if="tab === 'timeline'" class="panel-content timeline-panel">
+      <div class="timeline-mode-tabs" role="tablist" aria-label="タイムラインの表示">
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="timelineMode === 'highlights'"
+          :class="{ active: timelineMode === 'highlights' }"
+          @click="timelineMode = 'highlights'"
+        >
+          見どころ
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="timelineMode === 'social'"
+          :class="{ active: timelineMode === 'social' }"
+          @click="timelineMode = 'social'"
+        >
+          SNS
+        </button>
+      </div>
+      <div v-if="timelineMode === 'highlights'" class="timeline-highlights">
+        <button
+          v-for="item in timeline"
+          :key="`${item.start}-${item.title}`"
+          class="transcript-row"
+          @click="emit('seek', item.start)"
+        >
+          {{ item.time }} · {{ item.title }}
+        </button>
+        <p v-if="!timeline.length" class="empty-state">タイムラインはありません</p>
+      </div>
+      <PlayerSocialTimeline
+        v-else
+        :video-id="videoId"
+        :youtube-video-id="video.youtube_video_id"
+        :playback-seconds="playbackSeconds"
+        :capture-frame="captureFrame"
+      />
     </section>
     <section v-else class="panel-content player-info-panel">
       <dl class="player-meta">

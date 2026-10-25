@@ -32,6 +32,54 @@ class StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class BlueskySettingsIn(StrictInput):
+    service_url: str = Field(default="https://bsky.social", min_length=1, max_length=500)
+    identifier: str = Field(min_length=1, max_length=255)
+    app_password: str = Field(min_length=1, max_length=255)
+
+
+class MisskeySettingsIn(StrictInput):
+    instance_url: str = Field(min_length=1, max_length=500)
+    token: str = Field(min_length=1, max_length=1000)
+
+
+class SocialImageIn(StrictInput):
+    data_base64: str = Field(min_length=1, max_length=2_800_000)
+    mime_type: str = Field(min_length=1, max_length=40)
+    alt: str = Field(default="", max_length=1000)
+    playback_seconds: float = Field(ge=0, le=31_536_000)
+    width: int = Field(ge=1, le=4096)
+    height: int = Field(ge=1, le=4096)
+
+
+class SocialPostIn(StrictInput):
+    targets: list[str] = Field(min_length=1, max_length=2)
+    text: str = Field(default="", max_length=5000)
+    hashtags: list[str] = Field(default_factory=list, max_length=10)
+    include_video_link: bool = False
+    visibility: str = Field(default="public", max_length=20)
+    images: list[SocialImageIn] = Field(default_factory=list, max_length=4)
+
+    @field_validator("targets")
+    @classmethod
+    def unique_social_targets(cls, value):
+        if len(value) != len(set(value)) or any(item not in ("bluesky", "misskey") for item in value):
+            raise ValueError("投稿先が不正です")
+        return value
+
+    @field_validator("hashtags")
+    @classmethod
+    def validate_social_hashtags(cls, value):
+        normalized = []
+        for tag in value:
+            tag = tag.strip().removeprefix("#")
+            if not re.fullmatch(r"[\w]{1,64}", tag, flags=re.UNICODE):
+                raise ValueError("ハッシュタグは1〜64文字の英数字・アンダースコアで指定してください")
+            if tag.casefold() not in {item.casefold() for item in normalized}:
+                normalized.append(tag)
+        return normalized
+
+
 class StorageIn(StrictInput):
     name: str = Field(min_length=1, max_length=200)
     root_path: str = Field(min_length=1, max_length=1000)

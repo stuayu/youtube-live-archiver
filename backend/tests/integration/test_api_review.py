@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import AuditLog, Channel, Storage, Video, now
+from app.models import AppSetting, AuditLog, Channel, Storage, Video, now
 from test_api_round3 import add_video
 
 
@@ -318,6 +318,96 @@ def test_settings_reject_unknown_keys_and_never_return_api_key(client):
     assert saved.status_code == 200
     assert "secret-for-test" not in saved.text
     assert client.get("/api/settings/recording").status_code == 200
+
+
+@pytest.mark.integration
+def test_social_settings_expose_connection_state_without_credentials(client):
+    response = client.get("/api/settings/social")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["bluesky"]["configured"] is False
+    assert payload["misskey"]["configured"] is False
+    assert "app_password" not in response.text
+    assert "access_token" not in response.text
+
+
+@pytest.mark.integration
+def test_social_search_rejects_malformed_hashtag(client):
+    response = client.get("/api/social/search", params={"tag": "##bad tag"})
+    assert response.status_code == 422
+
+
+@pytest.mark.integration
+def test_social_post_rejects_invalid_capture_data(client):
+    video_id = add_video(add_channel())
+    response = client.post(f"/api/videos/{video_id}/social/post", json={
+        "targets": ["bluesky"], "text": "見どころ", "hashtags": [],
+        "include_video_link": False, "visibility": "public",
+        "images": [{"data_base64": "not-base64", "mime_type": "image/jpeg",
+                    "alt": "再生画面", "playback_seconds": 5, "width": 1280, "height": 720}],
+    })
+    assert response.status_code == 422
+
+
+@pytest.mark.integration
+def test_social_post_rejects_more_than_four_captures(client):
+    video_id = add_video(add_channel())
+    image = {"data_base64": "not-decoded", "mime_type": "image/jpeg", "alt": "frame",
+             "playback_seconds": 1, "width": 1, "height": 1}
+    response = client.post(f"/api/videos/{video_id}/social/post", json={
+        "targets": ["bluesky"], "text": "見どころ", "images": [image] * 5,
+    })
+    assert response.status_code == 422
+
+
+@pytest.mark.integration
+def test_social_credentials_are_encrypted_and_never_returned(client, monkeypatch, tmp_path):
+    from app.config import settings
+    from app.services import social
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(social, "_call_json", lambda *args, **kwargs: {
+        "did": "did:plc:test", "handle": "test.example", "refreshJwt": "refresh-secret",
+    })
+    response = client.put("/api/settings/social/bluesky", json={
+        "service_url": "https://bsky.social", "identifier": "test@example.com",
+        "app_password": "app-password-secret",
+    })
+    assert response.status_code == 200
+    assert response.json()["bluesky"]["configured"] is True
+    assert "app-password-secret" not in response.text
+    assert "refresh-secret" not in response.text
+    with SessionLocal() as db:
+        stored = db.get(AppSetting, "social.bluesky").value["value"]
+        assert "app-password-secret" not in str(stored)
+        assert "refresh-secret" not in str(stored)
+
+
+@pytest.mark.integration
+def test_social_post_reports_partial_success_without_reposting_success(client, monkeypatch):
+    from app.services import social
+
+    video_id = add_video(add_channel())
+    monkeypatch.setattr(social, "_setting", lambda db, provider: {"configured": True})
+    monkeypatch.setattr(social, "_post_bluesky", lambda *args, **kwargs: {"success": True, "url": "https://bsky.app/post/1"})
+    monkeypatch.setattr(social, "_post_misskey", lambda *args, **kwargs: {
+        "success": False, "error": "Misskey で失敗しました",
+    })
+    import base64
+    from io import BytesIO
+    from PIL import Image
+    image_stream = BytesIO()
+    Image.new("RGB", (1280, 720), "navy").save(image_stream, format="JPEG")
+    image = image_stream.getvalue()
+    response = client.post(f"/api/videos/{video_id}/social/post", json={
+        "targets": ["bluesky", "misskey"], "text": "見どころ", "hashtags": ["配信"],
+        "include_video_link": False, "visibility": "public",
+        "images": [{"data_base64": base64.b64encode(image).decode(), "mime_type": "image/jpeg",
+                    "alt": "再生画面", "playback_seconds": 5, "width": 1280, "height": 720}],
+    })
+    assert response.status_code == 200
+    assert response.json()["results"]["bluesky"]["success"] is True
+    assert response.json()["results"]["misskey"]["success"] is False
 
 
 @pytest.mark.integration

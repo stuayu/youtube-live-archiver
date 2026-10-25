@@ -62,6 +62,64 @@ const playbackActionRequired = ref(false)
 const playbackFailed = ref(false)
 const conversionNote = ref('')
 const delay = ref<number | null>(null)
+async function captureCurrentFrame() {
+  const video = videoEl.value
+  if (
+    !video ||
+    video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+    !video.videoWidth ||
+    !video.videoHeight
+  ) {
+    throw new Error('映像の読み込み後にキャプチャしてください')
+  }
+  const capturedAt = video.currentTime
+  let width = video.videoWidth
+  let height = video.videoHeight
+  const initialScale = Math.min(1, 1280 / width, 1280 / height)
+  width = Math.max(1, Math.round(width * initialScale))
+  height = Math.max(1, Math.round(height * initialScale))
+  const sourceCanvas = document.createElement('canvas')
+  sourceCanvas.width = width
+  sourceCanvas.height = height
+  const sourceContext = sourceCanvas.getContext('2d', { alpha: false })
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d', { alpha: false })
+  if (!sourceContext || !context) throw new Error('画像を作成できませんでした')
+  let blob: Blob | null = null
+  let quality = 0.86
+  try {
+    sourceContext.drawImage(video, 0, 0, width, height)
+    for (let resize = 0; resize < 5; resize += 1) {
+      canvas.width = width
+      canvas.height = height
+      context.drawImage(sourceCanvas, 0, 0, width, height)
+      for (const level of [quality, 0.76, 0.66, 0.56]) {
+        blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', level))
+        if (blob && blob.size <= 1_900_000) break
+      }
+      if (blob && blob.size <= 1_900_000) break
+      width = Math.max(1, Math.round(width * 0.8))
+      height = Math.max(1, Math.round(height * 0.8))
+      quality = 0.76
+    }
+  } catch {
+    throw new Error('この映像はブラウザーの制限で画像化できません。再生映像を読み直して試してください')
+  }
+  if (!blob || blob.size > 1_900_000)
+    throw new Error('画像を2 MB以下にできませんでした。別の場面で試してください')
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  let binary = ''
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
+  }
+  return {
+    data_base64: btoa(binary),
+    mime_type: 'image/jpeg' as const,
+    width,
+    height,
+    playback_seconds: capturedAt,
+  }
+}
 let player: import('dplayer').default | undefined
 let hls: import('hls.js').default | undefined
 let hlsRetryTimer: ReturnType<typeof setTimeout> | undefined
@@ -742,6 +800,7 @@ onBeforeUnmount(() => {
           :transcript-page="transcriptPage"
           :playback-seconds="playbackSeconds"
           :following="followingChat"
+          :capture-frame="captureCurrentFrame"
           :storage-name="video.storage_name || ''"
           :conversion-note="conversionNote"
           @search-chat="searchChat"

@@ -5,6 +5,7 @@ import SummarySection from '../components/settings/SummarySection.vue'
 import RecordingSection from '../components/settings/RecordingSection.vue'
 import FormatsSection from '../components/settings/FormatsSection.vue'
 import DisplaySection from '../components/settings/DisplaySection.vue'
+import SocialSection from '../components/settings/SocialSection.vue'
 </script>
 
 <template>
@@ -18,6 +19,7 @@ import DisplaySection from '../components/settings/DisplaySection.vue'
     <RulesSection />
     <TranscriptionSection />
     <SummarySection />
+    <SocialSection />
     <RecordingSection />
     <FormatsSection />
     <DisplaySection />

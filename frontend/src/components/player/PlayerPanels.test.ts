@@ -94,6 +94,171 @@ function renderChat(messages: ChatMessage[], following = true) {
 }
 
 describe('PlayerPanels chat rendering', () => {
+  it('offers social search and posting inside the playback timeline', () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'timeline',
+        video,
+        chat: emptyChat,
+        transcript,
+        timeline: [],
+        summary: null,
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: false,
+        transcriptQuery: '',
+        playbackSeconds: 5,
+        following: true,
+      },
+    })
+
+    expect(wrapper.findAll('button').some((button) => button.text().includes('SNS'))).toBe(true)
+  })
+
+  it('offers capture from the current playback position in the social timeline', async () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'timeline',
+        video,
+        chat: emptyChat,
+        transcript,
+        timeline: [],
+        summary: null,
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: false,
+        transcriptQuery: '',
+        playbackSeconds: 5,
+        following: true,
+      },
+    })
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('SNS'))!
+      .trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('投稿'))!
+      .trigger('click')
+    expect(wrapper.findAll('button').some((button) => button.text().includes('この場面を追加'))).toBe(true)
+  })
+
+  it('adds a selected frame with its playback time and supports removing it before posting', async () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'timeline',
+        video,
+        chat: emptyChat,
+        transcript,
+        timeline: [],
+        summary: null,
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: false,
+        transcriptQuery: '',
+        playbackSeconds: 73,
+        following: true,
+        captureFrame: async () => ({
+          data_base64: 'aW1hZ2U=',
+          mime_type: 'image/jpeg',
+          width: 1280,
+          height: 720,
+          playback_seconds: 73,
+        }),
+      },
+    })
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('SNS'))!
+      .trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '投稿')!
+      .trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('この場面を追加'))!
+      .trigger('click')
+    expect(wrapper.text()).toContain('1/4 枚')
+    expect(wrapper.text()).toContain('1:13')
+    expect(wrapper.text()).toContain('代替テキスト')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('この画像を削除'))!
+      .trigger('click')
+    expect(wrapper.text()).toContain('0/4 枚')
+  })
+
+  it('limits the capture selection to four images', async () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'timeline',
+        video,
+        chat: emptyChat,
+        transcript,
+        timeline: [],
+        summary: null,
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: false,
+        transcriptQuery: '',
+        playbackSeconds: 5,
+        following: true,
+        captureFrame: async () => ({
+          data_base64: 'aW1hZ2U=',
+          mime_type: 'image/jpeg',
+          width: 320,
+          height: 180,
+          playback_seconds: 5,
+        }),
+      },
+    })
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'SNS')!
+      .trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '投稿')!
+      .trigger('click')
+
+    for (let index = 0; index < 4; index += 1) {
+      await wrapper
+        .findAll('button')
+        .find((button) => button.text().includes('この場面を追加'))!
+        .trigger('click')
+    }
+    expect(wrapper.text()).toContain('4/4 枚')
+    expect(
+      (
+        wrapper.findAll('button').find((button) => button.text().includes('この場面を追加'))!
+          .element as HTMLButtonElement
+      ).disabled,
+    ).toBe(true)
+  })
+
   it('explains missing replay, shows covered range, disables retrieval while queued, and seeks to coverage', async () => {
     const wrapper = mount(PlayerPanels, {
       props: {
