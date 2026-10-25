@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     database_connect_retry_seconds: float = 30
     yt_dlp_path: str = "yt-dlp"
     youtube_ip_mode: Literal["prefer_ipv6", "ipv6", "ipv4", "auto"] = "prefer_ipv6"
-    yt_dlp_auto_update: bool = False
+    yt_dlp_auto_update: bool = True
+    yt_dlp_update_channel: Literal["stable", "nightly", "master"] = "nightly"
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
     playable_cache_days: int = 14

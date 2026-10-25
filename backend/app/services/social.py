@@ -7,10 +7,12 @@ import io
 import json
 import os
 import re
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -25,6 +27,12 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 20
 SOCIAL_SETTING_KEYS = {"bluesky": "social.bluesky", "misskey": "social.misskey"}
 SOCIAL_ACCOUNTS_KEY = "social.accounts"
+MIAUTH_FLOW_TTL_SECONDS = 600
+MIAUTH_FLOW_RETENTION_SECONDS = 60
+MAX_MIAUTH_FLOWS = 32
+MIAUTH_PERMISSIONS = ("read:account", "read:notes", "write:notes", "write:drive")
+_MIAUTH_FLOWS: dict[str, dict] = {}
+_MIAUTH_LOCK = threading.Lock()
 
 
 class SocialServiceError(Exception):
@@ -181,7 +189,8 @@ def _safe_external_error(status_code: int | None = None) -> str:
 
 def _call_json(method: str, url: str, *, headers: dict | None = None, params: dict | None = None,
                json_body: dict | None = None, data: dict | None = None, files: dict | None = None,
-               content: bytes | None = None, content_type: str | None = None) -> dict | list:
+               content: bytes | None = None, content_type: str | None = None,
+               allow_ok_false: bool = False) -> dict | list:
     request_headers = dict(headers or {})
     if content_type:
         request_headers["Content-Type"] = content_type
@@ -201,7 +210,7 @@ def _call_json(method: str, url: str, *, headers: dict | None = None, params: di
                 result = json.loads(payload)
                 if not isinstance(result, (dict, list)):
                     raise SocialServiceError("SNS サービスの応答形式が不正です")
-                if isinstance(result, dict) and (result.get("error") or result.get("ok") is False):
+                if isinstance(result, dict) and (result.get("error") or (result.get("ok") is False and not allow_ok_false)):
                     raise SocialServiceError("SNS サービスが要求を受け付けませんでした。設定と投稿内容を確認してください")
                 return result
     except SocialServiceError:
@@ -272,19 +281,136 @@ def configure_bluesky(db: Session, service_url: str, identifier: str, app_passwo
     return public_settings(db)
 
 
-def configure_misskey(db: Session, instance_url: str, token: str) -> dict:
+def _cleanup_miauth_flows(now: float) -> None:
+    for flow_id, flow in list(_MIAUTH_FLOWS.items()):
+        if flow.get("cleanup_at", flow["expires_at"] + MIAUTH_FLOW_RETENTION_SECONDS) <= now:
+            del _MIAUTH_FLOWS[flow_id]
+
+
+def start_misskey_auth(instance_url: str) -> dict:
     instance_url = _validated_instance_url(instance_url)
-    account = _call_json("POST", f"{instance_url}/api/i", json_body={"i": token})
-    if not isinstance(account, dict):
-        raise SocialServiceError("Misskey の応答形式が不正です")
-    _store_account(db, {
-        "provider": "misskey",
-        "instance_url": instance_url,
-        "token": _encrypt(token),
-        "username": str(account.get("username") or ""),
-        "host": account.get("host"),
-    })
-    return public_settings(db)
+    now = time.monotonic()
+    session_id = str(uuid.uuid4())
+    flow_id = uuid.uuid4().hex
+    query = urlencode({"name": "YouTube Live Archiver", "permission": ",".join(MIAUTH_PERMISSIONS)})
+    authorization_url = f"{instance_url}/miauth/{session_id}?{query}"
+    with _MIAUTH_LOCK:
+        _cleanup_miauth_flows(now)
+        active = sum(flow.get("state") == "pending" for flow in _MIAUTH_FLOWS.values())
+        if active >= MAX_MIAUTH_FLOWS:
+            raise SocialServiceError("Misskey の認証処理が多すぎます。少し待ってから再試行してください")
+        _MIAUTH_FLOWS[flow_id] = {
+            "instance_url": instance_url,
+            "session_id": session_id,
+            "state": "pending",
+            "expires_at": now + MIAUTH_FLOW_TTL_SECONDS,
+            "cleanup_at": now + MIAUTH_FLOW_TTL_SECONDS + MIAUTH_FLOW_RETENTION_SECONDS,
+            "checking": False,
+            "result": None,
+        }
+    return {
+        "flow_id": flow_id,
+        "authorization_url": authorization_url,
+        "expires_in": MIAUTH_FLOW_TTL_SECONDS,
+    }
+
+
+def check_misskey_auth(db: Session, flow_id: str) -> dict:
+    now = time.monotonic()
+    with _MIAUTH_LOCK:
+        _cleanup_miauth_flows(now)
+        flow = _MIAUTH_FLOWS.get(flow_id)
+        if flow is None:
+            raise KeyError(flow_id)
+        if flow["state"] != "pending":
+            return flow["result"] or {"state": flow["state"]}
+        if flow["expires_at"] <= now:
+            flow["state"] = "expired"
+            flow["cleanup_at"] = now + MIAUTH_FLOW_RETENTION_SECONDS
+            return {"state": "expired"}
+        if flow["checking"]:
+            return {"state": "pending"}
+        flow["checking"] = True
+        instance_url = flow["instance_url"]
+        session_id = flow["session_id"]
+
+    try:
+        response = _call_json(
+            "POST", f"{instance_url}/api/miauth/{session_id}/check",
+            json_body={}, allow_ok_false=True,
+        )
+    except Exception:
+        with _MIAUTH_LOCK:
+            current = _MIAUTH_FLOWS.get(flow_id)
+            if current and current["state"] == "pending":
+                current["checking"] = False
+        raise
+
+    if not isinstance(response, dict):
+        with _MIAUTH_LOCK:
+            current = _MIAUTH_FLOWS.get(flow_id)
+            if current and current["state"] == "pending":
+                current["checking"] = False
+        raise SocialServiceError("Misskey の認証応答が不正です")
+    if response.get("ok") is False:
+        with _MIAUTH_LOCK:
+            current = _MIAUTH_FLOWS.get(flow_id)
+            if current and current["state"] == "pending":
+                current["checking"] = False
+        return {"state": "pending"}
+
+    token = response.get("token")
+    user = response.get("user")
+    if not isinstance(token, str) or not token or not isinstance(user, dict) or not isinstance(user.get("username"), str) or not user["username"]:
+        with _MIAUTH_LOCK:
+            current = _MIAUTH_FLOWS.get(flow_id)
+            if current and current["state"] == "pending":
+                current["checking"] = False
+        raise SocialServiceError("Misskey の認証応答に必要なアカウント情報がありません")
+
+    with _MIAUTH_LOCK:
+        current = _MIAUTH_FLOWS.get(flow_id)
+        if current is None:
+            raise KeyError(flow_id)
+        if current["state"] != "pending":
+            return current["result"] or {"state": current["state"]}
+        if current["expires_at"] <= time.monotonic():
+            current["state"] = "expired"
+            current["cleanup_at"] = time.monotonic() + MIAUTH_FLOW_RETENTION_SECONDS
+            current["checking"] = False
+            return {"state": "expired"}
+        try:
+            _store_account(db, {
+                "provider": "misskey",
+                "instance_url": instance_url,
+                "token": _encrypt(token),
+                "username": user["username"],
+                "host": user.get("host"),
+            })
+            result = {"state": "connected", "settings": public_settings(db)}
+        except Exception:
+            current["checking"] = False
+            raise
+        current["state"] = "connected"
+        current["result"] = result
+        current["cleanup_at"] = time.monotonic() + MIAUTH_FLOW_RETENTION_SECONDS
+        current["checking"] = False
+        return result
+
+
+def cancel_misskey_auth(flow_id: str) -> bool:
+    now = time.monotonic()
+    with _MIAUTH_LOCK:
+        _cleanup_miauth_flows(now)
+        flow = _MIAUTH_FLOWS.get(flow_id)
+        if flow is None:
+            return False
+        if flow["state"] == "pending":
+            flow["state"] = "cancelled"
+            flow["result"] = {"state": "cancelled"}
+            flow["cleanup_at"] = now + MIAUTH_FLOW_RETENTION_SECONDS
+            flow["checking"] = False
+        return True
 
 
 def disconnect(db: Session, provider: str) -> dict:

@@ -1,4 +1,30 @@
 from .common import *
+from ..schemas import YtDlpSettingsIn, YtDlpUpdateIn
+
+
+@router.get("/settings/ytdlp")
+def get_ytdlp_settings(db: Session = Depends(get_db)):
+    from ..services import ytdlp_update
+    return {**ytdlp_update.preferences(db), **ytdlp_update.status()}
+
+
+@router.put("/settings/ytdlp")
+def put_ytdlp_settings(data: YtDlpSettingsIn, db: Session = Depends(get_db)):
+    from ..services import ytdlp_update
+    return ytdlp_update.save_preferences(db, channel=data.channel, auto_update=data.auto_update)
+
+
+@router.post("/settings/ytdlp/update")
+def update_ytdlp(data: YtDlpUpdateIn):
+    from ..services import ytdlp_update
+    channel = ytdlp_update.preferences()["channel"]
+    try:
+        started = ytdlp_update.trigger_update(channel, force=data.force)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    if not started:
+        raise HTTPException(409, "yt-dlp の更新処理は既に実行中です")
+    return {"started": True, "force": data.force}
 
 @router.get("/settings/transcription")
 def get_transcription_settings(db: Session = Depends(get_db)):

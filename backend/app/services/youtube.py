@@ -12,6 +12,11 @@ from .download import downloader_args
 
 def ytdlp_command() -> list[str]:
     path = settings.yt_dlp_path.strip() or "yt-dlp"
+    if path.lower() == "yt-dlp":
+        from .ytdlp_update import managed_executable
+        managed = managed_executable()
+        if managed is not None:
+            return [str(managed)]
     if path.lower().endswith(".py"):
         if Path(path).is_file():
             return [sys.executable, path]

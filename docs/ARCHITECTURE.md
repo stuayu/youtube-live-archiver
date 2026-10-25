@@ -21,6 +21,7 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 | `app/services/chat.py` | チャット取り込み、リプレイ専用 worker、手動優先 queue、コメント画像処理。 |
 | `app/services/image_cache.py` | 外部サムネイルの host 制限、取得、キャッシュ、失敗 cooldown。 |
 | `app/services/recorder.py` | 録画枠、プロセス管理、yt-dlp / ffmpeg tee、chat subprocess、成果物救出、完了 commit。 |
+| `app/services/ytdlp_update.py` | 公式 stable / nightly / master の確認、SHA-256 と実行版の検証、録画終了後の安全な切り替え、Deno / EJS 検出。 |
 | `app/services/recovery.py` | Remote 状態に基づく復旧判断、`.part` 救出、中間ファイル整理、stem 採番。 |
 | `app/services/backfill.py` | `recording.json` と成果物を使う既存録画の補完・再構築処理。 |
 | `app/services/locks.py` | PostgreSQL session advisory lock と処理別 lock namespace。 |
@@ -33,7 +34,9 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 
 公開 API の prefix は `/api` です。代表例: `/api/channels`、`/api/storages`、`/api/videos`、`/api/recording-rules`、`/api/settings/transcription`、`/api/settings/summary`、`/api/status`、`/api/events`、`/api/search/transcripts`、`/api/quality-presets`。health endpoint は `/health` です。完全な route 定義は `backend/app/api/` を参照してください。
 
-SNS API は複数アカウントの設定・個別解除、Misskey 検索アカウントの選択、ハッシュタグ検索、最大10アカウントへのクロスポストを提供します。アカウント ID を投稿先として受け取り、各アカウントの成否を独立して返します。Bluesky の refresh token と Misskey token は DATA_DIR/social-credentials.key の鍵で Fernet 暗号化し、AppSetting の `social.accounts` に暗号文を保存します。旧 `social.bluesky` / `social.misskey` 設定は、次のアカウント編集時に ID 付きのリストへ移行します。キャプチャ画像は投稿要求の処理中だけメモリに置き、検証後に選択先へ中継します。
+SNS API は複数アカウントの設定・個別解除、Misskey 検索アカウントの選択、ハッシュタグ検索、最大10アカウントへのクロスポストを提供します。Misskey は `/api/settings/social/misskey/miauth` でMiAuthセッションを発行し、`/check` で認証状態を確認します。セッションはプロセス内に10分だけ保持し、コールバックURLは使いません。アカウント ID を投稿先として受け取り、各アカウントの成否を独立して返します。Bluesky の refresh token と Misskey token は DATA_DIR/social-credentials.key の鍵で Fernet 暗号化し、AppSetting の `social.accounts` に暗号文を保存します。Misskey token は認証完了時に backend で暗号化し、ブラウザーには返しません。旧 `social.bluesky` / `social.misskey` 設定は、次のアカウント編集時に ID 付きのリストへ移行します。キャプチャ画像は投稿要求の処理中だけメモリに置き、検証後に選択先へ中継します。
+
+yt-dlp は起動時と24時間ごとに選択チャンネルの GitHub リリースを確認します。アプリ管理の版は `DATA_DIR/tools/yt-dlp` に版ごとの実行ファイルと `current.json` を置き、SHA-256 と `--version` を検証後に manifest を atomic replace して切り替えます。古い実行ファイルをその場で上書きしないため、すでに起動した録画子プロセスは完了し、次回の起動から新しい版を使います。直前版も残し、更新検証に失敗した場合は現行 manifest を維持します。データベース設定 `yt_dlp_update_channel` と `yt_dlp_auto_update` が画面設定を保持し、Deno と yt-dlp-ejs の状態は `/api/status` と更新設定画面へ別々に返します。
 
 ### Frontend
 

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from .common import router
 from ..db import get_db
 from ..models import Video
-from ..schemas import BlueskySettingsIn, MisskeySettingsIn, SocialPostIn
+from ..schemas import BlueskySettingsIn, MisskeyAuthStartIn, SocialPostIn
 from ..services import social as social_service
 
 
@@ -28,14 +28,29 @@ def delete_bluesky_settings(db: Session = Depends(get_db)):
     return social_service.disconnect(db, "bluesky")
 
 
-@router.put("/settings/social/misskey")
-def put_misskey_settings(data: MisskeySettingsIn, db: Session = Depends(get_db)):
+@router.post("/settings/social/misskey/miauth")
+def start_misskey_auth(data: MisskeyAuthStartIn):
     try:
-        return social_service.configure_misskey(db, data.instance_url, data.token)
+        return social_service.start_misskey_auth(data.instance_url)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     except social_service.SocialServiceError as exc:
         raise HTTPException(400, str(exc))
+
+
+@router.post("/settings/social/misskey/miauth/{flow_id}/check")
+def check_misskey_auth(flow_id: str, db: Session = Depends(get_db)):
+    try:
+        return social_service.check_misskey_auth(db, flow_id)
+    except KeyError:
+        raise HTTPException(404, "Misskey の認証処理が見つかりません。最初からやり直してください")
+    except social_service.SocialServiceError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.delete("/settings/social/misskey/miauth/{flow_id}")
+def cancel_misskey_auth(flow_id: str):
+    return {"cancelled": social_service.cancel_misskey_auth(flow_id)}
 
 
 @router.delete("/settings/social/misskey")

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from pydantic import BaseModel, ConfigDict, Field, model_validator, AfterValidator, BeforeValidator, PlainSerializer, ValidationInfo, field_validator
-from typing import Annotated
+from typing import Annotated, Literal
 import re
 
 
@@ -38,9 +38,8 @@ class BlueskySettingsIn(StrictInput):
     app_password: str = Field(min_length=1, max_length=255)
 
 
-class MisskeySettingsIn(StrictInput):
+class MisskeyAuthStartIn(StrictInput):
     instance_url: str = Field(min_length=1, max_length=500)
-    token: str = Field(min_length=1, max_length=1000)
 
 
 class SocialImageIn(StrictInput):
@@ -427,6 +426,15 @@ class SummarySettingsIn(StrictInput):
         if any(getattr(self, key) is None for key in self.model_fields_set - {"openrouter_api_key"}):
             raise ValueError("null は指定できません")
         return self
+
+
+class YtDlpSettingsIn(StrictInput):
+    channel: Literal["stable", "nightly", "master"]
+    auto_update: bool
+
+
+class YtDlpUpdateIn(StrictInput):
+    force: bool = False
 
 
 class ChannelPreviewIn(StrictInput):

@@ -606,8 +606,21 @@ def test_status_attention_and_job_run_statistics(client, monkeypatch, tmp_path):
 @pytest.mark.integration
 def test_status_attention_is_empty_without_problems(client, monkeypatch):
     from app import main
+    from app.services import ytdlp_update
     monkeypatch.setattr(main, "_tool_cache", {"yt_dlp_available": True, "yt_dlp_version": "fake",
                                                "yt_dlp_error": None, "ffmpeg_available": True, "ffprobe_available": True})
+    monkeypatch.setattr(ytdlp_update, "dependency_status", lambda: {
+        "deno_available": True, "deno_version": "2.5.0", "deno_supported": True, "ejs_available": True,
+    })
+    monkeypatch.setattr(ytdlp_update, "status", lambda: {
+        "version": "fake", "latest_version": "fake", "latest_release_date": None,
+        "release_date": None, "checked_at": None, "stale": False, "update_available": False,
+        "update_overdue": False, "latest_check_failed": False, "update_enabled": False,
+        "update_channel": "nightly", "installed_channel": "nightly", "managed": True,
+        "managed_update_supported": True, "update_phase": "idle", "update_error": None,
+        "deno_available": True, "deno_version": "2.5.0", "deno_supported": True,
+        "ejs_available": True,
+    })
     status = client.get("/api/status")
     assert status.status_code == 200 and status.json()["attention"] == [
         {"level": "warning", "code": "storage_missing", "message": "保存先が登録されていません"}

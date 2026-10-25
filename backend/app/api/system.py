@@ -45,13 +45,22 @@ def api_status(db: Session = Depends(get_db)):
                   "yt_dlp_release_date": version_status.get("release_date"),
                   "yt_dlp_latest_version": version_status.get("latest_version"),
                   "yt_dlp_latest_release_date": version_status.get("latest_release_date"),
-                  "yt_dlp_update_available": version_status.get("stale"),
+                  "yt_dlp_update_available": version_status.get("update_available", version_status.get("stale")),
                   "yt_dlp_update_overdue": version_status.get("update_overdue"),
                   "yt_dlp_latest_check_failed": version_status.get("latest_check_failed"),
                   "yt_dlp_checked_at": version_status.get("checked_at"),
                   "yt_dlp_auto_update": version_status.get("update_enabled", settings.yt_dlp_auto_update),
+                  "yt_dlp_update_channel": version_status.get("update_channel", settings.yt_dlp_update_channel),
+                  "yt_dlp_installed_channel": version_status.get("installed_channel"),
+                  "yt_dlp_managed": version_status.get("managed", False),
+                  "yt_dlp_managed_update_supported": version_status.get("managed_update_supported", False),
+                  "yt_dlp_update_phase": version_status.get("update_phase"),
                   "yt_dlp_update_error": version_status.get("update_error"),
-                  "yt_dlp_update_in_progress": is_update_in_progress()})
+                  "yt_dlp_update_in_progress": is_update_in_progress(),
+                  "yt_dlp_deno_available": version_status.get("deno_available", False),
+                  "yt_dlp_deno_version": version_status.get("deno_version"),
+                  "yt_dlp_deno_supported": version_status.get("deno_supported", False),
+                  "yt_dlp_ejs_available": version_status.get("ejs_available", False)})
     active_channels = db.scalar(select(func.count(Channel.id)).where(Channel.enabled.is_(True), Channel.archived.is_(False))) or 0
     error_channels = db.scalar(select(func.count(Channel.id)).where(Channel.enabled.is_(True), Channel.consecutive_failures > 0)) or 0
     oldest_success = db.scalar(select(func.min(Channel.last_success_at)).where(Channel.enabled.is_(True), Channel.archived.is_(False)))
@@ -91,6 +100,12 @@ def api_status(db: Session = Depends(get_db)):
         message = (f"yt-dlp {version_status.get('latest_version')} が7日以上前に公開済みです。更新を確認してください"
                    if overdue else f"yt-dlp の新しい版 {version_status.get('latest_version')} が公開されています")
         attention.append({"level": "warning", "code": "yt_dlp_outdated", "message": message})
+    if not version_status.get("deno_available") or not version_status.get("deno_supported"):
+        attention.append({"level": "warning", "code": "yt_dlp_deno_missing",
+                          "message": "YouTube の完全な取得には Deno 2.3.0 以降が必要です"})
+    if not version_status.get("ejs_available"):
+        attention.append({"level": "warning", "code": "yt_dlp_ejs_missing",
+                          "message": "YouTube の JavaScript challenge 対応に yt-dlp-ejs が必要です"})
     if not tools["ffmpeg_available"]: attention.append({"level": "error", "code": "ffmpeg_missing", "message": "ffmpeg が見つかりません"})
     if not tools["ffprobe_available"]: attention.append({"level": "error", "code": "ffprobe_missing", "message": "ffprobe が見つかりません"})
     failed_count = state_counts.get("RECORDING_FAILED", 0) + state_counts.get("WAITING_FOR_STORAGE", 0)

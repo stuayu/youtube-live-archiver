@@ -183,7 +183,8 @@ notepad C:\yla\backend\.env
 | `STORAGE_ROOT` | `./data/archive` | 既定の保存先。例: `D:/yla-archive` |
 | `DATA_DIR` | `./data` | アイコン、チャット画像、配信予定サムネイル（`thumbnails`）、組み込み PostgreSQL の保存先。 |
 | `REMOTE_IMAGE_FETCH_ENABLED` | `true` | 配信予定サムネイルを許可された画像ホストから取得する設定。`false` では未キャッシュ画像を取得しません。 |
-| `YT_DLP_AUTO_UPDATE` | `false` | 録画停止中の yt-dlp 自動更新。更新前後の版確認と失敗時の復元を行います。 |
+| `YT_DLP_AUTO_UPDATE` | `true` | yt-dlp の最新版を自動確認し、選択チャンネルの更新を適用します。設定画面から変更できます。 |
+| `YT_DLP_UPDATE_CHANNEL` | `nightly` | 初回設定の yt-dlp チャンネル（`stable` / `nightly` / `master`）。設定画面から切り替えできます。 |
 | `YOUTUBE_IP_MODE` | `prefer_ipv6` | YouTube の IP。prefer_ipv6 は IPv6 到達性を確認して選択、ipv6 / ipv4 固定、auto は OS 任せ。 |
 | `DATABASE_URL` | 空（組み込み PostgreSQL） | 外部の PostgreSQL を使う場合の接続 URL（手順 7）。 |
 | `TRANSCRIPTION_ENABLED` | `true` | 文字起こし。GPU が無い PC では時間がかかるため、不要なら `false` にします。 |
@@ -339,17 +340,11 @@ Set-Location C:\yla
 
 5. `Get-Content C:\yla\logs\service-stdout.log -Tail 20` と、ホーム画面の「要対応」を確認します。
 
-YouTube 側の仕様変更で録画やチャンネル確認が失敗するようになった場合は、yt-dlp だけを更新してサービスを再起動します。
+YouTube 側の仕様変更で録画やチャンネル確認が失敗する場合は、「設定」→「yt-dlp の更新」から更新します。yt-dlp 公式は通常利用者に `nightly` を推奨しているため、初期チャンネルも `nightly` です。`stable`、`nightly`、`master` を選び、自動更新の有効・無効を設定できます。自動更新は起動時と24時間ごとに確認します。
 
-```powershell
-C:\yla\backend\.venv\Scripts\python.exe -m pip install -U yt-dlp
-```
+更新時は公式 GitHub リリースの実行ファイルをデータディレクトリの `tools/yt-dlp` に取得し、SHA-256 と起動後のバージョンを確かめてから切り替えます。実行中の録画・ダウンロードは完了まで続き、更新中は新しい処理の開始を待たせます。検証に失敗した場合は現行版を使い続け、直前版の実行ファイルも残します。「同じ版を強制再インストール」は、選択中のチャンネルの最新版を再取得します。
 
-`YT_DLP_AUTO_UPDATE=true` を設定すると、起動時と24時間ごとの確認で録画中でないことを確かめ、
-サービスが使う `sys.executable -m pip install -U yt-dlp` で自動更新します。既定は `false` です。
-更新後の `yt-dlp --version` 確認に失敗した場合、更新前の版へ戻します。`/api/status` とホーム画面の
-システム詳細に、使用版・リリース日・確認時刻を表示します。使用版のリリースから30日以上経過すると、
-ホーム画面の「対応が必要な項目」に警告を表示します。
+YouTube の完全な取得には Deno 2.3.0 以降と yt-dlp-ejs が必要です。Python 依存関係から導入する場合は `yt-dlp[default]` により EJS が入ります。設定画面に Deno と EJS の検出状態を別々に表示し、Deno 未導入時は[公式インストール手順](https://docs.deno.com/runtime/getting_started/installation/)を案内します。Bot 判定やログイン要求が続く場合は yt-dlp の更新だけで解消しないことがあり、対象チャンネルの Cookie Profile を確認してください。Cookie をログや共有資料へ貼り付けないでください。
 
 #### 11. 旧版から更新する場合
 
@@ -369,7 +364,7 @@ C:\yla\backend\.venv\Scripts\python.exe -m pip install -U yt-dlp
    & '<表示された python.exe のパス>' -m pip install -r C:\yla\backend\requirements.txt
    ```
 
-   yt-dlp は依存パッケージに含まれるようになりました。`YT_DLP_PATH` の実行ファイルが見つからない場合は、同じ Python の yt-dlp を自動で使います。
+   yt-dlp と EJS は依存パッケージに含まれます。`YT_DLP_PATH` の実行ファイルが見つからない場合は、同じ Python の yt-dlp を自動で使います。アプリ管理の更新実行ファイルを使う場合は、`YT_DLP_PATH` を既定値の `yt-dlp` にしてください。
 4. 画面をビルドし直します（`npm ci` と `npm run build`）。
 5. サービスを起動し、`http://localhost:8000/api/status` とログ、画面を確認します。
 6. （任意）サービスを登録し直すと、停止時の待ち時間（30 秒）などの新しい設定が反映されます。`.\scripts\uninstall-windows-service.ps1` のあと `.\scripts\install-windows-service.ps1` を実行します。PostgreSQL のサービス名は自動で検出します。
@@ -558,7 +553,7 @@ DPlayer の標準ホットキーを有効にしています。歯車メニュー
 
 再生画面の「タイムライン」から「SNS」を開くと、Bluesky と接続済み Misskey インスタンスのハッシュタグ検索、投稿ができます。検索は明示的に実行し、結果は投稿時刻順にまとめて表示します。サービスごとの失敗は別々に表示し、片方の検索エラーで他方の結果を隠しません。
 
-先に「設定」→「SNS 連携」で接続します。サービスごとに複数アカウントを登録でき、登録済みアカウントを個別に解除できます。Bluesky は通常のアカウントパスワードではなくアプリパスワードを使います。Misskey の API トークンには read:account、read:notes、write:notes、write:drive の権限が必要です。Misskey の検索アカウントも選択できます。認証情報の保存と外部送信の詳細は[プライバシーと公開前の確認](docs/PRIVACY_AND_RELEASE.md)を参照してください。
+先に「設定」→「SNS 連携」で接続します。サービスごとに複数アカウントを登録でき、登録済みアカウントを個別に解除できます。Bluesky は通常のアカウントパスワードではなくアプリパスワードを使います。Misskey はインスタンス URL を入力して「Misskeyと連携」を押し、開いた公式認証画面で権限を確認して許可します。アクセストークンの手入力は不要です。検索・投稿・画像添付のため read:account、read:notes、write:notes、write:drive を要求します。Misskey の検索アカウントも選択できます。認証情報の保存と外部送信の詳細は[プライバシーと公開前の確認](docs/PRIVACY_AND_RELEASE.md)を参照してください。
 
 投稿画面では最大10アカウントから送信先を複数選び、本文、ハッシュタグ、Misskey の公開範囲を確認できます。同じ内容を複数の Bluesky / Misskey アカウントへクロスポストできます。YouTube 動画リンクは初期状態で含まれません。再生中の映像から JPEG キャプチャを最大4枚追加し、各画像の代替テキストを編集できます。キャプチャは長辺1280ピクセル・1枚2 MB以下へ変換され、投稿を送信するまで外部サービスへ渡りません。いずれかの送信先で失敗した場合は成功したアカウントの選択を外し、失敗先だけを再試行できます。
 
