@@ -112,7 +112,9 @@ def _process_transcription(job_id):
             job.status, job.finished_at = "disabled", now(); db.commit(); return
         opts = effective_settings(db)
         video.transcription_status = "processing"; video.transcription_started_at = now(); video.transcription_error = None
-        job.status = "processing"; job.attempts += 1; job.started_at = now(); job.updated_at = now(); db.commit()
+        job.status = "processing"; job.attempts += 1; job.error = None
+        job.next_attempt_at = None; job.finished_at = None
+        job.started_at = now(); job.updated_at = now(); db.commit()
         source_dir = Path(video.file_path)
         from .backfill import media_file
         source = media_file(source_dir) if source_dir.is_dir() else source_dir

@@ -21,7 +21,9 @@ def inspect_media(path: Path, ffprobe: str | None = None, timeout: float = 30) -
         if result.returncode:
             return None
         payload = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError):
+        if not isinstance(payload, dict):
+            return None
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return None
     fmt = payload.get("format") or {}
     streams = payload.get("streams") or []

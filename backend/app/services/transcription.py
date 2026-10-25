@@ -1,5 +1,8 @@
 """Transcript normalization, serialization, and faster-whisper adapter."""
+import logging
 import re
+
+log = logging.getLogger(__name__)
 
 
 def preprocess_segments(segments):
@@ -63,11 +66,18 @@ def load_whisper_model(*, model_name, device, compute_type):
     actual_device = device
     actual_compute = compute_type
     if device == "auto":
+        cuda_available = False
         try:
             import ctranslate2
-            actual_device = "cuda" if ctranslate2.get_cuda_device_count() else "cpu"
+            cuda_available = bool(ctranslate2.get_cuda_device_count())
         except Exception:
-            actual_device = "cpu"
+            pass
+        if cuda_available:
+            try:
+                return WhisperModel(model_name, device="cuda", compute_type=compute_type)
+            except Exception as exc:
+                log.warning("CUDA Whisper initialization failed; retrying with CPU (%s)", type(exc).__name__)
+        actual_device = "cpu"
     if actual_device == "cpu" and compute_type == "auto":
         actual_compute = "int8"
     return WhisperModel(model_name, device=actual_device, compute_type=actual_compute)

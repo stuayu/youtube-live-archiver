@@ -1703,7 +1703,15 @@ def test_tee_creates_archive_and_hls_segments(tmp_path, fake_youtube, caplog):
     assert _wait_for(lambda: _get_video(video_id).status == "RECORDING")
     row = _get_video(video_id)
     hls_dir = tmp_path / "archive" / "live" / "tee-live"
-    assert _wait_for(lambda: (hls_dir / "index.m3u8").is_file() and any(hls_dir.glob("segment_*.ts")), timeout=18)
+    playlist_ready = _wait_for(lambda: (hls_dir / "index.m3u8").is_file() and any(hls_dir.glob("segment_*.ts")), timeout=18)
+    if not playlist_ready:
+        with SessionLocal() as db:
+            fallbacks = db.scalars(select(AuditLog).where(
+                AuditLog.video_id == video_id, AuditLog.action == "LIVE_PLAYBACK_FALLBACK")).all()
+            failure_details = [{"reason": item.reason, "return_code": (item.details or {}).get("return_code"),
+                                "ffmpeg": ((item.details or {}).get("ffmpeg") or "").replace(str(tmp_path), "<tmp>")}
+                               for item in fallbacks]
+        raise AssertionError(f"tee HLS output did not appear; fallback diagnostics={failure_details!r}")
     index = (hls_dir / "index.m3u8").read_text(encoding="utf-8")
     assert "segment_" in index
     fake_youtube.set_state({"channels": {}, "videos": {"tee-live": {
@@ -1727,8 +1735,12 @@ def test_tee_creates_archive_and_hls_segments(tmp_path, fake_youtube, caplog):
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg is required for tee integration")
+@pytest.mark.parametrize("terminal_error", [
+    "Did not get any data blocks",
+    "Video is no longer live. Giving up after 3 retries",
+])
 def test_tee_live_end_error_keeps_verified_remux_without_fallback(
-        tmp_path, fake_youtube, monkeypatch):
+        tmp_path, fake_youtube, monkeypatch, terminal_error):
     from app.services import recorder
 
     monkeypatch.setattr(recorder, "LIVE_END_INSPECT_DELAYS_SECONDS", (0, 0))
@@ -1737,7 +1749,7 @@ def test_tee_live_end_error_keeps_verified_remux_without_fallback(
     fake_youtube.set_state({"channels": {}, "videos": {key: {
         "live_status": "is_live", "release_timestamp": int(time.time()) - 1,
         "recording": {"mode": "live", "ended": False,
-                      "terminal_error": "Did not get any data blocks"},
+                      "terminal_error": terminal_error},
     }}})
     recorder_worker()
     assert _wait_for(lambda: _get_video(video_id).status == "RECORDING")
@@ -1746,7 +1758,7 @@ def test_tee_live_end_error_keeps_verified_remux_without_fallback(
         "live_status": "was_live", "duration": 3,
         "release_timestamp": int(time.time()) - 2,
         "recording": {"mode": "live", "ended": True,
-                      "terminal_error": "Did not get any data blocks"},
+                      "terminal_error": terminal_error},
     }}})
 
     assert _wait_for(lambda: _get_video(video_id).status == "ACTIVE", timeout=30), (

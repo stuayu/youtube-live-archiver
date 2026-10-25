@@ -34,6 +34,24 @@ def test_tee_outputs_are_relative_to_the_recording_directory(tmp_path):
     assert args[-1].endswith("]../../live/abc123/index.m3u8")
 
 
+def test_tee_output_paths_handle_symlinked_storage_roots(tmp_path):
+    import os
+
+    storage = tmp_path / "canonical-storage"
+    storage.mkdir()
+    storage_alias = tmp_path / "storage-alias"
+    storage_alias.symlink_to(storage, target_is_directory=True)
+    output_dir = storage_alias / "channel" / "video"
+    output_dir.mkdir(parents=True)
+    hls_dir = storage / "live" / "abc123"
+
+    args = tee_args("ffmpeg", hls_dir, output_dir / "video.mkv")
+
+    expected = Path(os.path.relpath(hls_dir.resolve(), output_dir.resolve())).as_posix()
+    assert f"hls_segment_filename={expected}/segment_%06d.ts" in args[-1]
+    assert args[-1].endswith(f"]{expected}/index.m3u8")
+
+
 def test_hls_segments_are_published_only_after_complete_write(tmp_path):
     args = tee_args("ffmpeg", tmp_path / "live", tmp_path / "archive.mkv")
     assert "hls_flags=append_list+independent_segments+temp_file" in args[-1]

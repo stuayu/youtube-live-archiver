@@ -32,21 +32,55 @@ def test_retry_backoff_is_exponential_and_capped():
     assert processing.retry_delay_seconds(30) == 86400
 
 
+def test_auto_whisper_falls_back_to_cpu_when_cuda_runtime_fails(monkeypatch):
+    import sys
+
+    calls = []
+
+    def whisper_model(model_name, *, device, compute_type):
+        calls.append((model_name, device, compute_type))
+        if device == "cuda":
+            raise RuntimeError("CUDA runtime is unavailable")
+        return object()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=whisper_model))
+    monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(get_cuda_device_count=lambda: 1))
+
+    model = transcription.load_whisper_model(model_name="large-v3-turbo", device="auto", compute_type="auto")
+
+    assert model is not None
+    assert calls == [
+        ("large-v3-turbo", "cuda", "auto"),
+        ("large-v3-turbo", "cpu", "int8"),
+    ]
+
+
 def test_failure_updates_transcription_only_and_schedules_retry(monkeypatch, tmp_path):
     db = db_session(tmp_path)
     video = Video(youtube_video_id="abc", channel_id=1, status="ACTIVE", file_path=str(tmp_path), transcription_status="processing")
     db.add(video); db.flush(); video_id = video.id
-    job = ProcessingJob(video_id=video.id, kind="TRANSCRIBE", status="processing", attempts=1, payload={}, created_at=now(), updated_at=now())
+    job = ProcessingJob(video_id=video.id, kind="TRANSCRIBE", status="processing", attempts=1, payload={},
+                        error="previous CUDA runtime failure", created_at=now(), updated_at=now())
     db.add(job); db.commit(); job_id = job.id
     db.close()
-    monkeypatch.setattr(processing, "SessionLocal", sessionmaker(bind=processing_test_engine(tmp_path)))
+    factory = sessionmaker(bind=processing_test_engine(tmp_path))
+    monkeypatch.setattr(processing, "SessionLocal", factory)
     monkeypatch.setattr(processing, "extract_whisper_audio", lambda source, **kw: tmp_path / "audio.wav")
-    monkeypatch.setattr(processing, "load_whisper_model", lambda **kw: object())
+    observed_job_errors = []
+    def load_model(**kwargs):
+        check = factory()
+        try:
+            observed_job_errors.append(check.get(ProcessingJob, job_id).error)
+        finally:
+            check.close()
+        return object()
+    monkeypatch.setattr(processing, "load_whisper_model", load_model)
     monkeypatch.setattr(processing, "transcribe_audio", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mock failure")))
     (tmp_path / "media.mp4").write_bytes(b"media")
     monkeypatch.setattr("app.services.backfill.media_file", lambda _: tmp_path / "media.mp4")
     monkeypatch.setattr(processing.settings, "processing_max_attempts", 5)
     processing._process_transcription(job_id)
+    assert observed_job_errors == [None]
     check = sessionmaker(bind=processing_test_engine(tmp_path))()
     saved = check.get(Video, video_id); queued = check.get(ProcessingJob, job_id)
     assert saved.status == "ACTIVE"

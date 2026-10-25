@@ -453,7 +453,16 @@ def classify_attempt_result(exit_code: int | None, media_available: bool,
 
 def _has_live_end_data_blocks_error(stderr: bytes | str | None) -> bool:
     message = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else (stderr or "")
-    return re.search(r"(?im)^ERROR: Did not get any data blocks\s*$", message) is not None
+    return "did not get any data blocks" in message.lower()
+
+
+def _has_live_end_not_live_error(stderr: bytes | str | None) -> bool:
+    message = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else (stderr or "")
+    return re.search(r"(?i)video is no longer live.*giving up after \d+ retries", message) is not None
+
+
+def _has_live_end_error(stderr: bytes | str | None) -> bool:
+    return _has_live_end_data_blocks_error(stderr) or _has_live_end_not_live_error(stderr)
 
 
 def _retryable_archive_backfill_media(video: Video, target: Path, profile: str,
@@ -524,9 +533,7 @@ def _inspect_live_after_exit(video_id: str, cookie_profile: str | None,
         inspected = inspect(url, cookie_profile)
     except Exception:
         return {}
-    error_text = (terminal_stderr.decode("utf-8", "replace") if isinstance(terminal_stderr, bytes)
-                  else str(terminal_stderr)).lower()
-    terminal_hint = "did not get any data blocks" in error_text
+    terminal_hint = _has_live_end_error(terminal_stderr)
     if terminal_hint and media and media.is_file():
         from .recovery import probe_duration
         actual = probe_duration(media)
@@ -896,7 +903,7 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                 yt_proc.returncode not in (None, 0)
                 and ff_proc.returncode == 0
                 and remuxed
-                and _has_live_end_data_blocks_error(yt_stderr)
+                and _has_live_end_error(yt_stderr)
             )
             if requested_stop:
                 proc = ff_proc
@@ -1687,7 +1694,7 @@ def record_video(video_id: int) -> None:
                                     "youtube_video_id=%s path=%s attempt=%s",
                                     v.youtube_video_id, backfill_media, v.recovery_attempts)
                         return
-                    if is_live and _has_live_end_data_blocks_error(stderr):
+                    if is_live and _has_live_end_error(stderr):
                         media = next((target / f"{output_stem}.{ext}"
                                       for ext in ("mkv", "mp4", "ts", "webm", "m4v", "mov")
                                       if (target / f"{output_stem}.{ext}").is_file()), None)
@@ -1702,7 +1709,8 @@ def record_video(video_id: int) -> None:
                                                             stderr, media, v.id)
                         db.refresh(v)
                         verified_media = _verified_live_end_media(
-                            v, target, output_stem, inspected, media, allow_is_live=True)
+                            v, target, output_stem, inspected, media,
+                            allow_is_live=_has_live_end_data_blocks_error(stderr))
                         if verified_media is not None:
                             if inspected.get("live_status") == "is_live":
                                 inspected = {**inspected, "live_status": "was_live"}
@@ -1719,7 +1727,8 @@ def record_video(video_id: int) -> None:
                             v.raw_metadata = {
                                 **(v.raw_metadata or {}),
                                 "live_end_exit_evidence": {
-                                    "error": "Did not get any data blocks",
+                                    "error": ("Did not get any data blocks" if _has_live_end_data_blocks_error(stderr)
+                                              else "Video is no longer live after retries"),
                                     "exit_code": proc.returncode,
                                     "duration_seconds": duration,
                                     "youtube_duration_seconds": expected,

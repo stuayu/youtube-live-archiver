@@ -118,7 +118,7 @@ yt-dlp output の stem は最初の live が `video`、後続 live が `video-pa
 
 ## Recorder、同時実行、排他
 
-`MAX_CONCURRENT_LIVE_RECORDINGS` と `MAX_CONCURRENT_ARCHIVE_DOWNLOADS` は別枠です。Recorder は process 内の semaphore と video ごとの PostgreSQL advisory lock を使います。chat replay / live chat は別 yt-dlp process です。Recorder は heartbeat を更新し、保存失敗時は transaction を rollback して次の周期に再試行します。90秒以上 stale な `RECORDING` は、lock 取得後に行を読み直し、まだ stale の場合だけ `RECORDING_FAILED` として reconciliation します。
+`MAX_CONCURRENT_LIVE_RECORDINGS` と `MAX_CONCURRENT_ARCHIVE_DOWNLOADS` は別枠です。Recorder は process 内の semaphore と video ごとの PostgreSQL advisory lock を使います。chat replay / live chat は別 yt-dlp process です。Recorder は heartbeat を更新し、保存失敗時は transaction を rollback して次の周期に再試行します。90秒以上 stale な `RECORDING` は、lock 取得後に行を読み直し、まだ stale の場合だけ `RECORDING_FAILED` として reconciliation します。配信終了時の `Did not get any data blocks` と `Video is no longer live` は終了候補として扱いますが、終端状態と YouTube / 実ファイルの duration が一致することを確認した場合だけアーカイブを完了します。
 
 Lock key は namespace と ID を BLAKE2b 64-bit hash 化します。channel monitor は `channel-monitor:{channel_id}`、Recorder は `video-recorder:{youtube_video_id}`、Retention は `video-retention:{youtube_video_id}` を使います。再試行と手動削除も Recorder lock を取得し、row を読み直して録画状態との競合を防ぎます。PostgreSQL 以外、取得失敗、所有確認不能は fail closed で処理を飛ばします。session advisory lock は専用 connection を critical section 中保持し、transaction は query 後に commit します。
 
@@ -144,9 +144,9 @@ Docker Compose の backend は `recorder_shutdown_timeout_seconds` より長い 
 
 yt-dlp の chat offset は元配信開始基準です。`recording_start_offset_ms` を引いてローカル media 時刻にします。チャット replay 再取得後に元時刻を再基準化し、動画再生位置移動時は画面のチャット範囲を追従更新します。
 
-追っかけ HLS は `live/<video_id>` 下で録画中に追記し、byte budget を超えると古い segment を整理します。DB の `live_hls_path` で登録された安全な path のみ配信します。playlist は no-store、segment は immutable cache です。アーカイブ成功検証後だけ sidecar を整理します。
+追っかけ HLS は `live/<video_id>` 下で録画中に追記し、byte budget を超えると古い segment を整理します。FFmpeg に渡す相対パスは、録画ディレクトリと HLS ディレクトリを両方 resolve してから計算し、symlink を通して保存先にアクセスした場合も出力先がずれないようにします。DB の `live_hls_path` で登録された安全な path のみ配信します。playlist は no-store、segment は immutable cache です。アーカイブ成功検証後だけ sidecar を整理します。
 
-文字起こしと要約は `processing_jobs` に入り、録画 status から独立しています。文字起こしは faster-whisper、要約は opt-in で OpenRouter を使います。全文検索は正規化文字起こし segment をページングし、PostgreSQL `pg_trgm` が使えれば検索候補に利用し、無い場合は ILIKE へ fallback します。
+文字起こしと要約は `processing_jobs` に入り、録画 status から独立しています。文字起こしは faster-whisper を使います。device=`auto` は CUDA モデルの初期化に失敗した場合に CPU / int8 へ fallback し、各試行の開始時に前回エラーを消して現在の失敗と混同しないようにします。要約は opt-in で OpenRouter を使います。全文検索は正規化文字起こし segment をページングし、PostgreSQL `pg_trgm` が使えれば検索候補に利用し、無い場合は ILIKE へ fallback します。
 
 ## 設定と運用上の境界
 

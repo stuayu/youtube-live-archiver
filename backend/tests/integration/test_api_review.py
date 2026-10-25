@@ -631,6 +631,27 @@ def test_lazy_probe_failure_is_remembered_and_uses_a_short_timeout(client, monke
         assert "media_probe_failed_at" not in metadata
 
 
+@pytest.mark.integration
+def test_video_list_survives_ffprobe_without_stdout(client, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from app.services import media
+
+    channel_id = add_channel()
+    directory = tmp_path / "empty-ffprobe-output"
+    directory.mkdir()
+    (directory / "video.mkv").write_bytes(b"media")
+    video_id = add_video(channel_id, file_path=str(directory))
+    monkeypatch.setattr(media.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stdout=None, stderr=""))
+
+    response = client.get("/api/videos", params={"scope": "archive"})
+
+    assert response.status_code == 200, response.text
+    assert any(row["id"] == str(video_id) for row in response.json())
+    with SessionLocal() as db:
+        assert db.get(Video, video_id).raw_metadata["media_probe_failed_at"]
+
+
 def test_source_media_ignores_unmerged_format_downloads(tmp_path):
     import json
     from app.services.media import source_media

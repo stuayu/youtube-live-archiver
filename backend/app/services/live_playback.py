@@ -62,7 +62,7 @@ def tee_args(ffmpeg_path: str, hls_dir: Path, output_file: Path) -> list[str]:
     """Return tee arguments with output paths relative to the archive directory."""
     hls_dir.mkdir(parents=True, exist_ok=True)
     transport_stream = output_file.with_suffix(".tee.ts")
-    relative_hls_dir = Path(os.path.relpath(hls_dir, output_file.parent)).as_posix()
+    relative_hls_dir = Path(os.path.relpath(hls_dir.resolve(), output_file.parent.resolve())).as_posix()
     hls_output = (
         f"[f=hls:hls_time=6:hls_list_size=0:"
         f"hls_flags=append_list+independent_segments+temp_file:"
