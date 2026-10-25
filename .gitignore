@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.pytest-tmp/
+.pytest-fixture-probe/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Playwright
+test-results/
+playwright-report/
+
+# Env
+.env
+.env.*
+!.env.example
+cookies.txt
+cookies*.txt
+*.cookies
+*.dump
+*.dump.gz
+*.pgdump
+*.pgdump.gz
+*.sql
+*.sql.gz
+*.backup
+*.tar
+*.tar.gz
+*.sqlite
+*.sqlite3
+*.log
+
+# Recordings / data
+data/
+recordings/
+archive/
+.e2e-data/
+
+# Screenshots / logs
+shots/
+logs/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local agent configuration and prompts
+.claude/

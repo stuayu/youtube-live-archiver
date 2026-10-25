@@ -1,0 +1,58 @@
+import { expect, test } from './helpers'
+import { go } from './helpers'
+
+test('archive filters restore, paging works, labels are Japanese, and recording cannot be deleted', async ({
+  page,
+}) => {
+  await page.goto('/?tab=videos')
+  const sort = page.getByLabel('並び順')
+  await expect(sort).toHaveValue('date')
+  const keyword = page.getByPlaceholder('タイトル・説明')
+  await keyword.fill('歌枠')
+  await expect(page).toHaveURL(/[?&]q=%E6%AD%8C%E6%9E%A0/)
+  await page.reload()
+  await go(page, 'アーカイブ')
+  await expect(page.getByPlaceholder('タイトル・説明')).toHaveValue('歌枠')
+  await expect(page.locator('.video-row').first()).toContainText('録画済み')
+  await page.getByPlaceholder('タイトル・説明').fill('録画に失敗した配信')
+  const incomplete = page.locator('.video-row').filter({ hasText: '録画に失敗した配信' })
+  await expect(incomplete).toContainText('冒頭 2 分欠け')
+  await expect(incomplete).toContainText('アーカイブ補完中')
+  await page.getByPlaceholder('タイトル・説明').fill('')
+  const recordingRow = page.locator('.video-row').filter({ hasText: '録画中の配信 LIVE NOW' })
+  await expect(recordingRow).toBeVisible()
+  await recordingRow.locator('details.menu > summary').click()
+  await expect(recordingRow.locator('.menu-items')).not.toContainText('削除')
+  await page.getByRole('button', { name: '次へ' }).first().click()
+  await expect(page.locator('.pager').first()).toContainText('31–')
+  await page.getByRole('button', { name: '前へ' }).first().click()
+})
+
+test('protect and unprotect an archive; confirm before deleting', async ({ page }, testInfo) => {
+  await page.goto('/?tab=videos')
+  const protectRow = page.locator('.video-row').filter({ hasText: '朝までまったりお話しする枠' })
+  const menu = protectRow.locator('details.menu')
+  await menu.locator('summary').click()
+  await menu.locator('.menu-items').getByRole('button', { name: '永久保存にする' }).click()
+  await expect(protectRow).toContainText('保護済み')
+  if (!(await menu.locator('.menu-items').isVisible())) await menu.locator('summary').click()
+  await menu.locator('.menu-items').getByRole('button', { name: '保護を解除' }).click()
+  await expect(protectRow).not.toContainText('保護済み')
+
+  const query = page.getByPlaceholder('タイトル・説明')
+  const rowNumber = { desktop: 35, tablet: 34, mobile: 33 }[testInfo.project.name] ?? 35
+  await query.fill(`ページング確認用アーカイブ ${rowNumber}`)
+  const deleteRow = page.locator('.video-row').filter({ hasText: `ページング確認用アーカイブ ${rowNumber}` })
+  await expect(deleteRow).toBeVisible()
+  if (!(await deleteRow.locator('.menu-items').isVisible()))
+    await deleteRow.locator('details.menu > summary').click()
+  await deleteRow.locator('.menu-items button.destructive').click()
+  const confirmation = page.getByRole('dialog', { name: '録画ファイルを削除' })
+  await confirmation.getByRole('button', { name: 'キャンセル' }).click()
+  await expect(deleteRow).toBeVisible()
+  const deleteMenu = deleteRow.locator('details.menu')
+  if (!(await deleteMenu.locator('.menu-items').isVisible())) await deleteMenu.locator('summary').click()
+  await deleteRow.locator('.menu-items button.destructive').click()
+  await page.getByRole('dialog', { name: '録画ファイルを削除' }).getByRole('button', { name: '実行' }).click()
+  await expect(deleteRow).toHaveCount(0)
+})
