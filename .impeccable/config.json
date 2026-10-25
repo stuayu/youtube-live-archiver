@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "frontend/src/styles/base.css"
+        ],
+        "createdAt": "2026-10-25T14:55:59.646Z",
+        "reason": "Agent: existing Super Chat and Super Sticker accents use the message color to identify this paid-message category"
+      }
+    ]
+  }
+}
