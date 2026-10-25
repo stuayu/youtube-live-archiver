@@ -53,7 +53,7 @@ class SocialImageIn(StrictInput):
 
 
 class SocialPostIn(StrictInput):
-    targets: list[str] = Field(min_length=1, max_length=2)
+    targets: list[str] = Field(min_length=1, max_length=10)
     text: str = Field(default="", max_length=5000)
     hashtags: list[str] = Field(default_factory=list, max_length=10)
     include_video_link: bool = False
@@ -63,7 +63,7 @@ class SocialPostIn(StrictInput):
     @field_validator("targets")
     @classmethod
     def unique_social_targets(cls, value):
-        if len(value) != len(set(value)) or any(item not in ("bluesky", "misskey") for item in value):
+        if len(value) != len(set(value)) or any(not re.fullmatch(r"[a-f0-9]{32}", item) for item in value):
             raise ValueError("投稿先が不正です")
         return value
 

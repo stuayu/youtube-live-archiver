@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
-import type { ChatMessage, ChatPage, Video } from '../../api/types'
+import { nextTick } from 'vue'
+import { describe, expect, it, vi } from 'vitest'
+import type { ChatMessage, ChatPage, Transcript, Video } from '../../api/types'
 import PlayerPanels from './PlayerPanels.vue'
 
 const video: Video = {
@@ -48,7 +49,7 @@ const video: Video = {
   media_extension: 'mp4',
 }
 
-const transcript = { status: 'pending', error: null, total: 0, segments: [] }
+const transcript: Transcript = { status: 'pending', error: null, total: 0, segments: [] }
 const emptyChat: ChatPage = {
   messages: [],
   total: 0,
@@ -94,6 +95,170 @@ function renderChat(messages: ChatMessage[], following = true) {
 }
 
 describe('PlayerPanels chat rendering', () => {
+  it('highlights the transcript segment at playback time and lets the user turn sync off', async () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'transcript',
+        video,
+        chat: emptyChat,
+        transcript: {
+          status: 'completed',
+          error: null,
+          total: 2,
+          segments: [
+            { start: 0, end: 2, text: '最初の発言' },
+            { start: 2, end: 4, text: '次の発言' },
+          ],
+        },
+        timeline: [],
+        summary: null,
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: false,
+        transcriptQuery: '',
+        playbackSeconds: 2.5,
+        following: true,
+        syncTranscript: true,
+      },
+    })
+
+    expect(wrapper.findAll('.transcript-row.is-current').map((row) => row.text())).toEqual([
+      '0:00:02 · 次の発言',
+    ])
+    await wrapper.setProps({ playbackSeconds: 0.5 })
+    expect(wrapper.findAll('.transcript-row.is-current').map((row) => row.text())).toEqual([
+      '0:00:00 · 最初の発言',
+    ])
+    const sync = wrapper.get('.transcript-sync-control input')
+    await sync.setValue(false)
+    expect(wrapper.emitted('update:syncTranscript')?.slice(-1)[0]).toEqual([false])
+    await wrapper.setProps({ syncTranscript: false, playbackSeconds: 3 })
+    expect(wrapper.find('.transcript-row.is-current').exists()).toBe(false)
+
+    await wrapper.get('.transcript-row').trigger('click')
+    expect(wrapper.emitted('seek')).toEqual([[0]])
+  })
+
+  it('scrolls the active transcript line into view while sync is on', async () => {
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+    const scrollIntoView = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    })
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'transcript',
+        video,
+        chat: emptyChat,
+        transcript: {
+          status: 'completed',
+          error: null,
+          total: 1,
+          segments: [{ start: 0, end: 2, text: '現在の発言' }],
+        },
+        timeline: [],
+        summary: null,
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: false,
+        transcriptQuery: '',
+        playbackSeconds: 1,
+        following: true,
+        syncTranscript: true,
+      },
+    })
+
+    await nextTick()
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'smooth' })
+    wrapper.unmount()
+    if (original) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', original)
+    else Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
+  })
+
+  it('does not reload the first or last transcript page when playback is outside its outer bounds', async () => {
+    const renderTranscriptPage = (transcriptPage: number, segmentStart: number, playbackSeconds: number) =>
+      mount(PlayerPanels, {
+        props: {
+          tab: 'transcript',
+          video,
+          chat: emptyChat,
+          transcript: {
+            status: 'completed',
+            error: null,
+            total: 250,
+            segments: [{ start: segmentStart, end: segmentStart + 2, text: '発言' }],
+          },
+          timeline: [],
+          summary: null,
+          error: '',
+          busy: false,
+          videoId: video.id,
+          chatPage: 0,
+          transcriptPage,
+          chatQuery: '',
+          chatKind: '',
+          includeDeleted: false,
+          transcriptQuery: '',
+          playbackSeconds,
+          following: true,
+          syncTranscript: true,
+        },
+      })
+
+    const firstPage = renderTranscriptPage(0, 10, 0)
+    const lastPage = renderTranscriptPage(2, 990, 5000)
+
+    expect(firstPage.emitted('sync-transcript')).toBeUndefined()
+    expect(lastPage.emitted('sync-transcript')).toBeUndefined()
+    firstPage.unmount()
+    lastPage.unmount()
+  })
+
+  it('requests the transcript page around playback when sync is on and the current page is elsewhere', async () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'transcript',
+        video,
+        chat: emptyChat,
+        transcript: {
+          status: 'completed',
+          error: null,
+          total: 250,
+          segments: [{ start: 0, end: 2, text: '最初の発言' }],
+        },
+        timeline: [],
+        summary: null,
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: false,
+        transcriptQuery: '',
+        playbackSeconds: 864,
+        following: true,
+        syncTranscript: true,
+      },
+    })
+
+    expect(wrapper.emitted('sync-transcript')).toEqual([[864]])
+    await wrapper.setProps({ syncTranscript: false, playbackSeconds: 1200 })
+    expect(wrapper.emitted('sync-transcript')).toEqual([[864]])
+  })
+
   it('offers social search and posting inside the playback timeline', () => {
     const wrapper = mount(PlayerPanels, {
       props: {

@@ -1,5 +1,6 @@
 from .common import *
 from fastapi import BackgroundTasks
+from sqlalchemy import and_
 
 from ..db import SessionLocal
 from ..services.media import inspect_media, source_media, video_playback_metadata
@@ -331,6 +332,7 @@ def video_detail(video_id: int, db: Session = Depends(get_db)):
 
 @router.get("/videos/{video_id}/transcript")
 def get_transcript(video_id: int, offset: int = 0, limit: int = 100, q: str | None = None,
+                   at_seconds: float | None = Query(default=None, ge=0),
                    format: str = "json", db: Session = Depends(get_db)):
     from ..services.transcription import to_srt, to_webvtt
     video = _video_or_404(db, video_id)
@@ -348,9 +350,37 @@ def get_transcript(video_id: int, offset: int = 0, limit: int = 100, q: str | No
         # have whitespace-delimited tokens in PostgreSQL's simple dictionary.
         query = query.where(or_(TranscriptSegment.text.ilike(f"%{term}%"), full_text))
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-    rows = db.scalars(query.order_by(TranscriptSegment.start).offset(max(0, offset)).limit(min(500, max(1, limit)))).all()
+    page_size = min(500, max(1, limit))
+    page_offset = max(0, offset)
+    if at_seconds is not None and not (q and q.strip()):
+        anchor = db.scalar(
+            query.where(TranscriptSegment.start <= at_seconds)
+            .order_by(TranscriptSegment.start.desc(), TranscriptSegment.id.desc())
+            .limit(1)
+        )
+        if anchor:
+            preceding_count = db.scalar(
+                select(func.count()).select_from(TranscriptSegment).where(
+                    TranscriptSegment.video_id == video_id,
+                    TranscriptSegment.raw.is_(False),
+                    or_(
+                        TranscriptSegment.start < anchor.start,
+                        and_(TranscriptSegment.start == anchor.start, TranscriptSegment.id <= anchor.id),
+                    ),
+                )
+            ) or 1
+            page_offset = ((preceding_count - 1) // page_size) * page_size
+        else:
+            # Playback can be before the first spoken segment. In that case
+            # the first transcript page is the correct page to show.
+            page_offset = 0
+    rows = db.scalars(
+        query.order_by(TranscriptSegment.start, TranscriptSegment.id)
+        .offset(page_offset)
+        .limit(page_size)
+    ).all()
     result = {"status": video.transcription_status, "error": video.transcription_error,
-            "model": video.transcription_model, "total": total,
+            "model": video.transcription_model, "total": total, "offset": page_offset,
             "segments": [{"start": x.start, "end": x.end, "text": x.text} for x in rows]}
     db.commit()
     return result

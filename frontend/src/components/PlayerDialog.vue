@@ -39,6 +39,8 @@ const chatKind = ref('')
 const includeDeleted = ref(false)
 const chatPage = ref(0)
 const transcriptPage = ref(0)
+const syncTranscript = ref(true)
+const transcriptSyncError = ref('')
 const savedPreferences = readDanmakuPreferences(localStorage, window.matchMedia('(max-width: 620px)').matches)
 chatKind.value = savedPreferences.danmakuKind
 includeDeleted.value = savedPreferences.includeDeleted
@@ -126,6 +128,7 @@ let hlsRetryTimer: ReturnType<typeof setTimeout> | undefined
 let playerSettings: DPlayerSettingsHandle | undefined
 let chatTimer = 0
 let chatRequestSequence = 0
+let transcriptRequestSequence = 0
 let playbackTimer = 0
 let monitorTimer = 0
 let initialized = false
@@ -160,10 +163,32 @@ async function loadChat(atSeconds = playbackSeconds.value) {
   const result = await request<ChatPage>(`/videos/${props.video.id}/chat?${p}`)
   if (sequence === chatRequestSequence) chat.value = result
 }
-async function loadTranscript() {
+async function loadTranscript(atSeconds?: number) {
   const p = new URLSearchParams({ offset: String(transcriptPage.value * 100), limit: '100' })
   if (transcriptQuery.value) p.set('q', transcriptQuery.value)
-  transcript.value = await request<Transcript>(`/videos/${props.video.id}/transcript?${p}`)
+  if (atSeconds !== undefined && !transcriptQuery.value) p.set('at_seconds', String(atSeconds))
+  const sequence = ++transcriptRequestSequence
+  const result = await request<Transcript>(`/videos/${props.video.id}/transcript?${p}`)
+  if (sequence !== transcriptRequestSequence) return
+  if (
+    atSeconds !== undefined &&
+    (!syncTranscript.value || tab.value !== 'transcript' || transcriptQuery.value)
+  )
+    return
+  transcript.value = result
+  if (atSeconds !== undefined && typeof result.offset === 'number') {
+    transcriptPage.value = Math.floor(result.offset / 100)
+  }
+}
+async function syncTranscriptAt(seconds: number) {
+  if (!syncTranscript.value || tab.value !== 'transcript' || transcriptQuery.value) return
+  transcriptSyncError.value = ''
+  try {
+    await loadTranscript(seconds)
+  } catch {
+    if (syncTranscript.value && tab.value === 'transcript' && !transcriptQuery.value)
+      transcriptSyncError.value = '再生位置に合わせた文字起こしを読み込めませんでした'
+  }
 }
 function searchChat() {
   chatPage.value = 0
@@ -186,6 +211,9 @@ function nextTranscriptPage() {
   transcriptPage.value += 1
   void loadTranscript()
 }
+watch(syncTranscript, (enabled) => {
+  if (!enabled) transcriptSyncError.value = ''
+})
 async function loadPanels() {
   const [chatResult, transcriptResult, timelineResult, summaryResult] = await Promise.allSettled([
     loadChat(),
@@ -784,6 +812,7 @@ onBeforeUnmount(() => {
         </div>
         <PlayerPanels
           v-model:tab="tab"
+          v-model:sync-transcript="syncTranscript"
           v-model:chat-query="chatQuery"
           v-model:chat-kind="chatKind"
           v-model:include-deleted="includeDeleted"
@@ -798,6 +827,7 @@ onBeforeUnmount(() => {
           :video-id="video.id"
           :chat-page="chatPage"
           :transcript-page="transcriptPage"
+          :transcript-sync-error="transcriptSyncError"
           :playback-seconds="playbackSeconds"
           :following="followingChat"
           :capture-frame="captureCurrentFrame"
@@ -812,6 +842,7 @@ onBeforeUnmount(() => {
           @run-transcript="runTranscript"
           @search-transcript="searchTranscript"
           @next-transcript-page="nextTranscriptPage"
+          @sync-transcript="syncTranscriptAt"
           @run-summary="runSummary"
           @seek="seek"
           @follow-chat="followChat"

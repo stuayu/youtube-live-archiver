@@ -108,7 +108,6 @@ def test_bluesky_post_uploads_selected_images_and_adds_utf8_hashtag_facets(monke
 
     monkeypatch.setattr(social, "_decrypt", lambda value: "refresh-token")
     monkeypatch.setattr(social, "_call_json", lambda *args, **kwargs: calls.append((args, kwargs)) or replies.pop(0))
-    monkeypatch.setattr(social, "_save_setting", lambda *args, **kwargs: None)
     image = {"bytes": _sample_jpeg(), "alt": "配信の場面"}
 
     result = social._post_bluesky(

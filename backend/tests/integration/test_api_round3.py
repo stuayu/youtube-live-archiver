@@ -55,6 +55,51 @@ def test_transcript_search_without_q_and_with_q(client):
 
 
 @pytest.mark.integration
+def test_transcript_sync_loads_the_page_containing_the_playback_time(client):
+    channel_id = add_channel()
+    video_id = add_video(channel_id)
+    with SessionLocal() as db:
+        db.add_all([
+            TranscriptSegment(video_id=video_id, start=index * 4, end=index * 4 + 3,
+                              text=f"発言{index}")
+            for index in range(250)
+        ])
+        db.commit()
+
+    response = client.get(
+        f"/api/videos/{video_id}/transcript",
+        params={"at_seconds": 864, "limit": 100},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["offset"] == 200
+    assert response.json()["segments"][0]["text"] == "発言200"
+    assert response.json()["segments"][16]["text"] == "発言216"
+
+
+@pytest.mark.integration
+def test_transcript_sync_returns_to_first_page_before_first_segment(client):
+    channel_id = add_channel()
+    video_id = add_video(channel_id)
+    with SessionLocal() as db:
+        db.add_all([
+            TranscriptSegment(video_id=video_id, start=index * 4 + 20, end=index * 4 + 23,
+                              text=f"発言{index}")
+            for index in range(250)
+        ])
+        db.commit()
+
+    response = client.get(
+        f"/api/videos/{video_id}/transcript",
+        params={"at_seconds": 0, "offset": 200, "limit": 100},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["offset"] == 0
+    assert response.json()["segments"][0]["text"] == "発言0"
+
+
+@pytest.mark.integration
 def test_storage_validation_usage_and_reference_safe_delete(client, tmp_path):
     assert client.post("/api/storages", json={"name": "relative", "root_path": "archive"}).status_code == 422
     invalid_root = tmp_path / "not-a-directory"

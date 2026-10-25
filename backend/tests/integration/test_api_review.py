@@ -341,7 +341,7 @@ def test_social_search_rejects_malformed_hashtag(client):
 def test_social_post_rejects_invalid_capture_data(client):
     video_id = add_video(add_channel())
     response = client.post(f"/api/videos/{video_id}/social/post", json={
-        "targets": ["bluesky"], "text": "見どころ", "hashtags": [],
+        "targets": ["a" * 32], "text": "見どころ", "hashtags": [],
         "include_video_link": False, "visibility": "public",
         "images": [{"data_base64": "not-base64", "mime_type": "image/jpeg",
                     "alt": "再生画面", "playback_seconds": 5, "width": 1280, "height": 720}],
@@ -355,7 +355,7 @@ def test_social_post_rejects_more_than_four_captures(client):
     image = {"data_base64": "not-decoded", "mime_type": "image/jpeg", "alt": "frame",
              "playback_seconds": 1, "width": 1, "height": 1}
     response = client.post(f"/api/videos/{video_id}/social/post", json={
-        "targets": ["bluesky"], "text": "見どころ", "images": [image] * 5,
+        "targets": ["a" * 32], "text": "見どころ", "images": [image] * 5,
     })
     assert response.status_code == 422
 
@@ -375,12 +375,81 @@ def test_social_credentials_are_encrypted_and_never_returned(client, monkeypatch
     })
     assert response.status_code == 200
     assert response.json()["bluesky"]["configured"] is True
+    assert len(response.json()["accounts"]) == 1
     assert "app-password-secret" not in response.text
+    assert "test@example.com" not in response.text
     assert "refresh-secret" not in response.text
     with SessionLocal() as db:
-        stored = db.get(AppSetting, "social.bluesky").value["value"]
+        stored = db.get(AppSetting, "social.accounts").value["value"][0]
         assert "app-password-secret" not in str(stored)
         assert "refresh-secret" not in str(stored)
+
+
+@pytest.mark.integration
+def test_social_settings_support_multiple_accounts_and_independent_disconnect(client, monkeypatch, tmp_path):
+    from app.config import settings
+    from app.services import social
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(social, "_call_json", lambda method, url, **kwargs: {
+        "did": f"did:plc:{kwargs['json_body']['identifier']}",
+        "handle": f"{kwargs['json_body']['identifier']}.example",
+        "refreshJwt": f"refresh-{kwargs['json_body']['identifier']}",
+    })
+    first = client.put("/api/settings/social/bluesky", json={
+        "service_url": "https://bsky.social", "identifier": "first", "app_password": "first-app-password",
+    })
+    second = client.put("/api/settings/social/bluesky", json={
+        "service_url": "https://bsky.social", "identifier": "second", "app_password": "second-app-password",
+    })
+
+    assert first.status_code == second.status_code == 200
+    accounts = second.json()["accounts"]
+    assert [account["label"] for account in accounts] == ["first.example", "second.example"]
+    assert all("identifier" not in account for account in accounts)
+    assert len({account["id"] for account in accounts}) == 2
+    assert "refresh-first" not in second.text
+    assert "second-app-password" not in second.text
+
+    removed = client.delete(f"/api/settings/social/accounts/{accounts[0]['id']}")
+    assert removed.status_code == 200
+    assert [account["label"] for account in removed.json()["accounts"]] == ["second.example"]
+
+
+@pytest.mark.integration
+def test_legacy_social_account_is_preserved_when_adding_another_account(client, monkeypatch, tmp_path):
+    from app.config import settings
+    from app.services import social
+
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    with SessionLocal() as db:
+        db.add(AppSetting(key="social.bluesky", value={"value": {
+            "provider": "bluesky", "service_url": "https://bsky.social", "identifier": "legacy",
+            "did": "did:plc:legacy", "handle": "legacy.example",
+            "refresh_token": social._encrypt("legacy-refresh-token"),
+        }}))
+        db.commit()
+
+    legacy = client.get("/api/settings/social").json()["accounts"]
+    assert len(legacy) == 1
+    legacy_id = legacy[0]["id"]
+    assert legacy[0]["label"] == "legacy.example"
+
+    monkeypatch.setattr(social, "_call_json", lambda method, url, **kwargs: {
+        "did": "did:plc:new", "handle": "new.example", "refreshJwt": "new-refresh-token",
+    })
+    added = client.put("/api/settings/social/bluesky", json={
+        "service_url": "https://bsky.social", "identifier": "new", "app_password": "new-app-password",
+    })
+
+    assert added.status_code == 200
+    assert [account["id"] for account in added.json()["accounts"]][0] == legacy_id
+    assert [account["label"] for account in added.json()["accounts"]] == ["legacy.example", "new.example"]
+    with SessionLocal() as db:
+        stored = db.get(AppSetting, "social.accounts").value["value"]
+        assert stored[0]["refresh_token"] != "legacy-refresh-token"
+        assert social._decrypt(stored[0]["refresh_token"]) == "legacy-refresh-token"
+        assert db.get(AppSetting, "social.bluesky") is None
 
 
 @pytest.mark.integration
@@ -388,7 +457,12 @@ def test_social_post_reports_partial_success_without_reposting_success(client, m
     from app.services import social
 
     video_id = add_video(add_channel())
-    monkeypatch.setattr(social, "_setting", lambda db, provider: {"configured": True})
+    account_ids = ["a" * 32, "b" * 32]
+    monkeypatch.setattr(social, "_accounts", lambda db: [
+        {"id": account_ids[0], "provider": "bluesky", "handle": "viewer.example"},
+        {"id": account_ids[1], "provider": "misskey", "instance_url": "https://misskey.example",
+         "username": "viewer", "host": "misskey.example"},
+    ])
     monkeypatch.setattr(social, "_post_bluesky", lambda *args, **kwargs: {"success": True, "url": "https://bsky.app/post/1"})
     monkeypatch.setattr(social, "_post_misskey", lambda *args, **kwargs: {
         "success": False, "error": "Misskey で失敗しました",
@@ -400,14 +474,40 @@ def test_social_post_reports_partial_success_without_reposting_success(client, m
     Image.new("RGB", (1280, 720), "navy").save(image_stream, format="JPEG")
     image = image_stream.getvalue()
     response = client.post(f"/api/videos/{video_id}/social/post", json={
-        "targets": ["bluesky", "misskey"], "text": "見どころ", "hashtags": ["配信"],
+        "targets": account_ids, "text": "見どころ", "hashtags": ["配信"],
         "include_video_link": False, "visibility": "public",
         "images": [{"data_base64": base64.b64encode(image).decode(), "mime_type": "image/jpeg",
                     "alt": "再生画面", "playback_seconds": 5, "width": 1280, "height": 720}],
     })
     assert response.status_code == 200
-    assert response.json()["results"]["bluesky"]["success"] is True
-    assert response.json()["results"]["misskey"]["success"] is False
+    assert response.json()["results"][account_ids[0]]["success"] is True
+    assert response.json()["results"][account_ids[1]]["success"] is False
+    assert response.json()["results"][account_ids[0]]["label"] == "viewer.example"
+
+
+@pytest.mark.integration
+def test_misskey_search_uses_the_selected_account(client, monkeypatch):
+    from app.services import social
+
+    account_ids = ["a" * 32, "b" * 32]
+    accounts = [
+        {"id": account_ids[0], "provider": "misskey", "instance_url": "https://one.example",
+         "token": "encrypted-one", "username": "first", "host": "one.example"},
+        {"id": account_ids[1], "provider": "misskey", "instance_url": "https://two.example",
+         "token": "encrypted-two", "username": "second", "host": "two.example"},
+    ]
+    called = []
+    monkeypatch.setattr(social, "_accounts", lambda db: accounts)
+    monkeypatch.setattr(social, "_decrypt", lambda value: value)
+    monkeypatch.setattr(social, "_call_json", lambda method, url, **kwargs: called.append(url) or [])
+
+    response = client.get("/api/social/search", params={
+        "tag": "配信", "providers": "misskey", "misskey_account_id": account_ids[1],
+    })
+
+    assert response.status_code == 200
+    assert called == ["https://two.example/api/notes/search-by-tag"]
+    assert response.json()["providers"]["misskey"]["account_id"] == account_ids[1]
 
 
 @pytest.mark.integration

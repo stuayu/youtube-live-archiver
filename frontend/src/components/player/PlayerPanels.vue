@@ -12,40 +12,49 @@ interface TimelineItem {
   time: string
 }
 
-const props = defineProps<{
-  tab: 'chat' | 'transcript' | 'summary' | 'timeline' | 'info'
-  video: Video
-  chat: ChatPage
-  transcript: Transcript
-  timeline: TimelineItem[]
-  summary: Record<string, unknown> | null
-  error: string
-  busy: boolean
-  videoId: string
-  chatPage: number
-  transcriptPage: number
-  chatQuery: string
-  chatKind: string
-  includeDeleted: boolean
-  transcriptQuery: string
-  playbackSeconds: number
-  following: boolean
-  captureFrame?: () => Promise<{
-    data_base64: string
-    mime_type: 'image/jpeg'
-    width: number
-    height: number
-    playback_seconds: number
-  }>
-  storageName?: string
-  conversionNote?: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    tab: 'chat' | 'transcript' | 'summary' | 'timeline' | 'info'
+    video: Video
+    chat: ChatPage
+    transcript: Transcript
+    timeline: TimelineItem[]
+    summary: Record<string, unknown> | null
+    error: string
+    busy: boolean
+    videoId: string
+    chatPage: number
+    transcriptPage: number
+    chatQuery: string
+    chatKind: string
+    includeDeleted: boolean
+    transcriptQuery: string
+    playbackSeconds: number
+    syncTranscript?: boolean
+    transcriptSyncError?: string
+    following: boolean
+    captureFrame?: () => Promise<{
+      data_base64: string
+      mime_type: 'image/jpeg'
+      width: number
+      height: number
+      playback_seconds: number
+    }>
+    storageName?: string
+    conversionNote?: string
+  }>(),
+  {
+    syncTranscript: true,
+    transcriptSyncError: '',
+  },
+)
 const emit = defineEmits<{
   'update:tab': [value: 'chat' | 'transcript' | 'summary' | 'timeline' | 'info']
   'update:chatQuery': [value: string]
   'update:chatKind': [value: string]
   'update:includeDeleted': [value: boolean]
   'update:transcriptQuery': [value: string]
+  'update:syncTranscript': [value: boolean]
   searchChat: []
   retrieveChat: []
   seekCovered: [seconds: number]
@@ -55,6 +64,7 @@ const emit = defineEmits<{
   runTranscript: []
   searchTranscript: []
   nextTranscriptPage: []
+  'sync-transcript': [seconds: number]
   runSummary: [mode: 'all' | 'final']
   seek: [seconds: number]
   followChat: []
@@ -62,9 +72,11 @@ const emit = defineEmits<{
   videoAction: [path: string, method?: string]
 }>()
 const list = ref<HTMLElement | null>(null)
+const transcriptList = ref<HTMLElement | null>(null)
 const fallback = ref(new Set<string>())
 const mobileSearchOpen = ref(false)
 const timelineMode = ref<'highlights' | 'social'>('highlights')
+let lastTranscriptSyncRequest = Number.NEGATIVE_INFINITY
 const tabs = [
   ['chat', 'チャット'],
   ['transcript', '文字起こし'],
@@ -75,6 +87,13 @@ const tabs = [
 const searchable = computed(() => Boolean(props.chatQuery || props.chatKind))
 const allRows = computed(() => props.chat.messages)
 const replayPending = computed(() => ['queued', 'running'].includes(props.chat.replay?.state || ''))
+const activeTranscriptKey = computed(() => {
+  if (!props.syncTranscript) return ''
+  const segment = props.transcript.segments.find(
+    (item) => props.playbackSeconds >= item.start && props.playbackSeconds < item.end,
+  )
+  return segment ? `${segment.start}-${segment.end}` : ''
+})
 function replayStatus() {
   const replay = props.chat.replay
   if (!replay) return ''
@@ -131,6 +150,53 @@ function onScroll() {
     emit('chatScrolled')
   }
 }
+function syncTranscriptPage() {
+  if (!props.syncTranscript) {
+    lastTranscriptSyncRequest = Number.NEGATIVE_INFINITY
+    return
+  }
+  if (props.tab !== 'transcript' || props.transcriptQuery.trim() || !props.transcript.total) return
+  const segments = props.transcript.segments
+  const first = segments[0]
+  const last = segments[segments.length - 1]
+  if (!first || !last) return
+  const hasPreviousPage = props.transcriptPage > 0
+  const hasNextPage = (props.transcriptPage + 1) * 100 < props.transcript.total
+  const outsideLoadedPage =
+    (hasPreviousPage && props.playbackSeconds < first.start) ||
+    (hasNextPage && props.playbackSeconds > last.end)
+  if (!outsideLoadedPage) {
+    lastTranscriptSyncRequest = Number.NEGATIVE_INFINITY
+    return
+  }
+  if (Math.abs(props.playbackSeconds - lastTranscriptSyncRequest) < 5) return
+  lastTranscriptSyncRequest = props.playbackSeconds
+  emit('sync-transcript', props.playbackSeconds)
+}
+watch(
+  () =>
+    [
+      props.playbackSeconds,
+      props.transcript.segments,
+      props.transcript.total,
+      props.transcriptQuery,
+      props.tab,
+      props.syncTranscript,
+    ] as const,
+  syncTranscriptPage,
+  { immediate: true },
+)
+watch(
+  () => [activeTranscriptKey.value, props.syncTranscript, props.tab] as const,
+  async ([key, enabled, activeTab]) => {
+    if (!key || !enabled || activeTab !== 'transcript') return
+    await nextTick()
+    transcriptList.value
+      ?.querySelector<HTMLElement>('.transcript-row.is-current')
+      ?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+  },
+  { immediate: true },
+)
 watch(
   () => [props.chat.messages.length, props.playbackSeconds, props.following] as const,
   async () => {
@@ -420,6 +486,15 @@ watch(
       <button class="button secondary" :disabled="busy" @click="emit('runTranscript')">
         文字起こしを実行
       </button>
+      <label class="check-field transcript-sync-control">
+        <input
+          type="checkbox"
+          :checked="syncTranscript"
+          @change="emit('update:syncTranscript', ($event.target as HTMLInputElement).checked)"
+        />
+        動画の再生位置に自動追従
+      </label>
+      <p v-if="transcriptSyncError" class="inline-error" role="alert">{{ transcriptSyncError }}</p>
       <label class="field">
         文字起こし検索
         <input
@@ -429,14 +504,18 @@ watch(
           @change="emit('searchTranscript')"
         />
       </label>
-      <button
-        v-for="segment in transcript.segments"
-        :key="`${segment.start}-${segment.end}`"
-        class="transcript-row"
-        @click="emit('seek', segment.start)"
-      >
-        {{ formatDuration(segment.start) }} · {{ segment.text }}
-      </button>
+      <div ref="transcriptList" class="transcript-segments">
+        <button
+          v-for="segment in transcript.segments"
+          :key="`${segment.start}-${segment.end}`"
+          class="transcript-row"
+          :class="{ 'is-current': activeTranscriptKey === `${segment.start}-${segment.end}` }"
+          :aria-current="activeTranscriptKey === `${segment.start}-${segment.end}` ? 'true' : undefined"
+          @click="emit('seek', segment.start)"
+        >
+          {{ formatDuration(segment.start) }} · {{ segment.text }}
+        </button>
+      </div>
       <button
         v-if="(transcriptPage + 1) * 100 < transcript.total"
         class="button secondary"

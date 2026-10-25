@@ -311,6 +311,7 @@ export interface Transcript {
   status: string
   error: string | null
   total: number
+  offset?: number
   segments: TranscriptSegment[]
 }
 export interface ChatMessage {

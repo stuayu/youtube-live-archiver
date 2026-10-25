@@ -5,6 +5,15 @@ import { request } from '../../api/client'
 interface SocialSettings {
   bluesky: { configured: boolean; identifier: string; service_url: string }
   misskey: { configured: boolean; instance_url: string }
+  accounts: SocialAccount[]
+}
+interface SocialAccount {
+  id: string
+  provider: 'bluesky' | 'misskey'
+  configured: boolean
+  label: string
+  service_url?: string
+  instance_url?: string
 }
 
 const settings = ref<SocialSettings | null>(null)
@@ -21,7 +30,6 @@ async function loadSettings() {
   try {
     settings.value = await request<SocialSettings>('/settings/social')
     bluesky.service_url = settings.value.bluesky.service_url || 'https://bsky.social'
-    bluesky.identifier = settings.value.bluesky.identifier || ''
     misskey.instance_url = settings.value.misskey.instance_url || ''
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'SNS 設定を読み込めませんでした'
@@ -43,7 +51,8 @@ async function saveBluesky() {
       body: JSON.stringify({ ...bluesky }),
     })
     bluesky.app_password = ''
-    notice.value = 'Bluesky に接続しました'
+    bluesky.identifier = ''
+    notice.value = 'Bluesky アカウントを追加しました'
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Bluesky に接続できませんでした'
   } finally {
@@ -64,20 +73,22 @@ async function saveMisskey() {
       body: JSON.stringify({ ...misskey }),
     })
     misskey.token = ''
-    notice.value = 'Misskey に接続しました'
+    notice.value = 'Misskey アカウントを追加しました'
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Misskey に接続できませんでした'
   } finally {
     busy.value = null
   }
 }
-async function disconnect(provider: 'bluesky' | 'misskey') {
-  busy.value = provider
+async function disconnect(account: SocialAccount) {
+  busy.value = account.provider
   error.value = ''
   notice.value = ''
   try {
-    settings.value = await request<SocialSettings>(`/settings/social/${provider}`, { method: 'DELETE' })
-    notice.value = `${provider === 'bluesky' ? 'Bluesky' : 'Misskey'} の接続を解除しました`
+    settings.value = await request<SocialSettings>(`/settings/social/accounts/${account.id}`, {
+      method: 'DELETE',
+    })
+    notice.value = `${account.label} の接続を解除しました`
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '接続を解除できませんでした'
   } finally {
@@ -106,21 +117,34 @@ onMounted(loadSettings)
       <div class="social-setting-heading">
         <div>
           <h3>Bluesky</h3>
-          <p v-if="settings?.bluesky.configured" class="social-connection-state">
-            接続済み · {{ settings.bluesky.identifier }}
+          <p class="social-connection-state">
+            {{ settings?.accounts.filter((account) => account.provider === 'bluesky').length || 0 }}
+            アカウント接続中
           </p>
-          <p v-else class="social-connection-state">未接続</p>
         </div>
-        <button
-          v-if="settings?.bluesky.configured"
-          class="button secondary small"
-          type="button"
-          :disabled="busy !== null"
-          @click="disconnect('bluesky')"
-        >
-          接続解除
-        </button>
       </div>
+      <ul
+        v-if="settings?.accounts.some((account) => account.provider === 'bluesky')"
+        class="social-connected-accounts"
+      >
+        <li
+          v-for="account in settings.accounts.filter((item) => item.provider === 'bluesky')"
+          :key="account.id"
+        >
+          <div>
+            <strong>{{ account.label }}</strong>
+            <small>{{ account.service_url }}</small>
+          </div>
+          <button
+            class="button secondary small"
+            type="button"
+            :disabled="busy !== null"
+            @click="disconnect(account)"
+          >
+            解除
+          </button>
+        </li>
+      </ul>
       <div class="form-grid">
         <label class="field">
           PDS URL
@@ -160,7 +184,7 @@ onMounted(loadSettings)
           アプリパスワードを管理
         </a>
         <button class="button primary" type="button" :disabled="busy !== null" @click="saveBluesky">
-          {{ busy === 'bluesky' ? '接続中…' : 'Bluesky に接続' }}
+          {{ busy === 'bluesky' ? '接続中…' : 'Bluesky アカウントを追加' }}
         </button>
       </div>
     </div>
@@ -169,21 +193,34 @@ onMounted(loadSettings)
       <div class="social-setting-heading">
         <div>
           <h3>Misskey</h3>
-          <p v-if="settings?.misskey.configured" class="social-connection-state">
-            接続済み · {{ settings.misskey.instance_url }}
+          <p class="social-connection-state">
+            {{ settings?.accounts.filter((account) => account.provider === 'misskey').length || 0 }}
+            アカウント接続中
           </p>
-          <p v-else class="social-connection-state">未接続</p>
         </div>
-        <button
-          v-if="settings?.misskey.configured"
-          class="button secondary small"
-          type="button"
-          :disabled="busy !== null"
-          @click="disconnect('misskey')"
-        >
-          接続解除
-        </button>
       </div>
+      <ul
+        v-if="settings?.accounts.some((account) => account.provider === 'misskey')"
+        class="social-connected-accounts"
+      >
+        <li
+          v-for="account in settings.accounts.filter((item) => item.provider === 'misskey')"
+          :key="account.id"
+        >
+          <div>
+            <strong>{{ account.label }}</strong>
+            <small>{{ account.instance_url }}</small>
+          </div>
+          <button
+            class="button secondary small"
+            type="button"
+            :disabled="busy !== null"
+            @click="disconnect(account)"
+          >
+            解除
+          </button>
+        </li>
+      </ul>
       <div class="form-grid">
         <label class="field">
           インスタンス URL
@@ -210,7 +247,7 @@ onMounted(loadSettings)
       </div>
       <div class="settings-actions">
         <button class="button primary" type="button" :disabled="busy !== null" @click="saveMisskey">
-          {{ busy === 'misskey' ? '接続中…' : 'Misskey に接続' }}
+          {{ busy === 'misskey' ? '接続中…' : 'Misskey アカウントを追加' }}
         </button>
       </div>
     </div>

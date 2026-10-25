@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,6 +24,7 @@ MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 20
 SOCIAL_SETTING_KEYS = {"bluesky": "social.bluesky", "misskey": "social.misskey"}
+SOCIAL_ACCOUNTS_KEY = "social.accounts"
 
 
 class SocialServiceError(Exception):
@@ -64,20 +66,85 @@ def _decrypt(value: str) -> str:
         raise SocialServiceError("SNS 認証情報を復号できません。設定を再登録してください")
 
 
-def _setting(db: Session, provider: str) -> dict | None:
-    row = db.get(AppSetting, SOCIAL_SETTING_KEYS[provider])
-    value = row.value.get("value") if row and isinstance(row.value, dict) else None
-    return value if isinstance(value, dict) else None
-
-
-def _save_setting(db: Session, provider: str, value: dict) -> None:
-    key = SOCIAL_SETTING_KEYS[provider]
-    row = db.get(AppSetting, key)
-    if row is None:
-        db.add(AppSetting(key=key, value={"value": value}))
+def _legacy_account_id(provider: str, value: dict) -> str:
+    if provider == "bluesky":
+        identity = value.get("did") or value.get("identifier", "")
     else:
-        row.value = {"value": value}
+        identity = "|".join((
+            str(value.get("instance_url") or "").casefold(),
+            str(value.get("username") or "").casefold(),
+            str(value.get("host") or "").casefold(),
+        ))
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"youtube-live-archiver:social:{provider}:{identity}").hex
+
+
+def _accounts(db: Session) -> list[dict]:
+    row = db.get(AppSetting, SOCIAL_ACCOUNTS_KEY)
+    stored = row.value.get("value") if row and isinstance(row.value, dict) else None
+    if isinstance(stored, list):
+        return [dict(account) for account in stored if isinstance(account, dict)]
+
+    # Keep existing single-account settings usable until the first account edit.
+    accounts = []
+    for provider, key in SOCIAL_SETTING_KEYS.items():
+        legacy = db.get(AppSetting, key)
+        value = legacy.value.get("value") if legacy and isinstance(legacy.value, dict) else None
+        if isinstance(value, dict):
+            accounts.append({**value, "id": _legacy_account_id(provider, value), "provider": provider})
+    return accounts
+
+
+def _save_accounts(db: Session, accounts: list[dict]) -> None:
+    row = db.get(AppSetting, SOCIAL_ACCOUNTS_KEY)
+    value = {"value": accounts}
+    if row is None:
+        db.add(AppSetting(key=SOCIAL_ACCOUNTS_KEY, value=value))
+    else:
+        row.value = value
+    for key in SOCIAL_SETTING_KEYS.values():
+        legacy = db.get(AppSetting, key)
+        if legacy is not None:
+            db.delete(legacy)
     db.commit()
+
+
+def _account_identity(account: dict) -> tuple:
+    provider = account.get("provider")
+    if provider == "bluesky":
+        return (provider, str(account.get("did") or account.get("identifier") or "").casefold())
+    return (
+        provider,
+        str(account.get("instance_url") or "").casefold(),
+        str(account.get("username") or "").casefold(),
+        str(account.get("host") or "").casefold(),
+    )
+
+
+def _store_account(db: Session, account: dict) -> dict:
+    accounts = _accounts(db)
+    identity = _account_identity(account)
+    existing = next((item for item in accounts if _account_identity(item) == identity), None)
+    if existing:
+        account["id"] = existing["id"]
+        accounts = [account if item["id"] == existing["id"] else item for item in accounts]
+    else:
+        account["id"] = uuid.uuid4().hex
+        accounts.append(account)
+    _save_accounts(db, accounts)
+    return account
+
+
+def _save_account(db: Session, account: dict) -> None:
+    accounts = _accounts(db)
+    for index, existing in enumerate(accounts):
+        if existing.get("id") == account.get("id"):
+            accounts[index] = account
+            _save_accounts(db, accounts)
+            return
+
+
+def _setting(db: Session, provider: str) -> dict | None:
+    return next((account for account in _accounts(db) if account.get("provider") == provider), None)
 
 
 def _validated_instance_url(value: str) -> str:
@@ -156,10 +223,31 @@ def _public_url(value: str | None) -> str | None:
 
 
 def public_settings(db: Session) -> dict:
-    bluesky = _setting(db, "bluesky")
-    misskey = _setting(db, "misskey")
+    accounts = _accounts(db)
+    public_accounts = []
+    for account in accounts:
+        provider = account.get("provider")
+        if provider == "bluesky":
+            public_accounts.append({
+                "id": account["id"], "provider": provider, "configured": True,
+                "label": str(account.get("handle") or account.get("identifier") or "Bluesky"),
+                "service_url": str(account.get("service_url") or "https://bsky.social"),
+            })
+        elif provider == "misskey":
+            host = account.get("host") or urlparse(account.get("instance_url", "")).hostname
+            username = str(account.get("username") or "")
+            label = f"@{username}@{host}" if username and host else str(account.get("instance_url") or "Misskey")
+            public_accounts.append({
+                "id": account["id"], "provider": provider, "configured": True,
+                "label": label, "instance_url": str(account.get("instance_url") or ""),
+            })
+    bluesky_accounts = [item for item in public_accounts if item["provider"] == "bluesky"]
+    misskey_accounts = [item for item in public_accounts if item["provider"] == "misskey"]
+    bluesky = bluesky_accounts[0] if bluesky_accounts else None
+    misskey = misskey_accounts[0] if misskey_accounts else None
     return {
-        "bluesky": {"configured": bool(bluesky), "identifier": bluesky.get("identifier", "") if bluesky else "",
+        "accounts": public_accounts,
+        "bluesky": {"configured": bool(bluesky), "identifier": "",
                     "service_url": bluesky.get("service_url", "https://bsky.social") if bluesky else "https://bsky.social"},
         "misskey": {"configured": bool(misskey), "instance_url": misskey.get("instance_url", "") if misskey else ""},
     }
@@ -173,7 +261,8 @@ def configure_bluesky(db: Session, service_url: str, identifier: str, app_passwo
         raise SocialServiceError("Bluesky の応答形式が不正です")
     if not all(isinstance(session.get(key), str) and session[key] for key in ("did", "handle", "refreshJwt")):
         raise SocialServiceError("Bluesky の応答に必要なアカウント情報がありません")
-    _save_setting(db, "bluesky", {
+    _store_account(db, {
+        "provider": "bluesky",
         "service_url": service_url,
         "identifier": identifier.strip(),
         "did": session["did"],
@@ -188,7 +277,8 @@ def configure_misskey(db: Session, instance_url: str, token: str) -> dict:
     account = _call_json("POST", f"{instance_url}/api/i", json_body={"i": token})
     if not isinstance(account, dict):
         raise SocialServiceError("Misskey の応答形式が不正です")
-    _save_setting(db, "misskey", {
+    _store_account(db, {
+        "provider": "misskey",
         "instance_url": instance_url,
         "token": _encrypt(token),
         "username": str(account.get("username") or ""),
@@ -198,10 +288,16 @@ def configure_misskey(db: Session, instance_url: str, token: str) -> dict:
 
 
 def disconnect(db: Session, provider: str) -> dict:
-    row = db.get(AppSetting, SOCIAL_SETTING_KEYS[provider])
-    if row:
-        db.delete(row)
-        db.commit()
+    _save_accounts(db, [account for account in _accounts(db) if account.get("provider") != provider])
+    return public_settings(db)
+
+
+def disconnect_account(db: Session, account_id: str) -> dict:
+    accounts = _accounts(db)
+    remaining = [account for account in accounts if account.get("id") != account_id]
+    if len(remaining) == len(accounts):
+        raise KeyError(account_id)
+    _save_accounts(db, remaining)
     return public_settings(db)
 
 
@@ -298,26 +394,44 @@ def _search_misskey(config: dict, tag: str, cursor: str | None) -> tuple[list[di
 
 
 def search_hashtags(db: Session, tag: str, providers: list[str], bluesky_cursor: str | None = None,
-                    misskey_cursor: str | None = None) -> dict:
+                    misskey_cursor: str | None = None, misskey_account_id: str | None = None) -> dict:
     tag = normalize_tag(tag)
     items: list[dict] = []
     state = {}
-    config = _setting(db, "misskey")
+    misskey_accounts = [account for account in _accounts(db) if account.get("provider") == "misskey"]
+    config = next(
+        (account for account in misskey_accounts if account.get("id") == misskey_account_id),
+        misskey_accounts[0] if misskey_accounts and not misskey_account_id else None,
+    )
     for provider in providers:
         try:
             if provider == "bluesky":
                 rows, cursor = _search_bluesky(tag, bluesky_cursor)
             elif provider == "misskey":
+                if misskey_account_id and not config:
+                    state[provider] = {
+                        "configured": bool(misskey_accounts),
+                        "error": "検索する Misskey アカウントを設定から選び直してください",
+                        "cursor": None,
+                    }
+                    continue
                 if not config:
                     state[provider] = {"configured": False, "error": "設定画面で Misskey を接続してください", "cursor": None}
                     continue
                 rows, cursor = _search_misskey(config, tag, misskey_cursor)
             else:
                 continue
-            state[provider] = {"configured": True, "error": None, "cursor": cursor}
+            state[provider] = {
+                "configured": True, "error": None, "cursor": cursor,
+                "account_id": config.get("id") if provider == "misskey" and config else None,
+            }
             items.extend(rows)
         except SocialServiceError as exc:
-            state[provider] = {"configured": provider != "misskey" or bool(config), "error": str(exc), "cursor": None}
+            state[provider] = {
+                "configured": provider != "misskey" or bool(config),
+                "error": str(exc), "cursor": None,
+                "account_id": config.get("id") if provider == "misskey" and config else None,
+            }
     items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
     return {"tag": tag, "items": items, "providers": state}
 
@@ -413,7 +527,7 @@ def _post_bluesky(db: Session, config: dict, text: str, facets: list[tuple[str, 
         raise SocialServiceError("Bluesky の認証を更新できません。設定を再登録してください")
     if isinstance(session.get("refreshJwt"), str):
         config["refresh_token"] = _encrypt(session["refreshJwt"])
-        _save_setting(db, "bluesky", config)
+        _save_account(db, config)
     headers = {"Authorization": f"Bearer {access_token}"}
     image_embeds = []
     for image in images:
@@ -473,19 +587,33 @@ def post_to_social(db: Session, video, body) -> dict:
         raise ValueError("本文、ハッシュタグ、またはキャプチャ画像を追加してください")
     if body.visibility not in ("public", "home", "followers"):
         raise ValueError("Misskey の公開範囲は公開・ホーム・フォロワー限定から選んでください")
-    configs = {provider: _setting(db, provider) for provider in body.targets}
+    configs = {account.get("id"): account for account in _accounts(db)}
+    if any(target not in configs for target in body.targets):
+        raise ValueError("投稿先アカウントが設定されていません。設定を再読み込みしてください")
+    public_accounts = {account["id"]: account for account in public_settings(db)["accounts"]}
     results = {}
-    for provider in body.targets:
-        if not configs[provider]:
-            results[provider] = {"success": False, "error": f"設定画面で {provider.title()} を接続してください"}
-            continue
+    for account_id in body.targets:
+        config = configs[account_id]
+        provider = config.get("provider")
+        public_account = public_accounts.get(
+            account_id, {"label": provider.title() if isinstance(provider, str) else "SNS"},
+        )
         try:
             if provider == "bluesky":
-                results[provider] = _post_bluesky(db, configs[provider], text, facets, images)
+                result = _post_bluesky(db, config, text, facets, images)
+            elif provider == "misskey":
+                result = _post_misskey(config, text, images, body.visibility)
             else:
-                results[provider] = _post_misskey(configs[provider], text, images, body.visibility)
+                raise SocialServiceError("SNS の種類を確認できません")
+            results[account_id] = {"provider": provider, "label": public_account["label"], **result}
         except SocialServiceError as exc:
-            results[provider] = {"success": False, "error": str(exc)}
+            results[account_id] = {
+                "provider": provider, "label": public_account["label"],
+                "success": False, "error": str(exc),
+            }
         except Exception:
-            results[provider] = {"success": False, "error": "投稿処理に失敗しました。設定と投稿内容を確認してください"}
+            results[account_id] = {
+                "provider": provider, "label": public_account["label"],
+                "success": False, "error": "投稿処理に失敗しました。設定と投稿内容を確認してください",
+            }
     return {"results": results}

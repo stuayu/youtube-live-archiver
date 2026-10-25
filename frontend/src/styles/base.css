@@ -907,6 +907,16 @@ legend {
   padding: 10px;
   min-height: 40px;
 }
+.transcript-sync-control {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.transcript-row.is-current {
+  border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
 .summary-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1729,6 +1739,14 @@ legend {
   gap: 6px;
   min-height: 32px;
 }
+.social-post-account {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.social-search-account {
+  grid-column: 1 / -1;
+  margin: 0;
+}
 .social-provider-list input,
 .social-post-options input {
   accent-color: var(--accent);
@@ -1956,6 +1974,31 @@ legend {
 }
 .social-settings .social-setting-heading {
   margin-bottom: 12px;
+}
+.social-connected-accounts {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.social-connected-accounts li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.social-connected-accounts li > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.social-connected-accounts small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
 }
 .social-settings .social-setting-heading h3 {
   margin: 0;

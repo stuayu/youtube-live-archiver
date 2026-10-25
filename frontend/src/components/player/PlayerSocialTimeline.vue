@@ -17,6 +17,15 @@ interface SelectedImage extends SocialCapture {
 interface SocialSettings {
   bluesky: { configured: boolean; identifier: string; service_url: string }
   misskey: { configured: boolean; instance_url: string }
+  accounts: SocialAccount[]
+}
+interface SocialAccount {
+  id: string
+  provider: 'bluesky' | 'misskey'
+  configured: boolean
+  label: string
+  service_url?: string
+  instance_url?: string
 }
 interface SocialItem {
   provider: 'bluesky' | 'misskey'
@@ -30,10 +39,16 @@ interface SocialItem {
 }
 interface SearchResponse {
   items: SocialItem[]
-  providers: Record<string, { configured: boolean; error: string | null; cursor: string | null }>
+  providers: Record<
+    string,
+    { configured: boolean; error: string | null; cursor: string | null; account_id?: string | null }
+  >
 }
 interface PostResponse {
-  results: Record<string, { success: boolean; url?: string | null; error?: string }>
+  results: Record<
+    string,
+    { provider: string; label: string; success: boolean; url?: string | null; error?: string }
+  >
 }
 
 const props = defineProps<{
@@ -49,7 +64,9 @@ const settingsError = ref('')
 const tag = ref('')
 const query = ref('')
 const searchTargets = ref({ bluesky: true, misskey: true })
-const postTargets = ref({ bluesky: false, misskey: false })
+const misskeySearchAccountId = ref('')
+const lastSearchMisskeyAccountId = ref('')
+const postTargets = ref<string[]>([])
 const providerState = ref<SearchResponse['providers']>({})
 const results = ref<SocialItem[]>([])
 const searchBusy = ref(false)
@@ -67,10 +84,11 @@ const postBusy = ref(false)
 const postError = ref('')
 const postResults = ref<PostResponse['results']>({})
 
-const connectedCount = computed(
-  () =>
-    Number(Boolean(settings.value?.bluesky.configured)) + Number(Boolean(settings.value?.misskey.configured)),
+const connectedAccounts = computed(() => settings.value?.accounts || [])
+const misskeyAccounts = computed(() =>
+  connectedAccounts.value.filter((account) => account.provider === 'misskey'),
 )
+const connectedCount = computed(() => connectedAccounts.value.length)
 const captureLimitReached = computed(() => captures.value.length >= 4)
 const tagList = computed(() => [
   ...new Set(
@@ -107,20 +125,21 @@ const postPreview = computed(() => {
   return value
 })
 const postLength = computed(() => Array.from(postPreview.value).length)
-const selectedPostTargets = computed(() =>
-  (['bluesky', 'misskey'] as const).filter((provider) => postTargets.value[provider]),
-)
+const selectedPostTargets = computed(() => postTargets.value)
 const hasMoreResults = computed(
   () =>
     query.value.trim().replace(/^#+/, '') === tag.value &&
     ((searchTargets.value.bluesky && Boolean(cursors.value.bluesky)) ||
-      (searchTargets.value.misskey && Boolean(cursors.value.misskey))),
+      (searchTargets.value.misskey &&
+        misskeySearchAccountId.value === lastSearchMisskeyAccountId.value &&
+        Boolean(cursors.value.misskey))),
 )
 const canPost = computed(
   () =>
     !postBusy.value &&
     connectedCount.value > 0 &&
     selectedPostTargets.value.length > 0 &&
+    selectedPostTargets.value.length <= 10 &&
     hashtagsValid.value &&
     postLength.value <= 300 &&
     Boolean(postPreview.value || captures.value.length),
@@ -161,6 +180,11 @@ async function loadSettings() {
   settingsError.value = ''
   try {
     settings.value = await request<SocialSettings>('/settings/social')
+    if (!misskeyAccounts.value.some((account) => account.id === misskeySearchAccountId.value))
+      misskeySearchAccountId.value = misskeyAccounts.value[0]?.id || ''
+    postTargets.value = postTargets.value.filter((id) =>
+      connectedAccounts.value.some((account) => account.id === id),
+    )
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : 'SNS 設定を読み込めませんでした'
   }
@@ -180,9 +204,15 @@ async function searchSocial(loadMore = false) {
     results.value = []
     cursors.value = { bluesky: null, misskey: null }
     providerState.value = {}
+    lastSearchMisskeyAccountId.value = misskeySearchAccountId.value
   }
   const providers = selectedSearchProviders().filter(
-    (provider) => !loadMore || Boolean(cursors.value[provider]),
+    (provider) =>
+      !loadMore ||
+      (provider === 'bluesky'
+        ? Boolean(cursors.value.bluesky)
+        : misskeySearchAccountId.value === lastSearchMisskeyAccountId.value &&
+          Boolean(cursors.value.misskey)),
   )
   if (!providers.length) {
     searchError.value = '検索先を1つ以上選択してください'
@@ -194,6 +224,8 @@ async function searchSocial(loadMore = false) {
     const params = new URLSearchParams({ tag: normalized, providers: providers.join(',') })
     if (loadMore && cursors.value.bluesky) params.set('bluesky_cursor', cursors.value.bluesky)
     if (loadMore && cursors.value.misskey) params.set('misskey_cursor', cursors.value.misskey)
+    if (providers.includes('misskey') && misskeySearchAccountId.value)
+      params.set('misskey_account_id', misskeySearchAccountId.value)
     const response = await request<SearchResponse>(`/social/search?${params.toString()}`)
     providerState.value = { ...providerState.value, ...response.providers }
     for (const provider of providers) {
@@ -225,8 +257,10 @@ function postFromTag() {
   hashtags.value = tag.value || query.value.replace(/^#+/, '')
   mode.value = 'post'
 }
-function updatePostTarget(provider: 'bluesky' | 'misskey', checked: boolean) {
-  postTargets.value[provider] = checked
+function updatePostTarget(accountId: string, checked: boolean) {
+  if (checked && postTargets.value.length < 10 && !postTargets.value.includes(accountId))
+    postTargets.value = [...postTargets.value, accountId]
+  else if (!checked) postTargets.value = postTargets.value.filter((id) => id !== accountId)
   postResults.value = {}
   postError.value = ''
 }
@@ -286,14 +320,12 @@ async function submitPost() {
       }),
     )
     postResults.value = response.results
-    for (const [provider, result] of Object.entries(response.results)) {
-      if (result.success && (provider === 'bluesky' || provider === 'misskey')) {
-        postTargets.value[provider] = false
-      }
+    for (const [accountId, result] of Object.entries(response.results)) {
+      if (result.success) postTargets.value = postTargets.value.filter((id) => id !== accountId)
     }
     const failures = Object.values(response.results).filter((result) => !result.success)
     if (failures.length && Object.values(response.results).some((result) => result.success)) {
-      postError.value = '成功した投稿先は選択解除しました。失敗した投稿先だけ再試行できます'
+      postError.value = '成功したアカウントの選択を外しました。失敗したアカウントだけ再試行できます'
     } else if (failures.length) {
       postError.value = '投稿できませんでした。設定と接続状態を確認してください'
     } else {
@@ -351,6 +383,14 @@ onMounted(() => {
           <label><input v-model="searchTargets.bluesky" type="checkbox" /> Bluesky</label>
           <label><input v-model="searchTargets.misskey" type="checkbox" /> Misskey</label>
         </fieldset>
+        <label v-if="searchTargets.misskey && misskeyAccounts.length" class="field social-search-account">
+          Misskey の検索アカウント
+          <select v-model="misskeySearchAccountId">
+            <option v-for="account in misskeyAccounts" :key="account.id" :value="account.id">
+              {{ account.label }}
+            </option>
+          </select>
+        </label>
         <button class="button primary" type="submit" :disabled="searchBusy">
           {{ searchBusy ? '検索中…' : '検索' }}
         </button>
@@ -421,34 +461,22 @@ onMounted(() => {
       <p v-if="!connectedCount" class="social-setup-help">
         投稿するには「設定」の SNS 連携で Bluesky または Misskey を接続してください。
       </p>
+      <p v-if="settingsError" class="inline-error" role="alert">{{ settingsError }}</p>
       <fieldset class="social-provider-list">
-        <legend>投稿先</legend>
-        <label>
+        <legend>投稿先（最大10アカウント）</legend>
+        <label v-for="account in connectedAccounts" :key="account.id" class="social-post-account">
           <input
             type="checkbox"
-            :checked="postTargets.bluesky"
-            :disabled="!settings?.bluesky.configured || postBusy"
-            @change="updatePostTarget('bluesky', ($event.target as HTMLInputElement).checked)"
+            :checked="postTargets.includes(account.id)"
+            :disabled="postBusy || (!postTargets.includes(account.id) && postTargets.length >= 10)"
+            @change="updatePostTarget(account.id, ($event.target as HTMLInputElement).checked)"
           />
-          Bluesky
-          <span v-if="settings?.bluesky.configured" class="social-account">{{
-            settings.bluesky.identifier
+          <span class="social-provider-badge" :class="account.provider">{{
+            providerLabel(account.provider)
           }}</span>
-          <span v-else class="social-disconnected">未接続</span>
+          <span class="social-account">{{ account.label }}</span>
         </label>
-        <label>
-          <input
-            type="checkbox"
-            :checked="postTargets.misskey"
-            :disabled="!settings?.misskey.configured || postBusy"
-            @change="updatePostTarget('misskey', ($event.target as HTMLInputElement).checked)"
-          />
-          Misskey
-          <span v-if="settings?.misskey.configured" class="social-account">{{
-            settings.misskey.instance_url
-          }}</span>
-          <span v-else class="social-disconnected">未接続</span>
-        </label>
+        <p v-if="!connectedCount" class="social-disconnected">接続済みアカウントはありません。</p>
       </fieldset>
       <label class="field">
         本文
@@ -531,9 +559,10 @@ onMounted(() => {
         {{ postError }}
       </p>
       <ul v-if="Object.keys(postResults).length" class="social-post-results" aria-live="polite">
-        <li v-for="(result, provider) in postResults" :key="provider">
+        <li v-for="(result, accountId) in postResults" :key="accountId">
           <span :class="result.success ? 'social-success' : 'inline-error'">
-            {{ providerLabel(provider) }}: {{ result.success ? '投稿しました' : result.error }}
+            {{ providerLabel(result.provider) }} · {{ result.label }}:
+            {{ result.success ? '投稿しました' : result.error }}
           </span>
           <a v-if="result.success && result.url" :href="result.url" target="_blank" rel="noopener noreferrer"
             >投稿を開く</a
@@ -541,7 +570,13 @@ onMounted(() => {
         </li>
       </ul>
       <button class="button primary social-submit" type="submit" :disabled="!canPost">
-        {{ postBusy ? '投稿中…' : '選択した先に投稿' }}
+        {{
+          postBusy
+            ? '投稿中…'
+            : selectedPostTargets.length
+              ? `選択した ${selectedPostTargets.length} アカウントに投稿`
+              : '投稿先を選択してください'
+        }}
       </button>
       <p class="social-private-note">
         動画リンクは初期状態で含まれません。投稿先を選んで送信するまで、キャプチャ画像は外部サービスへ送信されません。

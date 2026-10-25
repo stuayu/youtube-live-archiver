@@ -43,19 +43,30 @@ def delete_misskey_settings(db: Session = Depends(get_db)):
     return social_service.disconnect(db, "misskey")
 
 
+@router.delete("/settings/social/accounts/{account_id}")
+def delete_social_account(account_id: str, db: Session = Depends(get_db)):
+    try:
+        return social_service.disconnect_account(db, account_id)
+    except KeyError:
+        raise HTTPException(404, "SNS アカウントがありません")
+
+
 @router.get("/social/search")
 def search_social_hashtags(
     tag: str = Query(min_length=1, max_length=65),
     providers: str = Query(default="bluesky,misskey", max_length=30),
     bluesky_cursor: str | None = Query(default=None, max_length=1000),
     misskey_cursor: str | None = Query(default=None, max_length=200),
+    misskey_account_id: str | None = Query(default=None, max_length=64),
     db: Session = Depends(get_db),
 ):
     selected = [value.strip() for value in providers.split(",") if value.strip()]
     if not selected or len(selected) != len(set(selected)) or any(value not in ("bluesky", "misskey") for value in selected):
         raise HTTPException(422, "検索先が不正です")
     try:
-        return social_service.search_hashtags(db, tag, selected, bluesky_cursor, misskey_cursor)
+        return social_service.search_hashtags(
+            db, tag, selected, bluesky_cursor, misskey_cursor, misskey_account_id,
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc))
 

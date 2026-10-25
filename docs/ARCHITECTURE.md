@@ -33,7 +33,7 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 
 公開 API の prefix は `/api` です。代表例: `/api/channels`、`/api/storages`、`/api/videos`、`/api/recording-rules`、`/api/settings/transcription`、`/api/settings/summary`、`/api/status`、`/api/events`、`/api/search/transcripts`、`/api/quality-presets`。health endpoint は `/health` です。完全な route 定義は `backend/app/api/` を参照してください。
 
-SNS API はアカウント設定、ハッシュタグ検索、動画への投稿を提供します。Bluesky の refresh token と Misskey token は DATA_DIR/social-credentials.key の鍵で Fernet 暗号化し、AppSetting には暗号文を保存します。キャプチャ画像は投稿要求の処理中だけメモリに置き、検証後に選択先へ中継します。
+SNS API は複数アカウントの設定・個別解除、Misskey 検索アカウントの選択、ハッシュタグ検索、最大10アカウントへのクロスポストを提供します。アカウント ID を投稿先として受け取り、各アカウントの成否を独立して返します。Bluesky の refresh token と Misskey token は DATA_DIR/social-credentials.key の鍵で Fernet 暗号化し、AppSetting の `social.accounts` に暗号文を保存します。旧 `social.bluesky` / `social.misskey` 設定は、次のアカウント編集時に ID 付きのリストへ移行します。キャプチャ画像は投稿要求の処理中だけメモリに置き、検証後に選択先へ中継します。
 
 ### Frontend
 
