@@ -833,6 +833,7 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
         # Tee only the media stream. yt-dlp remains responsible for YouTube URL refresh and metadata.
         yt_proc = None
         ff_proc = None
+        fallback_proc = None
         try:
             yt_proc = popen_recording(tee_ytdlp[len(ytdlp_command()):], stdout=subprocess.PIPE,
                                       cwd=target)
@@ -841,7 +842,7 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
             if stopping(v.id):
                 stop_process(yt_proc)
             ff_proc = launch_recording_ffmpeg(tee_args(settings.ffmpeg_path, hls_dir, target / f"{output_stem}.mkv"),
-                stdin=yt_proc.stdout, stdout=subprocess.DEVNULL)
+                stdin=yt_proc.stdout, stdout=subprocess.DEVNULL, cwd=target)
             write_process_manifest(target, ff_proc, "ffmpeg")
             if yt_proc.stdout is not None:
                 yt_proc.stdout.close()
@@ -918,6 +919,7 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                 proc = fallback_to_direct(RuntimeError("tee process failed"), tee_rc,
                     lambda: popen_recording(fallback_args[len(ytdlp_command()):], stdout=subprocess.DEVNULL),
                     record_tee_failure)
+                fallback_proc = proc
                 active_recorders[v.id] = proc
                 setattr(proc, "recording_stem", fallback_stem)
                 output_stem = fallback_stem
@@ -937,6 +939,11 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                 proc = ff_proc
                 proc.returncode = 0
         except Exception as tee_error:
+            if fallback_proc is not None:
+                stop_process(fallback_proc)
+                if active_recorders.get(v.id) is fallback_proc:
+                    active_recorders.pop(v.id, None)
+                raise
             log.exception("tee launch failed for %s", v.youtube_video_id)
             if yt_proc and yt_proc.poll() is None:
                 stop_process(yt_proc)
@@ -965,17 +972,25 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
                     lambda: popen_recording(fallback_args[len(ytdlp_command()):], stdout=subprocess.DEVNULL),
                     lambda error, rc: db.add(AuditLog(video_id=v.id, action="LIVE_PLAYBACK_FALLBACK",
                         reason="TEE_LAUNCH_FAILED", details={"error": str(error)})))
+                fallback_proc = proc
                 active_recorders[v.id] = proc
                 setattr(proc, "recording_stem", fallback_stem)
                 output_stem = fallback_stem
                 args = fallback_args
             v.live_hls_path = None
-            if proc:
-                write_process_manifest(target, proc, "yt-dlp")
-                if stopping(v.id):
-                    stop_process(proc)
-            shutil.rmtree(hls_dir, ignore_errors=True)
-            db.commit()
+            try:
+                if proc:
+                    write_process_manifest(target, proc, "yt-dlp")
+                    if stopping(v.id):
+                        stop_process(proc)
+                shutil.rmtree(hls_dir, ignore_errors=True)
+                db.commit()
+            except Exception:
+                if fallback_proc is not None:
+                    stop_process(fallback_proc)
+                    if active_recorders.get(v.id) is fallback_proc:
+                        active_recorders.pop(v.id, None)
+                raise
     else:
         proc = popen_recording(args[len(ytdlp_command()):], stdout=subprocess.DEVNULL)
         write_process_manifest(target, proc, "yt-dlp")

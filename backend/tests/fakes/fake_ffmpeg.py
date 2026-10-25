@@ -15,6 +15,8 @@ def stop(_signum, _frame):
 
 signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
+if hasattr(signal, "SIGBREAK"):
+    signal.signal(signal.SIGBREAK, stop)
 args = sys.argv[1:]
 if "-i" in args and args[args.index("-i") + 1] == "pipe:0" and os.environ.get("FAKE_FFMPEG_TEE_FAIL") == "1":
     raise SystemExit(1)

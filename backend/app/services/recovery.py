@@ -132,6 +132,7 @@ def salvage_live_part(directory, stem: str, audit_callback, *, ffmpeg_path: str 
     import subprocess
     import tempfile
     from pathlib import Path
+    from .ffmpeg import ffmpeg_command
     directory = Path(directory)
     final = [directory / f"{stem}.{ext}" for ext in ("mkv", "mp4", "ts", "webm")]
     if any(path.is_file() and path.stat().st_size > 0 for path in final):
@@ -162,7 +163,7 @@ def salvage_live_part(directory, stem: str, audit_callback, *, ffmpeg_path: str 
         else:
             command.extend(["-map", "0"])
         command.extend(["-c", "copy", str(temp)])
-        result = subprocess.run(command,
+        result = subprocess.run(ffmpeg_command(command),
                                 capture_output=True, timeout=timeout, check=False)
         duration = probe_duration(temp) if result.returncode == 0 else None
         if duration is None:

@@ -1,5 +1,6 @@
 """Helpers for isolated, opt-in HLS sidecars."""
 from pathlib import Path
+import os
 import re
 import shutil
 import subprocess
@@ -58,24 +59,28 @@ def prune_hls(hls_dir: Path, limit_bytes: int) -> int:
     return removed
 
 def tee_args(ffmpeg_path: str, hls_dir: Path, output_file: Path) -> list[str]:
+    """Return tee arguments with output paths relative to the archive directory."""
     hls_dir.mkdir(parents=True, exist_ok=True)
     transport_stream = output_file.with_suffix(".tee.ts")
+    relative_hls_dir = Path(os.path.relpath(hls_dir, output_file.parent)).as_posix()
     hls_output = (
         f"[f=hls:hls_time=6:hls_list_size=0:"
         f"hls_flags=append_list+independent_segments+temp_file:"
-        f"hls_segment_filename={hls_dir / 'segment_%06d.ts'}]"
-        f"{hls_dir / 'index.m3u8'}"
+        f"hls_segment_filename={relative_hls_dir}/segment_%06d.ts]"
+        f"{relative_hls_dir}/index.m3u8"
     )
     return [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-y", "-i", "pipe:0", "-map", "0", "-c", "copy", "-f", "tee",
-            f"[f=mpegts]{transport_stream}|{hls_output}"]
+            f"[f=mpegts]{transport_stream.name}|{hls_output}"]
 
 
 def finalize_tee_archive(ffmpeg_path: str, transport_stream: Path, output_file: Path) -> bool:
     """Remux tee's transport stream into MKV after FFmpeg closes both outputs."""
+    from .ffmpeg import ffmpeg_command
+
     temporary = output_file.with_name(f"{output_file.stem}.tee.tmp.mkv")
     result = subprocess.run(
-        [ffmpeg_path, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(transport_stream),
-         "-map", "0", "-c", "copy", str(temporary)],
+        ffmpeg_command([ffmpeg_path, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(transport_stream),
+                        "-map", "0", "-c", "copy", str(temporary)]),
         capture_output=True,
         check=False,
     )

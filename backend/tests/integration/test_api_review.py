@@ -395,7 +395,9 @@ def test_status_attention_and_job_run_statistics(client, monkeypatch, tmp_path):
         failed = Video(youtube_video_id=uuid4().hex[:11], channel_id=channel_id, title="failed", status="RECORDING_FAILED")
         db.add(failed)
         db.commit()
-    client.post("/api/storages", json={"name": "unreachable", "root_path": "D:\\missing"})
+    unreachable_root = tmp_path / "unreachable-storage"
+    unreachable_root.write_text("not a directory", encoding="utf-8")
+    client.post("/api/storages", json={"name": "unreachable", "root_path": str(unreachable_root)})
     monkeypatch.setattr(main, "_tool_cache", {"yt_dlp_available": False, "yt_dlp_version": None, "yt_dlp_error": "missing",
                                                "ffmpeg_available": False, "ffprobe_available": False})
     monkeypatch.setattr(main, "_job_stats", {})

@@ -1934,6 +1934,7 @@ def test_tee_heartbeat_database_failure_does_not_restart_or_lose_recording(
 
 def test_tee_fallback_database_failure_stops_fallback_process(
         tmp_path, fake_youtube, monkeypatch):
+    import os
     import subprocess
     import sys
     from sqlalchemy.exc import PendingRollbackError
@@ -1961,9 +1962,11 @@ def test_tee_fallback_database_failure_stops_fallback_process(
             process = original_popen(args, **kwargs)
             tee_processes.append(process)
             return process
+        process_options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                           if os.name == "nt" else {"start_new_session": True})
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.PIPE)
+                                   stderr=subprocess.PIPE, **process_options)
         recorder.capture_stderr(process)
         fallback_process.append(process)
         return process

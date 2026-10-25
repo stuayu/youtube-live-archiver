@@ -22,6 +22,18 @@ def test_tee_launch_failure_falls_back_to_direct_recorder():
     assert events == [("ffmpeg missing", None), "direct"]
 
 
+def test_tee_outputs_are_relative_to_the_recording_directory(tmp_path):
+    storage = tmp_path / "storage"
+    output_dir = storage / "channel" / "video"
+    hls_dir = storage / "live" / "abc123"
+
+    args = tee_args("ffmpeg", hls_dir, output_dir / "video.mkv")
+
+    assert args[-1].startswith("[f=mpegts]video.tee.ts|")
+    assert "hls_segment_filename=../../live/abc123/segment_%06d.ts" in args[-1]
+    assert args[-1].endswith("]../../live/abc123/index.m3u8")
+
+
 def test_hls_segments_are_published_only_after_complete_write(tmp_path):
     args = tee_args("ffmpeg", tmp_path / "live", tmp_path / "archive.mkv")
     assert "hls_flags=append_list+independent_segments+temp_file" in args[-1]

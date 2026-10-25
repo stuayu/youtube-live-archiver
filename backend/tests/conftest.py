@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -173,7 +174,8 @@ def _drop_test_database():
 def tmp_path(request) -> Path:
     """Use a per-test directory and fall back to the workspace if system temp is unavailable."""
     run = os.environ.get("YLA_TEST_RUN", "default")
-    name = f"{request.node.name}-{run}".replace("/", "_")[:120]
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", f"{request.node.name}-{run}")
+    name = name[:120].rstrip(" .") or "test"
     try:
         base = Path(tempfile.gettempdir()) / "yla-tests"
         base.mkdir(parents=True, exist_ok=True)

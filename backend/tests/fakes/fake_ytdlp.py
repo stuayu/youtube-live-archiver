@@ -75,6 +75,8 @@ def _recording(argv: list[str], video: dict, video_id: str) -> int:
     global _INTERRUPTED
     signal.signal(signal.SIGINT, _interrupt)
     signal.signal(signal.SIGTERM, _interrupt)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _interrupt)
     if video.get("live_status") == "is_upcoming":
         return fail("upcoming_error")
     template = argv[argv.index("-o") + 1]

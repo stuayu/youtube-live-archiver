@@ -57,10 +57,12 @@ def test_transcript_search_without_q_and_with_q(client):
 @pytest.mark.integration
 def test_storage_validation_usage_and_reference_safe_delete(client, tmp_path):
     assert client.post("/api/storages", json={"name": "relative", "root_path": "archive"}).status_code == 422
-    windows = client.post("/api/storages", json={"name": "windows", "root_path": "D:\\archive"})
-    assert windows.status_code == 200
+    invalid_root = tmp_path / "not-a-directory"
+    invalid_root.write_text("not a directory", encoding="utf-8")
+    storage = client.post("/api/storages", json={"name": "windows", "root_path": str(invalid_root)})
+    assert storage.status_code == 200
     assert client.post("/api/storages", json={"name": "windows", "root_path": str(tmp_path)}).status_code == 409
-    storage_id = windows.json()["id"]
+    storage_id = storage.json()["id"]
     channel_id = add_channel()
     with SessionLocal() as db:
         db.get(Channel, channel_id).storage_id = int(storage_id)

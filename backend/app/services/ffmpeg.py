@@ -2,14 +2,22 @@
 import subprocess
 import tempfile
 import os
+import sys
 from pathlib import Path
 
 from ..config import settings
 
 
+def ffmpeg_command(args: list[str]) -> list[str]:
+    """Run Python-based FFmpeg test/development shims through the active interpreter."""
+    if args and Path(args[0]).suffix.lower() == ".py":
+        return [sys.executable, *args]
+    return list(args)
+
+
 def run_ffmpeg(args: list[str], *, timeout=60, text=False):
     """Run a finite ffmpeg command through the shared wrapper."""
-    return subprocess.run(args, capture_output=True, timeout=timeout, text=text, check=False)
+    return subprocess.run(ffmpeg_command(args), capture_output=True, timeout=timeout, text=text, check=False)
 
 
 def launch_ffmpeg(args: list[str], **kwargs):
@@ -18,7 +26,7 @@ def launch_ffmpeg(args: list[str], **kwargs):
         kwargs.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
     else:
         kwargs.setdefault("start_new_session", True)
-    return subprocess.Popen(args, **kwargs)
+    return subprocess.Popen(ffmpeg_command(args), **kwargs)
 
 
 def extract_whisper_audio(source: Path, *, ffmpeg_path: str | None = None,
