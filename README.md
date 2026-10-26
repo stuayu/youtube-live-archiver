@@ -68,6 +68,7 @@ Windows 10 / 11 に新しく導入し、Windows サービスとして常駐さ�
 | ffmpeg | `ffmpeg` と `ffprobe`。録画の結合・検証・変換に使います。 |
 | Git | ソースコードの取得と更新に使います。 |
 | ディスク | 本体と依存パッケージで約 1 GB、文字起こしを使う場合はモデル（既定の `large-v3-turbo` で約 1.6 GB）と、録画の保存先。 |
+| NVIDIA GPU（任意） | Windows x64 の CUDA 12 対応 GPU。GPU ランタイムを追加する場合は約 1.3 GB の空き容量が必要です。 |
 
 PostgreSQL と yt-dlp は、Python の依存パッケージとして一緒に入るため、別途インストールは不要です。
 
@@ -586,7 +587,15 @@ DPlayer の標準ホットキーを有効にしています。歯車メニュー
 
 録画完了後、任意設定で faster-whisper による文字起こしを処理キューへ登録します。失敗・再試行は録画状態から独立しています。文字起こしは動画詳細、全文検索、字幕出力から利用できます。要約は既定で無効で、OpenRouter を使う場合はタイムスタンプ付き文字起こしテキストを外部 API へ送ります。動画・音声ファイルは送信しません。
 
-device が `auto` の場合は CUDA を試し、モデル初期化に失敗すると CPU / int8 で再試行します。Windows で CUDA の cuBLAS DLL が不足している場合は、設定画面で device を `cpu`、compute type を `int8` にすると、次の文字起こし試行から CPU を使います。処理中のジョブには設定変更は適用されません。
+device が `auto` の場合は CUDA を試し、モデル初期化に失敗すると CPU / int8 で再試行します。GPU を使わず CPU で処理する場合は、設定画面で device を `cpu`、compute type を `int8` にします。処理中のジョブには設定変更は適用されません。
+
+Windows で NVIDIA GPU を使う場合は、リポジトリのルートでサービス用 Python に任意の CUDA 依存パッケージを追加します（約 1.3 GB）。
+
+```powershell
+.\backend\.venv\Scripts\python.exe -m pip install -r .\backend\requirements-cuda-windows.txt
+```
+
+アプリは Windows の NVIDIA wheel に含まれる DLL ディレクトリを文字起こしモデルの読み込み前に登録します。Python から CUDA デバイスを検出すると `auto` が GPU を選びます。GPU のない環境ではこの追加依存は不要です。
 
 ## トラブルシューティング
 
@@ -602,7 +611,7 @@ device が `auto` の場合は CUDA を試し、モデル初期化に失敗す�
 | 録画が始まらない | 録画枠、保存先の有効 / 書込権限 / 空き容量、`WAITING_FOR_STORAGE`、動画状態、`yt-dlp` ログを確認します。 |
 | 録画が部分状態のまま | `recording.json`、録画ディレクトリの stem ごとのファイル、復旧履歴、YouTube 上の公開状態を確認します。配信終了時の yt-dlp エラーは、公開状態と YouTube / 実ファイルの長さが一致した場合だけ完了として扱います。保全ファイルを手動で消さないでください。 |
 | 再生できない | プレイヤー内の案内に従い、リマックスまたは H.264 変換を選びます。 |
-| 文字起こしされない | 設定の有効状態、処理ジョブ、ffmpeg、Whisper のモデル / device / compute type、ログを確認します。CUDA の cuBLAS DLL 不足が出る場合は device=`cpu`、compute type=`int8` にして次回試行を確認します。 |
+| 文字起こしされない | 設定の有効状態、処理ジョブ、ffmpeg、Whisper のモデル / device / compute type、ログを確認します。Windows で `cublas64_12.dll` が見つからない場合は、GPU を使うなら `requirements-cuda-windows.txt` をサービス用 Python にインストールしてサービスを再起動します。CPU を使うなら device=`cpu`、compute type=`int8` にします。 |
 | Retention が保留される | Remote 状態、`remote_checks`、編集検出モード、ffmpeg、fingerprint と duration の取得状況を確認します。保留中のファイルは削除しません。 |
 
 ## テストと画面キャプチャ

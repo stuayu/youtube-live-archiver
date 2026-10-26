@@ -1,8 +1,54 @@
 """Transcript normalization, serialization, and faster-whisper adapter."""
 import logging
+import os
 import re
+import site
+import sys
+from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+_WINDOWS_CUDA_DLL_HANDLES = []
+_WINDOWS_CUDA_DLL_PATHS = set()
+
+
+def _supports_windows_dll_registration():
+    return os.name == "nt" and hasattr(os, "add_dll_directory")
+
+
+def register_windows_cuda_dlls():
+    """Expose NVIDIA pip-wheel DLLs before CTranslate2 is imported on Windows."""
+    if not _supports_windows_dll_registration():
+        return
+
+    site_packages = set()
+    try:
+        site_packages.update(Path(path) for path in site.getsitepackages())
+    except (AttributeError, OSError):
+        pass
+    site_packages.add(Path(sys.prefix) / "Lib" / "site-packages")
+
+    dll_dirs = []
+    for root in site_packages:
+        nvidia = root / "nvidia"
+        for component in ("cublas", "cudnn", "cuda_runtime"):
+            for folder in ("bin", "lib", "lib/x64"):
+                candidate = nvidia / component / folder
+                if candidate.is_dir():
+                    dll_dirs.append(str(candidate.resolve()))
+
+    path_entries = {part.casefold() for part in os.environ.get("PATH", "").split(os.pathsep) if part}
+    for dll_dir in dll_dirs:
+        key = os.path.normcase(dll_dir)
+        if key not in _WINDOWS_CUDA_DLL_PATHS:
+            try:
+                _WINDOWS_CUDA_DLL_HANDLES.append(os.add_dll_directory(dll_dir))
+                _WINDOWS_CUDA_DLL_PATHS.add(key)
+            except OSError as exc:
+                log.warning("Could not register CUDA DLL directory %s (%s)", dll_dir, type(exc).__name__)
+        if dll_dir.casefold() not in path_entries:
+            os.environ["PATH"] = os.pathsep.join((os.environ.get("PATH", ""), dll_dir)).strip(os.pathsep)
+            path_entries.add(dll_dir.casefold())
 
 
 def preprocess_segments(segments):
@@ -62,6 +108,7 @@ def to_srt(segments):
 
 def load_whisper_model(*, model_name, device, compute_type):
     """Lazy import keeps normal app startup independent of model downloads/runtime."""
+    register_windows_cuda_dlls()
     from faster_whisper import WhisperModel
     actual_device = device
     actual_compute = compute_type

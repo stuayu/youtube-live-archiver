@@ -1,0 +1,6 @@
+# Optional Windows GPU acceleration for faster-whisper / CTranslate2.
+# These NVIDIA CUDA 12 and cuDNN 9 wheels are intentionally separate from
+# requirements.txt so CPU-only installations do not download over 1 GB of DLLs.
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cudnn-cu12==9.27.0.42

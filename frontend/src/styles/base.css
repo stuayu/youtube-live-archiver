@@ -1436,8 +1436,8 @@ legend {
 }
 .chat-message.superchat,
 .chat-message.supersticker {
-  border-left: 4px solid var(--message-color, #1681a5);
-  background: color-mix(in srgb, var(--message-color, #1681a5) 18%, var(--surface));
+  border-left: 1px solid color-mix(in srgb, var(--message-color, #1681a5) 58%, var(--line));
+  background: color-mix(in srgb, var(--message-color, #1681a5) 12%, var(--surface));
 }
 .paid-header,
 .membership-header,

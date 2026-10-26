@@ -155,7 +155,7 @@ yt-dlp の chat offset は元配信開始基準です。`recording_start_offset_
 
 追っかけ HLS は `live/<video_id>` 下で録画中に追記し、byte budget を超えると古い segment を整理します。FFmpeg に渡す相対パスは、録画ディレクトリと HLS ディレクトリを両方 resolve してから計算し、symlink を通して保存先にアクセスした場合も出力先がずれないようにします。DB の `live_hls_path` で登録された安全な path のみ配信します。playlist は no-store、segment は immutable cache です。アーカイブ成功検証後だけ sidecar を整理します。
 
-文字起こしと要約は `processing_jobs` に入り、録画 status から独立しています。文字起こしは faster-whisper を使います。device=`auto` は CUDA モデルの初期化に失敗した場合に CPU / int8 へ fallback し、各試行の開始時に前回エラーを消して現在の失敗と混同しないようにします。要約は opt-in で OpenRouter を使います。全文検索は正規化文字起こし segment をページングし、PostgreSQL `pg_trgm` が使えれば検索候補に利用し、無い場合は ILIKE へ fallback します。
+文字起こしと要約は `processing_jobs` に入り、録画 status から独立しています。文字起こしは faster-whisper を使います。Windows ではモデル import の前に NVIDIA pip wheel の DLL ディレクトリを `os.add_dll_directory()` とプロセス PATH に登録します。GPU 用ライブラリは任意の `requirements-cuda-windows.txt` に分け、CPU 専用導入で巨大な CUDA wheel を取得しないようにします。device=`auto` は CUDA モデルの初期化に失敗した場合に CPU / int8 へ fallback し、各試行の開始時に前回エラーを消して現在の失敗と混同しないようにします。要約は opt-in で OpenRouter を使います。全文検索は正規化文字起こし segment をページングし、PostgreSQL `pg_trgm` が使えれば検索候補に利用し、無い場合は ILIKE へ fallback します。
 
 ## 設定と運用上の境界
 

@@ -1,4 +1,6 @@
 from datetime import timedelta, timezone
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine, select
@@ -53,6 +55,33 @@ def test_auto_whisper_falls_back_to_cpu_when_cuda_runtime_fails(monkeypatch):
         ("large-v3-turbo", "cuda", "auto"),
         ("large-v3-turbo", "cpu", "int8"),
     ]
+
+
+def test_windows_cuda_wheel_dirs_are_registered_before_model_import(monkeypatch, tmp_path):
+    site_packages = tmp_path / "Lib" / "site-packages"
+    expected = {
+        (site_packages / "nvidia" / component / "bin").resolve()
+        for component in ("cublas", "cudnn", "cuda_runtime")
+    }
+    for path in expected:
+        path.mkdir(parents=True)
+
+    registered = []
+    monkeypatch.setattr(transcription, "_supports_windows_dll_registration", lambda: True)
+    monkeypatch.setattr(transcription.site, "getsitepackages", lambda: [str(site_packages)])
+    monkeypatch.setattr(transcription.sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.setattr(transcription.os, "add_dll_directory", lambda path: registered.append(path) or object(), raising=False)
+    monkeypatch.setattr(transcription, "_WINDOWS_CUDA_DLL_HANDLES", [])
+    monkeypatch.setattr(transcription, "_WINDOWS_CUDA_DLL_PATHS", set())
+    monkeypatch.setenv("PATH", "existing-path")
+
+    transcription.register_windows_cuda_dlls()
+    transcription.register_windows_cuda_dlls()
+
+    assert {Path(path) for path in registered} == expected
+    path_entries = os.environ["PATH"].split(os.pathsep)
+    assert len(path_entries) == len(set(path_entries))
+    assert expected.issubset({Path(path) for path in path_entries})
 
 
 def test_failure_updates_transcription_only_and_schedules_retry(monkeypatch, tmp_path):
