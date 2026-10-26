@@ -94,6 +94,25 @@ const activeTranscriptKey = computed(() => {
   )
   return segment ? `${segment.start}-${segment.end}` : ''
 })
+const transcriptStatusMessage = computed(() => {
+  const count = props.transcript.total.toLocaleString()
+  switch (props.transcript.status) {
+    case 'pending':
+      return '文字起こしの開始を待っています。'
+    case 'processing':
+      return `文字起こし中です。字幕を ${count} 件生成しました。`
+    case 'retry_wait':
+      return `文字起こしに失敗し、自動再試行を待っています。生成済み字幕は ${count} 件です。`
+    case 'failed':
+      return '文字起こしに失敗しました。上のボタンから再実行できます。'
+    case 'disabled':
+      return '文字起こしは無効です。設定画面で有効にしてください。'
+    case 'completed':
+      return props.transcript.total === 0 ? '処理は完了しましたが、字幕は生成されませんでした。' : ''
+    default:
+      return ''
+  }
+})
 function replayStatus() {
   const replay = props.chat.replay
   if (!replay) return ''
@@ -486,6 +505,14 @@ watch(
       <button class="button secondary" :disabled="busy" @click="emit('runTranscript')">
         文字起こしを実行
       </button>
+      <p
+        v-if="transcriptStatusMessage"
+        :class="transcript.status === 'failed' ? 'inline-error' : 'meta'"
+        role="status"
+        aria-live="polite"
+      >
+        {{ transcriptStatusMessage }}
+      </p>
       <label class="check-field transcript-sync-control">
         <input
           type="checkbox"

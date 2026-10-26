@@ -129,6 +129,7 @@ let playerSettings: DPlayerSettingsHandle | undefined
 let chatTimer = 0
 let chatRequestSequence = 0
 let transcriptRequestSequence = 0
+let transcriptTimer = 0
 let playbackTimer = 0
 let monitorTimer = 0
 let initialized = false
@@ -176,9 +177,23 @@ async function loadTranscript(atSeconds?: number) {
   )
     return
   transcript.value = result
+  updateTranscriptPolling(result.status)
   if (atSeconds !== undefined && typeof result.offset === 'number') {
     transcriptPage.value = Math.floor(result.offset / 100)
   }
+}
+function updateTranscriptPolling(status: string) {
+  if (['pending', 'processing', 'retry_wait'].includes(status)) {
+    if (!transcriptTimer) {
+      transcriptTimer = window.setInterval(() => {
+        if (document.visibilityState === 'hidden') return
+        void loadTranscript().catch(() => {})
+      }, 10_000)
+    }
+    return
+  }
+  window.clearInterval(transcriptTimer)
+  transcriptTimer = 0
 }
 async function syncTranscriptAt(seconds: number) {
   if (!syncTranscript.value || tab.value !== 'transcript' || transcriptQuery.value) return
@@ -639,6 +654,8 @@ function destroy() {
   prepareSequence += 1
   window.clearTimeout(metadataTimer)
   window.clearInterval(chatTimer)
+  window.clearInterval(transcriptTimer)
+  transcriptTimer = 0
   window.clearInterval(playbackTimer)
   window.clearInterval(monitorTimer)
   hls?.destroy()
