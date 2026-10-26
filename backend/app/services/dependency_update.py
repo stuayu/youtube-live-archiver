@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import importlib.util
 import json
 import logging
+import locale
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -230,6 +232,27 @@ def _write_runner_config(config: dict) -> Path:
     return path
 
 
+def _task_scheduler_date() -> str:
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+         "(Get-Date).AddDays(1).ToString('d')"],
+        capture_output=True, timeout=20, check=False,
+    )
+    value = (result.stdout or b"").decode(locale.getpreferredencoding(False), errors="replace").strip()
+    if result.returncode or not value:
+        raise RuntimeError("Windows の地域設定に合うタスク開始日を取得できませんでした")
+    return value
+
+
+def _task_command_error(result: subprocess.CompletedProcess) -> str:
+    raw = b"\n".join(part for part in (result.stdout, result.stderr) if part)
+    detail = raw.decode(locale.getpreferredencoding(False), errors="replace")
+    detail = re.sub(r"(?i)\b[A-Z]:\\[^\s\"<>|]+", "<PATH>", detail)
+    detail = re.sub(r"(?i)(password|token|authorization)(\s*[:=]\s*)\S+",
+                    r"\1\2<REDACTED>", detail)
+    return " ".join(detail.split())[-240:]
+
+
 def _launch_switcher(config_path: Path) -> None:
     runner = Path(__file__).resolve().parents[1] / "dependency_update_runner.py"
     task_name = "\\YouTubeLiveArchiverDependencyUpdate-" + uuid.uuid4().hex
@@ -237,20 +260,22 @@ def _launch_switcher(config_path: Path) -> None:
     config["task_name"] = task_name
     config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
     command = f'"{sys.executable}" "{runner}" "{config_path}"'
-    run_at = datetime.now() + timedelta(days=1)
+    start_date = _task_scheduler_date()
     try:
         create = subprocess.run(
             ["schtasks.exe", "/Create", "/TN", task_name, "/SC", "ONCE",
-             "/SD", run_at.strftime("%m/%d/%Y"), "/ST", "23:59", "/RU", "SYSTEM",
+             "/SD", start_date, "/ST", "23:59", "/RU", "SYSTEM",
              "/RL", "HIGHEST", "/TR", command, "/F"],
             capture_output=True, timeout=30, check=False,
         )
         if create.returncode:
-            raise RuntimeError("更新切替用の Windows タスクを作成できませんでした")
+            detail = _task_command_error(create)
+            raise RuntimeError("更新切替用の Windows タスクを作成できませんでした" + (f": {detail}" if detail else ""))
         started = subprocess.run(["schtasks.exe", "/Run", "/TN", task_name],
                                  capture_output=True, timeout=30, check=False)
         if started.returncode:
-            raise RuntimeError("更新切替用の Windows タスクを起動できませんでした")
+            detail = _task_command_error(started)
+            raise RuntimeError("更新切替用の Windows タスクを起動できませんでした" + (f": {detail}" if detail else ""))
     except Exception:
         subprocess.run(["schtasks.exe", "/Delete", "/TN", task_name, "/F"],
                        capture_output=True, timeout=30, check=False)
