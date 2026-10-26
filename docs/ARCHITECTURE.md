@@ -22,6 +22,7 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 | `app/services/image_cache.py` | 外部サムネイルの host 制限、取得、キャッシュ、失敗 cooldown。 |
 | `app/services/recorder.py` | 録画枠、プロセス管理、yt-dlp / ffmpeg tee、chat subprocess、成果物救出、完了 commit。 |
 | `app/services/ytdlp_update.py` | 公式 stable / nightly / master の確認、SHA-256 と実行版の検証、録画終了後の安全な切り替え、Deno / EJS 検出。 |
+| `app/services/dependency_update.py`, `app/dependency_update_runner.py` | Windows NSSM 向けの依存関係一括更新。別環境で準備し、録画・処理が idle になってからタスクスケジューラ経由でサービスを切替・起動確認し、失敗時は旧 Python に戻す。 |
 | `app/services/recovery.py` | Remote 状態に基づく復旧判断、`.part` 救出、中間ファイル整理、stem 採番。 |
 | `app/services/backfill.py` | `recording.json` と成果物を使う既存録画の補完・再構築処理。 |
 | `app/services/locks.py` | PostgreSQL session advisory lock と処理別 lock namespace。 |
@@ -37,6 +38,8 @@ FastAPI と APScheduler を同一 backend プロセスで動かします。Postg
 SNS API は複数アカウントの設定・個別解除、Misskey 検索アカウントの選択、ハッシュタグ検索、最大10アカウントへのクロスポストを提供します。Misskey は `/api/settings/social/misskey/miauth` でMiAuthセッションを発行し、`/check` で認証状態を確認します。セッションはプロセス内に10分だけ保持し、コールバックURLは使いません。アカウント ID を投稿先として受け取り、各アカウントの成否を独立して返します。Bluesky の refresh token と Misskey token は DATA_DIR/social-credentials.key の鍵で Fernet 暗号化し、AppSetting の `social.accounts` に暗号文を保存します。Misskey token は認証完了時に backend で暗号化し、ブラウザーには返しません。旧 `social.bluesky` / `social.misskey` 設定は、次のアカウント編集時に ID 付きのリストへ移行します。キャプチャ画像は投稿要求の処理中だけメモリに置き、検証後に選択先へ中継します。
 
 yt-dlp は起動時と24時間ごとに選択チャンネルの GitHub リリースを確認します。アプリ管理の版は `DATA_DIR/tools/yt-dlp` に版ごとの実行ファイルと `current.json` を置き、SHA-256 と `--version` を検証後に manifest を atomic replace して切り替えます。古い実行ファイルをその場で上書きしないため、すでに起動した録画子プロセスは完了し、次回の起動から新しい版を使います。直前版も残し、更新検証に失敗した場合は現行 manifest を維持します。データベース設定 `yt_dlp_update_channel` と `yt_dlp_auto_update` が画面設定を保持し、Deno と yt-dlp-ejs の状態は `/api/status` と更新設定画面へ別々に返します。
+
+設定画面の依存関係一括更新は Windows NSSM / LocalSystem 構成でのみ有効です。`backend/.venv-updates/<id>` に Python 環境を作り、`pip check` と主要モジュールの import、npm の更新と画面 build を切替前に行います。固定指定の Python / CUDA 依存は維持し、宣言されたバージョン範囲内で更新します。`pgserver` の版は現行環境に固定し、DB エンジン自体の更新を避けます。切替前に録画、処理キュー、変換、yt-dlp 更新、scheduler の実行中 job が無いことを確認し、書き込み API を一時停止します。サービス停止後は別の SYSTEM タスクから Python 実行先を入れ替え、新プロセスの `/health` を確認します。失敗時は旧 Python に戻して再起動します。Python / Node.js 本体、Deno、ffmpeg、PostgreSQL 本体、OS / GPU ドライバーは管理外です。
 
 ### Frontend
 

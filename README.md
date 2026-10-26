@@ -284,6 +284,16 @@ Restart-Service YouTubeLiveArchiver    # backend\.env を変更したあとな�
 - Windows Update などで PC が再起動した場合は、サービスが自動で起動し、中断した録画を再開します。
 - `-UseScheduledTask` で登録した場合は、PATH の追加とログファイルへの出力が行われず、停止（`Stop-ScheduledTask -TaskName 'YouTube Live Archiver'`）は強制終了になります。特別な理由が無ければ NSSM を使ってください。
 
+**設定画面から依存関係をまとめて更新**
+
+NSSM と LocalSystem で運用している場合は、設定画面の「依存関係の一括更新」を実行できます。新しい Python 環境と画面を別に準備し、録画・ダウンロード・文字起こし・要約・変換・バックグラウンド処理が終わってからサービスを切り替えます。新環境の起動確認に失敗した場合は、旧 Python 環境へ自動で戻します。切替中は設定変更などの更新 API を一時停止します。
+
+- Python の `requirements.txt` と npm の宣言範囲に従い、範囲指定された依存関係を更新します。固定バージョンの Python パッケージと CUDA ライブラリは変更しません。
+- yt-dlp は設定画面で選んだ stable / nightly / master のチャンネルに従います。録画中に実行中の yt-dlp はそのまま使い、更新版は次の起動から適用します。
+- Python / Node.js 本体、固定版の CUDA ライブラリ、Deno、ffmpeg、PostgreSQL 本体、Windows や GPU ドライバーは対象外です。これらは Windows 側で個別に更新してください。
+- 更新には新旧環境のための追加ディスク容量が必要です。切替後も現行と直前の Python 環境を残し、次回更新時に古い環境を整理します。
+- NSSM 以外のサービス方式、対話ユーザーで動くサービス、npm がサービスの PATH から見つからない環境では利用できません。
+
 #### 9. 他の端末から開く（ファイアウォールと Tailscale）
 
 既定ではすべてのネットワークインターフェース（`0.0.0.0`）のポート 8000 で待ち受けますが、Windows のファイアウォールが受信を止めています。管理者 PowerShell で許可します。

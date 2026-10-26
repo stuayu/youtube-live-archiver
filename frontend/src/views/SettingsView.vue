@@ -7,6 +7,7 @@ import FormatsSection from '../components/settings/FormatsSection.vue'
 import DisplaySection from '../components/settings/DisplaySection.vue'
 import SocialSection from '../components/settings/SocialSection.vue'
 import YtDlpSection from '../components/settings/YtDlpSection.vue'
+import DependencyUpdateSection from '../components/settings/DependencyUpdateSection.vue'
 </script>
 
 <template>
@@ -22,6 +23,7 @@ import YtDlpSection from '../components/settings/YtDlpSection.vue'
     <SummarySection />
     <SocialSection />
     <RecordingSection />
+    <DependencyUpdateSection />
     <YtDlpSection />
     <FormatsSection />
     <DisplaySection />

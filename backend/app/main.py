@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 
 _job_lock = threading.Lock()
 _job_stats: dict[str, dict] = {}
+_mutation_gate = threading.Lock()
+_active_mutations = 0
 _tool_cache: dict | None = None
 _job_intervals = {"channel-monitor": 5, "recorder": 5, "manual-video": 60,
                   "retention": 900, "derived-cleanup": 86400, "protection": 21600,
@@ -38,6 +40,9 @@ _job_intervals = {"channel-monitor": 5, "recorder": 5, "manual-video": 60,
 def _tracked_job(job_id: str, callback):
     interval_seconds = _job_intervals.get(job_id, 0)
     def run():
+        from .services.dependency_update import maintenance_requested
+        if maintenance_requested():
+            return None
         started = datetime.now(timezone.utc)
         with _job_lock:
             item = _job_stats.setdefault(job_id, {"run_count": 0, "error_count": 0})
@@ -66,6 +71,11 @@ def _tracked_job(job_id: str, callback):
                 item["last_duration_ms"] = int((finished - started).total_seconds() * 1000)
     run.__name__ = f"tracked_{job_id.replace('-', '_')}"
     return run
+
+
+def active_mutation_count() -> int:
+    with _mutation_gate:
+        return _active_mutations
 
 
 @asynccontextmanager
@@ -161,6 +171,36 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="YouTube Live Archiver", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def pause_mutations_during_dependency_switch(request: Request, call_next):
+    from .services.dependency_update import maintenance_requested
+    global _active_mutations
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return await call_next(request)
+    path = request.url.path
+    is_cancel = path.endswith("/settings/dependencies/cancel")
+    is_recording_stop = path.endswith("/recording/stop")
+    tracked = False
+    with _mutation_gate:
+        phase = None
+        if maintenance_requested():
+            from .services.dependency_update import _read_state
+            phase = _read_state().get("phase")
+        allowed_during_wait = phase == "waiting_for_idle" and (is_cancel or is_recording_stop)
+        if phase and not allowed_during_wait:
+            return JSONResponse(status_code=503,
+                                content={"error": "依存関係の更新準備中です。しばらくしてから再試行してください"},
+                                headers={"Retry-After": "10"})
+        _active_mutations += 1
+        tracked = True
+    try:
+        return await call_next(request)
+    finally:
+        if tracked:
+            with _mutation_gate:
+                _active_mutations -= 1
 
 
 class UTCJSONResponse(JSONResponse):
@@ -264,7 +304,9 @@ app.include_router(router)
 
 
 @app.get("/health")
-def health(): return {"status": "ok"}
+def health():
+    from .services.dependency_update import runtime_id
+    return {"status": "ok", "runtime_id": runtime_id()}
 
 
 # frontend をビルド済みの場合は同一プロセスから配信する（単一サービスで常駐させるため）。

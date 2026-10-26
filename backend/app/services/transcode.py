@@ -107,6 +107,11 @@ def status(video_id: int, mode: str):
         return {"status": "idle", "path": None, "error": None, "progress": 0.0}
 
 
+def active_count() -> int:
+    with _guard:
+        return sum(job.get("status") in ("queued", "running") for job in _jobs.values())
+
+
 def _set_progress(key: tuple[int, str], value: float) -> None:
     with _guard:
         current = _jobs.get(key)

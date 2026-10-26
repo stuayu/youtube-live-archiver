@@ -2,6 +2,32 @@ from .common import *
 from ..schemas import YtDlpSettingsIn, YtDlpUpdateIn
 
 
+@router.get("/settings/dependencies")
+def get_dependency_update_status():
+    from ..services import dependency_update
+    return dependency_update.status()
+
+
+@router.post("/settings/dependencies/update")
+def update_dependencies():
+    from ..services import dependency_update
+    try:
+        started = dependency_update.start_update()
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    if not started:
+        raise HTTPException(409, "依存関係の更新はすでに実行中です")
+    return {"started": True}
+
+
+@router.post("/settings/dependencies/cancel")
+def cancel_dependency_update():
+    from ..services import dependency_update
+    if not dependency_update.cancel_update():
+        raise HTTPException(409, "切り替え中の更新はキャンセルできません")
+    return {"cancelled": True}
+
+
 @router.get("/settings/ytdlp")
 def get_ytdlp_settings(db: Session = Depends(get_db)):
     from ..services import ytdlp_update
