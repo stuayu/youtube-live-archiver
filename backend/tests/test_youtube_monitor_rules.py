@@ -30,6 +30,19 @@ def test_ytdlp_error_classification(message, expected):
     assert classify_ytdlp_error(message) == expected
 
 
+@pytest.mark.parametrize("message", [
+    "ERROR: Sign in to confirm you�fre not a bot",
+    "ERROR: Sign in to confirm you’re not a bot",
+])
+def test_bot_challenge_is_rate_limited_when_apostrophe_is_mojibake(message):
+    assert classify_ytdlp_error(message) == "RATE_LIMITED"
+
+
+def test_age_gate_sign_in_prompt_is_not_a_bot_challenge():
+    message = "ERROR: Sign in to confirm your age. This video may be inappropriate for some users."
+    assert classify_ytdlp_error(message) == "UNKNOWN"
+
+
 def test_streams_url_normalizes_channel_tabs_and_query():
     assert streams_url("https://www.youtube.com/@foo/videos?view=0") == "https://www.youtube.com/@foo/streams"
     assert streams_url("https://www.youtube.com/channel/UCabcdefghijabcdefghij12/live") == "https://www.youtube.com/channel/UCabcdefghijabcdefghij12/streams"

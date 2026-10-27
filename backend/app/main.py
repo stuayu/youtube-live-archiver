@@ -82,7 +82,9 @@ def active_mutation_count() -> int:
 async def lifespan(app: FastAPI):
     from .config import settings
     from .services.youtube_ip import start_probe
+    from .services.youtube_cookies import start_startup_cleanup
     start_probe()
+    start_startup_cleanup()
     try:
         from .db import SessionLocal
         from .models import Video

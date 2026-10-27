@@ -17,7 +17,7 @@ from .config import settings
 from .services.policy import classify_remote, compare_fingerprints, has_prior_successful_check, initial_retention_decision, may_delete
 from .services.fingerprints import sample, video_phash, audio_fingerprint, POSITIONS
 from .services.ffmpeg import launch_ffmpeg
-from .services.youtube import inspect, cookie_args, run_ytdlp, popen_ytdlp, ytdlp_command, classify_ytdlp_error
+from .services.youtube import inspect, run_ytdlp, popen_ytdlp, ytdlp_command, classify_ytdlp_error
 
 _manual_video_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="manual-video")
 _manual_video_lock = threading.Lock()
@@ -89,7 +89,7 @@ def _remote_samples(video: Video, duration: float, include_audio: bool) -> list[
             output = os.path.join(temp, f"sample-{position}.%(ext)s")
             args = ["--no-warnings", "--download-sections", f"*{start:.3f}-{end:.3f}",
                     "--force-keyframes-at-cuts", "-f", "wv*+wa/w" if include_audio else "wv*/w",
-                    "-o", output, *cookie_args(video.channel.cookie_profile),
+                    "-o", output,
                     *downloader_args(),
                     f"https://www.youtube.com/watch?v={video.youtube_video_id}"]
             proc = run_ytdlp(args, capture_output=True, timeout=settings.remote_timeout_seconds * 4, check=False)

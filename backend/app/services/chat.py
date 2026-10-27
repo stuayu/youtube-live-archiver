@@ -839,7 +839,7 @@ def _prefetch_assets(db, video_id: int) -> None:
 
 def retrieve_replay(db, video_id: int, youtube_video_id: str, cookie_profile: str | None = None) -> int:
     """Fetch optional replay through yt-dlp; automated tests replace the downloader."""
-    from .youtube import cookie_args, run_ytdlp
+    from .youtube import run_ytdlp
     import logging
 
     log = logging.getLogger(__name__)
@@ -847,7 +847,7 @@ def retrieve_replay(db, video_id: int, youtube_video_id: str, cookie_profile: st
         db.commit()
     with tempfile.TemporaryDirectory(prefix="yla-chat-") as temp:
         output = str(Path(temp) / "%(id)s.%(ext)s")
-        args = ["--no-warnings", "--skip-download", "--write-subs", "--sub-langs", "live_chat", "--sub-format", "json", "-o", output, *cookie_args(cookie_profile), f"https://www.youtube.com/watch?v={youtube_video_id}"]
+        args = ["--no-warnings", "--skip-download", "--write-subs", "--sub-langs", "live_chat", "--sub-format", "json", "-o", output, f"https://www.youtube.com/watch?v={youtube_video_id}"]
         proc = run_ytdlp(args, capture_output=True, text=True, timeout=3600, check=False)
         files = list(Path(temp).glob("*live_chat*")) + list(Path(temp).glob("*.live_chat.json"))
         video = db.get(Video, video_id)

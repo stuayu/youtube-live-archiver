@@ -152,6 +152,8 @@ def _recording(argv: list[str], video: dict, video_id: str) -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
         return 1
     recording = video.get("recording", {})
+    if recording.get("fail_before_media"):
+        return fail(recording["fail_before_media"])
     if recording.get("format_error") and "-f" in argv:
         return fail("Requested format is not available")
     if "--live-from-start" in argv and recording.get("live_from_start_unsupported"):

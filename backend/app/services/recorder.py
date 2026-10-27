@@ -201,7 +201,7 @@ def stderr_tail(process, *, wait: bool = True) -> bytes:
 
 def popen_recording(args: list[str], **kwargs):
     kwargs["stderr"] = subprocess.PIPE
-    process = popen_ytdlp(args, **kwargs)
+    process = popen_ytdlp(args, allow_cookies=True, **kwargs)
     capture_stderr(process)
     return process
 
@@ -824,7 +824,7 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
         args.insert(args.index("--merge-output-format"), "--live-from-start")
     if is_live and ch.chat_enabled:
         chat_args = ["--skip-download", "--write-subs", "--sub-langs", "live_chat", "--sub-format", "json",
-                     *cookie_args(ch.cookie_profile), "-o", str(target / f"{output_stem}.%(ext)s"),
+                     "-o", str(target / f"{output_stem}.%(ext)s"),
                      f"https://youtube.com/watch?v={v.youtube_video_id}"]
         active_chats[v.id] = popen_ytdlp(chat_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _chat_targets[v.id] = (target, output_stem)
@@ -1022,7 +1022,10 @@ def _execute_attempt(db: Session, v: Video, ch: Channel, root: Path, target: Pat
         retry_stderr = _wait_for_attempt(db, v, target, output_stem, proc, lease, chat_offsets)
         active_recorders.pop(v.id, None)
         stderr = (stderr or b"") + b"\nFORMAT FALLBACK to automatic selection\n" + (retry_stderr or b"")
-    if from_start and proc.returncode and not stopping(v.id) and not any(
+    # A bot challenge is not a live-from-start incompatibility. Retrying with
+    # the same session would repeat the rejected authenticated request.
+    error_kind = classify_ytdlp_error((stderr or b'').decode('utf-8', 'replace'))
+    if from_start and proc.returncode and error_kind != 'RATE_LIMITED' and not stopping(v.id) and not any(
             path.is_file() and path.stat().st_size > 0 for path in _stem_media_paths(target, output_stem)):
         retry_args = [arg for arg in attempt_args if arg != "--live-from-start"]
         if "--concurrent-fragments" in retry_args:

@@ -152,16 +152,14 @@ def api_events(limit: int = Query(default=50, ge=1, le=200), before_id: int | No
 @router.get("/formats/{video_id}")
 def list_video_formats(video_id: str, db: Session = Depends(get_db)):
     """Explicit user-triggered yt-dlp --list-formats request."""
-    from ..services.youtube import cookie_args, run_ytdlp
+    from ..services.youtube import run_ytdlp
     import subprocess
     import re
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise HTTPException(422, "video_id が不正です")
-    video = db.scalar(select(Video).where(Video.youtube_video_id == video_id))
-    channel = video.channel if video else None
     db.commit()
     try:
-        result = run_ytdlp(["--list-formats", "--no-warnings", *cookie_args(channel.cookie_profile if channel else None), f"https://youtube.com/watch?v={video_id}"], capture_output=True, text=True, timeout=settings.remote_timeout_seconds, check=False)
+        result = run_ytdlp(["--list-formats", "--no-warnings", f"https://youtube.com/watch?v={video_id}"], capture_output=True, text=True, timeout=settings.remote_timeout_seconds, check=False)
     except Exception as exc:
         raise HTTPException(502, f"フォーマット取得に失敗しました: {exc}")
     output = result.stdout or result.stderr

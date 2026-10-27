@@ -19,6 +19,7 @@ interface YtDlpState {
   ejs_available: boolean
   managed: boolean
   managed_update_supported: boolean
+  youtube_cookies_configured?: boolean
 }
 
 const state = ref<YtDlpState | null>(null)
@@ -28,6 +29,13 @@ const loading = ref(true)
 const busy = ref<'save' | 'update' | 'force' | null>(null)
 const error = ref('')
 const notice = ref('')
+const cookieConfigured = ref(false)
+const cookieFile = ref<File | null>(null)
+const cookieInput = ref<HTMLInputElement | null>(null)
+const cookieBusy = ref(false)
+const cookieError = ref('')
+const cookieNotice = ref('')
+const confirmCookieRemoval = ref(false)
 let pollTimer: number | undefined
 
 async function loadSettings() {
@@ -36,6 +44,7 @@ async function loadSettings() {
   try {
     const result = await request<YtDlpState>('/settings/ytdlp')
     state.value = result
+    cookieConfigured.value = Boolean(result.youtube_cookies_configured)
     channel.value = result.channel
     autoUpdate.value = result.auto_update
     scheduleRefresh(result.update_in_progress)
@@ -49,6 +58,7 @@ async function refreshStatus() {
   try {
     const result = await request<YtDlpState>('/settings/ytdlp')
     state.value = result
+    cookieConfigured.value = Boolean(result.youtube_cookies_configured)
     scheduleRefresh(result.update_in_progress)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'yt-dlp の状態を更新できませんでした'
@@ -69,6 +79,7 @@ async function saveSettings() {
       body: JSON.stringify({ channel: channel.value, auto_update: autoUpdate.value }),
     })
     state.value = result
+    cookieConfigured.value = Boolean(result.youtube_cookies_configured)
     channel.value = result.channel
     autoUpdate.value = result.auto_update
     notice.value = 'yt-dlp の設定を保存しました'
@@ -107,6 +118,59 @@ function phaseLabel(phase: string | undefined) {
   if (phase === 'up_to_date') return '最新の版です'
   if (phase === 'failed') return '更新に失敗しました'
   return '待機中'
+}
+
+function selectCookie(event: Event) {
+  cookieError.value = ''
+  cookieNotice.value = ''
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] ?? null
+  if (file && (file.size === 0 || file.size > 1024 * 1024)) {
+    cookieFile.value = null
+    input.value = ''
+    cookieError.value = '1 MB 以下の Cookie ファイルを選択してください'
+    return
+  }
+  cookieFile.value = file
+}
+
+async function saveCookie() {
+  if (!cookieFile.value) return
+  cookieBusy.value = true
+  cookieError.value = ''
+  cookieNotice.value = ''
+  try {
+    const result = await request<{ configured: boolean }>('/settings/youtube-cookies', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: cookieFile.value,
+    })
+    cookieConfigured.value = result.configured
+    cookieNotice.value = 'Cookie を登録しました。次の動画ダウンロードから使用します。'
+    cookieFile.value = null
+    if (cookieInput.value) cookieInput.value.value = ''
+    confirmCookieRemoval.value = false
+  } catch (cause) {
+    cookieError.value = cause instanceof Error ? cause.message : 'Cookie を登録できませんでした'
+  } finally {
+    cookieBusy.value = false
+  }
+}
+
+async function removeCookie() {
+  cookieBusy.value = true
+  cookieError.value = ''
+  cookieNotice.value = ''
+  try {
+    await request<{ configured: boolean }>('/settings/youtube-cookies', { method: 'DELETE' })
+    cookieConfigured.value = false
+    confirmCookieRemoval.value = false
+    cookieNotice.value = 'Cookie を削除しました。実行中の録画はそのまま続きます。'
+  } catch (cause) {
+    cookieError.value = cause instanceof Error ? cause.message : 'Cookie を削除できませんでした'
+  } finally {
+    cookieBusy.value = false
+  }
 }
 
 onMounted(loadSettings)
@@ -215,6 +279,78 @@ onBeforeUnmount(() => {
         Profileを確認してください。Cookieをログや共有資料へ貼り付けないでください。
       </p>
     </div>
+
+    <div class="youtube-cookies">
+      <h3>YouTube のCookie</h3>
+      <p>
+        書き出したCookieファイルを、録画・アーカイブの動画ダウンロードに使います。定期監視、情報確認、チャット取得には使いません。チャンネルに個別のCookie
+        Profileがあれば、そちらを優先します。
+      </p>
+      <p role="status">
+        状態: <strong>{{ cookieConfigured ? '登録済み' : '未登録' }}</strong>
+      </p>
+      <p>
+        登録状態はログインの有効性を保証しません。Cookieはサーバーへ送信されるため、信頼できる接続で使用してください。
+      </p>
+      <a
+        href="https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies"
+        target="_blank"
+        rel="noopener noreferrer"
+        >YouTube Cookieの書き出し手順</a
+      >
+      <label class="field" for="youtube-cookie-file">Cookieファイル（Netscape形式、1 MB以下）</label>
+      <input
+        id="youtube-cookie-file"
+        ref="cookieInput"
+        type="file"
+        accept=".txt,.cookies,text/plain"
+        :disabled="cookieBusy"
+        @change="selectCookie"
+      />
+      <div class="settings-actions">
+        <button
+          type="button"
+          class="button primary"
+          data-action="save-youtube-cookies"
+          :disabled="!cookieFile || cookieBusy"
+          @click="saveCookie"
+        >
+          {{ cookieBusy ? '処理中…' : cookieConfigured ? 'Cookieを更新' : 'Cookieを登録' }}
+        </button>
+        <button
+          v-if="cookieConfigured && !confirmCookieRemoval"
+          type="button"
+          class="button secondary"
+          data-action="remove-youtube-cookies"
+          :disabled="cookieBusy"
+          @click="confirmCookieRemoval = true"
+        >
+          Cookieを削除
+        </button>
+      </div>
+      <div v-if="confirmCookieRemoval" class="cookie-confirm" role="group" aria-label="Cookieの削除確認">
+        <p>登録済みのCookieを削除しますか？ 実行中の録画は継続します。</p>
+        <button
+          type="button"
+          class="button secondary"
+          data-action="confirm-remove-youtube-cookies"
+          :disabled="cookieBusy"
+          @click="removeCookie"
+        >
+          削除する
+        </button>
+        <button
+          type="button"
+          class="button secondary"
+          :disabled="cookieBusy"
+          @click="confirmCookieRemoval = false"
+        >
+          キャンセル
+        </button>
+      </div>
+      <p v-if="cookieError" class="inline-error" role="alert">{{ cookieError }}</p>
+      <p v-if="cookieNotice" class="status-success" role="status">{{ cookieNotice }}</p>
+    </div>
   </section>
 </template>
 
@@ -255,6 +391,30 @@ onBeforeUnmount(() => {
   margin-top: 18px;
   padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+
+.youtube-cookies {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.youtube-cookies h3,
+.youtube-cookies p {
+  margin: 0;
+}
+
+.youtube-cookies input[type='file'] {
+  max-width: 100%;
+}
+
+.cookie-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .ytdlp-dependencies h3 {

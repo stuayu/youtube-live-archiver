@@ -272,7 +272,7 @@ Restart-Service YouTubeLiveArchiver    # backend\.env を変更したあとな�
 - サービスは `LocalSystem` アカウントで動きます。ログインしているユーザーとは別の環境です。
   - Windows サービスの標準出力・標準エラーは `logs\service-stdout.log` / `logs\service-stderr.log` に記録されます。
   - 保存先はローカルドライブ（`D:\yla-archive` など）にします。エクスプローラーで割り当てたネットワークドライブ（`Z:` など）は、サービスからは見えません。NAS を使う場合は UNC パス（`\\nas\share\yla`）で登録し、共有にアクセスできるアカウントでサービスを動かします（`nssm set YouTubeLiveArchiver ObjectName .\ユーザー名 パスワード`。未検証）。
-  - Cookie Profile には、ブラウザー名ではなく Netscape 形式の Cookie ファイルのパスを指定します（サービスからはブラウザーのプロファイルを読めません）。
+  - YouTube Cookieは設定画面からファイルを登録できます。チャンネルごとに別のCookieを使う場合、Cookie ProfileにNetscape形式のファイルパスを指定します（サービスからログイン中のユーザーのブラウザープロファイルは読めません）。
 - `ffmpeg` と `ffprobe` は、サービスの PATH から見つかる必要があります（yt-dlp も PATH から探します）。winget 以外の方法で入れた場合は、そのフォルダーをシステム環境変数の `PATH` に追加してください。
 - PC がスリープすると録画も止まります。常時稼働させる PC では、スリープと休止状態を無効にします。
 
@@ -355,7 +355,13 @@ YouTube 側の仕様変更で録画やチャンネル確認が失敗する場合
 
 更新時は公式 GitHub リリースの実行ファイルをデータディレクトリの `tools/yt-dlp` に取得し、SHA-256 と起動後のバージョンを確かめてから切り替えます。実行中の録画・ダウンロードは完了まで続き、更新中は新しい処理の開始を待たせます。検証に失敗した場合は現行版を使い続け、直前版の実行ファイルも残します。「同じ版を強制再インストール」は、選択中のチャンネルの最新版を再取得します。
 
-YouTube の完全な取得には Deno 2.3.0 以降と yt-dlp-ejs が必要です。Python 依存関係から導入する場合は `yt-dlp[default]` により EJS が入ります。設定画面に Deno と EJS の検出状態を別々に表示し、Deno 未導入時は[公式インストール手順](https://docs.deno.com/runtime/getting_started/installation/)を案内します。Bot 判定やログイン要求が続く場合は yt-dlp の更新だけで解消しないことがあり、対象チャンネルの Cookie Profile を確認してください。Cookie をログや共有資料へ貼り付けないでください。
+YouTube の完全な取得には Deno 2.3.0 以降と yt-dlp-ejs が必要です。Python 依存関係から導入する場合は `yt-dlp[default]` により EJS が入ります。設定画面に Deno と EJS の検出状態を別々に表示し、Deno 未導入時は[公式インストール手順](https://docs.deno.com/runtime/getting_started/installation/)を案内します。Bot 判定やログイン要求が続く場合は yt-dlp の更新だけで解消しないことがあります。
+
+「設定」→「yt-dlp の更新」→「YouTube のCookie」から、[yt-dlp公式手順](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)で書き出したNetscape形式のCookieファイルを選んで登録できます。YouTube以外のドメインのCookieは保存しません。Cookieは録画・アーカイブの動画ダウンロードにのみ使用し、定期監視、チャンネル登録時の確認、動画情報・形式の確認、チャット取得、保護判定には使用しません。チャンネルのCookie Profileに個別設定がある場合も同様です。個別設定がある場合は共通Cookieより優先します。登録・更新・削除は次の動画ダウンロードから反映され、実行中の録画は開始時のCookieを使い続けます。登録状態はYouTubeへのログイン成功を保証しません。匿名の定期監視がYouTubeに制限される場合は、Cookie登録後も監視や自動発見に失敗することがあります。
+
+Cookieはログイン情報です。アプリへの通信には信頼できるLANまたはHTTPSを使い、ファイルや内容をチャット・ログ・共有資料へ貼り付けないでください。共通Cookieは `DATA_DIR/youtube-credentials` に保存し、Windowsではサービスの実行アカウント・SYSTEM・Administrators、Unixでは実行ユーザーにアクセスを制限します。アプリに認証はないため、アプリへ接続できる利用者を信頼できる範囲に限定してください。
+
+Cookieを動画ダウンロード以外に送らないため、監視や情報確認のyt-dlp起動では外部のyt-dlp設定ファイルを読み込みません。そのため、外部設定に書いたプロキシなどの指定もこれらの処理には適用されません。
 
 #### 11. 旧版から更新する場合
 

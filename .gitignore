@@ -24,6 +24,8 @@ playwright-report/
 cookies.txt
 cookies*.txt
 *.cookies
+youtube-credentials/
+.active-cookie-*
 *.dump
 *.dump.gz
 *.pgdump

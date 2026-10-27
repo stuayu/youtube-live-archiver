@@ -1,5 +1,65 @@
 from .common import *
 from ..schemas import YtDlpSettingsIn, YtDlpUpdateIn
+import subprocess
+from urllib.parse import urlsplit
+from starlette.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
+
+
+def _require_cookie_origin(request: Request) -> None:
+    origin = request.headers.get('origin')
+    if not origin:
+        return
+    try:
+        source = urlsplit(origin)
+        target = request.url
+        source_port = source.port or (443 if source.scheme == 'https' else 80)
+        target_port = target.port or (443 if target.scheme == 'https' else 80)
+        same = (source.scheme in ('http', 'https') and source.scheme == target.scheme
+                and source.hostname == target.hostname and source_port == target_port
+                and not source.username and not source.password and not source.path
+                and not source.query and not source.fragment)
+    except ValueError:
+        same = False
+    if not same:
+        raise HTTPException(403, 'Cookie の登録はアプリと同じ接続先から行ってください')
+
+
+@router.get('/settings/youtube-cookies')
+def youtube_cookie_status():
+    from ..services import youtube_cookies
+    return JSONResponse({'configured': youtube_cookies.configured()}, headers={'Cache-Control': 'no-store'})
+
+
+@router.put('/settings/youtube-cookies')
+async def save_youtube_cookies(request: Request):
+    from ..services import youtube_cookies
+    _require_cookie_origin(request)
+    if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'application/octet-stream':
+        raise HTTPException(415, 'Cookie ファイルを選択してください')
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > youtube_cookies.MAX_COOKIE_BYTES:
+            raise HTTPException(413, 'Cookie ファイルは 1 MB 以下にしてください')
+        data.extend(chunk)
+    try:
+        await run_in_threadpool(youtube_cookies.save, bytes(data))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except (OSError, subprocess.SubprocessError):
+        raise HTTPException(500, 'Cookie を安全に保存できませんでした。サーバーの保存先を確認してください') from None
+    return JSONResponse({'configured': True}, headers={'Cache-Control': 'no-store'})
+
+
+@router.delete('/settings/youtube-cookies')
+async def delete_youtube_cookies(request: Request):
+    from ..services import youtube_cookies
+    _require_cookie_origin(request)
+    try:
+        await run_in_threadpool(youtube_cookies.remove)
+    except OSError:
+        raise HTTPException(500, 'Cookie を削除できませんでした') from None
+    return JSONResponse({'configured': False}, headers={'Cache-Control': 'no-store'})
 
 
 @router.get("/settings/dependencies")
@@ -30,14 +90,16 @@ def cancel_dependency_update():
 
 @router.get("/settings/ytdlp")
 def get_ytdlp_settings(db: Session = Depends(get_db)):
-    from ..services import ytdlp_update
-    return {**ytdlp_update.preferences(db), **ytdlp_update.status()}
+    from ..services import youtube_cookies, ytdlp_update
+    return {**ytdlp_update.preferences(db), **ytdlp_update.status(),
+            'youtube_cookies_configured': youtube_cookies.configured()}
 
 
 @router.put("/settings/ytdlp")
 def put_ytdlp_settings(data: YtDlpSettingsIn, db: Session = Depends(get_db)):
-    from ..services import ytdlp_update
-    return ytdlp_update.save_preferences(db, channel=data.channel, auto_update=data.auto_update)
+    from ..services import youtube_cookies, ytdlp_update
+    return {**ytdlp_update.save_preferences(db, channel=data.channel, auto_update=data.auto_update),
+            'youtube_cookies_configured': youtube_cookies.configured()}
 
 
 @router.post("/settings/ytdlp/update")

@@ -548,6 +548,50 @@ def _get_video(video_id):
         return db.get(Video, video_id)
 
 
+def test_cookie_is_used_for_video_download_but_not_live_chat(tmp_path, fake_youtube, monkeypatch):
+    from app.services import youtube_cookies
+    from app.services.recorder import running_counts
+    from app.api import stop_video_recording
+
+    monkeypatch.setattr(settings, 'data_dir', str(tmp_path / 'app-data'))
+    youtube_cookies.save(b'# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\tfake\n')
+    video_id = _create_video(tmp_path, 'cookie-test', chat=True)
+    fake_youtube.set_state({'channels': {}, 'videos': {'cookie-test': {
+        'live_status': 'is_live', 'release_timestamp': int(time.time()) - 5,
+        'recording': {'mode': 'live', 'ended': False}}}})
+    try:
+        recorder_worker()
+        assert _wait_for(lambda: _get_video(video_id).status == 'RECORDING')
+        target = Path(_get_video(video_id).file_path)
+        assert _wait_for(lambda: (target / 'video.f134.mkv.part').is_file())
+        calls = [call['argv'] for call in fake_youtube.calls()]
+        media = next(args for args in calls if '--merge-output-format' in args)
+        chat = next(args for args in calls if '--write-subs' in args)
+        assert '--cookies' in media
+        assert '--cookies' not in chat and '--cookies-from-browser' not in chat
+        assert '--ignore-config' in chat and '--no-cookies' in chat
+    finally:
+        with SessionLocal() as db:
+            if db.get(Video, video_id).status == 'RECORDING':
+                stop_video_recording(video_id, db)
+        assert _wait_for(lambda: running_counts() == (0, 0))
+
+
+def test_bot_challenge_does_not_retry_live_from_start_without_authentication_change(tmp_path, fake_youtube):
+    from app.services.recorder import running_counts
+
+    video_id = _create_video(tmp_path, 'bot-once', chat=False)
+    fake_youtube.set_state({'channels': {}, 'videos': {'bot-once': {
+        'live_status': 'is_live', 'release_timestamp': int(time.time()) - 5,
+        'recording': {'mode': 'live', 'fail_before_media': 'bot'}}}})
+    recorder_worker()
+    assert _wait_for(lambda: _get_video(video_id).status == 'RECORDING_FAILED')
+    assert _wait_for(lambda: running_counts() == (0, 0))
+    media_calls = [call['argv'] for call in fake_youtube.calls() if '--merge-output-format' in call['argv']]
+    assert len(media_calls) == 1
+    assert '--live-from-start' in media_calls[0]
+
+
 def test_dispatch_returns_and_live_video_is_separate_from_chat(tmp_path, fake_youtube, monkeypatch):
     video_id = _create_video(tmp_path)
     fake_youtube.set_state({"channels": {}, "videos": {"record-live": {

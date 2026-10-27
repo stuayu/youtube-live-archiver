@@ -413,7 +413,10 @@ async function save() {
             <div class="field">
               <label for="cookie-profile">Cookie Profile</label>
               <input id="cookie-profile" v-model="form.cookie_profile" />
-              <small>ログインが必要なチャンネルで登録済みプロファイル名を指定します。</small>
+              <small
+                >動画ダウンロード用の個別Cookieを指定できます。空欄なら設定画面のYouTube
+                Cookieを使います。定期監視には使いません。</small
+              >
             </div>
             <label class="check-field">
               <input v-model="form.live_playback_enabled" type="checkbox" /> 追っかけ視聴を有効にする</label
