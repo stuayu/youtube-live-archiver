@@ -20,7 +20,7 @@ const initial = () => ({
   name: '',
   enabled: true,
   poll_interval: '360',
-  poll_windows: [] as { start: string; end: string; interval_minutes: number }[],
+  poll_windows: [] as { start: string; end: string; interval_minutes: number; monitor: boolean }[],
   storage_id: null as string | null,
   fallback_storage_id: null as string | null,
   retention_days: 30 as number | null,
@@ -290,14 +290,15 @@ async function save() {
                 <div v-for="(window, index) in form.poll_windows" :key="index" class="form-grid">
                   <label>開始 <input v-model="window.start" type="time" step="1800" /></label>
                   <label>終了 <input v-model="window.end" type="time" step="1800" /></label>
-                  <label>間隔
+                  <label class="check-field"><input v-model="window.monitor" type="checkbox" />監視する</label>
+                  <label v-if="window.monitor">間隔
                     <select v-model.number="window.interval_minutes">
                       <option v-for="minutes in [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360]" :key="minutes" :value="minutes">{{ minutes < 60 ? `${minutes}分` : `${minutes / 60}時間${minutes % 60 ? ` ${minutes % 60}分` : ''}` }}</option>
                     </select>
                   </label>
                   <button type="button" class="button secondary small" @click="form.poll_windows.splice(index, 1)">削除</button>
                 </div>
-                <button type="button" class="button secondary small" :disabled="form.poll_windows.length >= 12" @click="form.poll_windows.push({ start: '18:00', end: '22:00', interval_minutes: 60 })">時間帯を追加</button>
+                <button type="button" class="button secondary small" :disabled="form.poll_windows.length >= 12" @click="form.poll_windows.push({ start: '18:00', end: '22:00', interval_minutes: 60, monitor: true })">時間帯を追加</button>
                 <small v-if="errors.poll_windows" class="inline-error">{{ errors.poll_windows }}</small>
               </div>
             </div>

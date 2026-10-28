@@ -83,6 +83,12 @@ def calculate_next_interval(poll_interval: str | None, scheduled_times: list[dat
             start, end = sh * 60 + sm, eh * 60 + em
             active = start <= minute_of_day < end if end > start else minute_of_day >= start or minute_of_day < end
             if active:
+                if window.get("monitor") is False:
+                    minutes_to_end = (end - minute_of_day) % 1440
+                    if minutes_to_end == 0:
+                        minutes_to_end = 1440
+                    seconds_to_end = minutes_to_end * 60 - local_current.second
+                    return (max(1.0, seconds_to_end), max(1.0, seconds_to_end))
                 window_interval = int(window["interval_minutes"]) * 60.0
                 break
             delta = (start - minute_of_day) % 1440

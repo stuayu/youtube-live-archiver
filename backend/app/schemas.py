@@ -141,7 +141,8 @@ class StoragePatch(StrictInput):
 class PollWindow(StrictInput):
     start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):(?:00|30)$")
     end: str = Field(pattern=r"^(?:[01]\d|2[0-3]):(?:00|30)$")
-    interval_minutes: int = Field(ge=30, le=360)
+    interval_minutes: int = Field(default=60, ge=30, le=360)
+    monitor: bool = True
 
 
 def _validate_poll_windows(windows):
