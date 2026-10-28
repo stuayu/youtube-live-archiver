@@ -399,6 +399,15 @@ def _audit_low_disk_space(db: Session, video: Video) -> None:
         video.raw_metadata = updated
 
 
+def _audit_recording_failed(db: Session, video: Video, reason: str) -> None:
+    db.add(AuditLog(video_id=video.id, channel_id=video.channel_id, action="RECORD_FAILED", reason=reason))
+
+
+def _ytdlp_failure_reason(error_kind: str) -> str:
+    # classify_ytdlp_error returns fixed codes only, so the code is safe to store; raw stderr never enters the audit log.
+    return error_kind if error_kind != "UNKNOWN" else "ATTEMPT_FAILED"
+
+
 def format_args(quality: str | None) -> list[str]:
     quality = (quality or "").strip()
     if not quality or quality.lower() == "best":
@@ -1654,6 +1663,7 @@ def record_video(video_id: int) -> None:
                         v.retention_expires_at = None
                     else:
                         v.status = "RECORDING_FAILED"
+                        _audit_recording_failed(db, v, outcome)
                         v.next_recovery_at = None if outcome == "INTERRUPTED_RECOVERY" else now() + recovery_delay(max(1, v.recovery_attempts or 0))
                         if outcome == "USER_STOP_EMPTY":
                             v.raw_metadata = {**(v.raw_metadata or {}), "user_stopped": True}
@@ -1781,6 +1791,7 @@ def record_video(video_id: int) -> None:
                         v.retention_expires_at = None
                     else:
                         v.status = "RECORDING_FAILED"
+                        _audit_recording_failed(db, v, "USER_STOP_NOT_SALVAGED" if user_stopped else _ytdlp_failure_reason(error_kind))
                         v.recording_finished_at = None
                         v.next_recovery_at = None if shutdown_requested else now() + recovery_delay(max(1, v.recovery_attempts or 0))
                     v.recording_heartbeat_at = None
@@ -1815,6 +1826,7 @@ def record_video(video_id: int) -> None:
                             ffmpeg_path=settings.ffmpeg_path)
                         _update_partial_evidence(v, target, output_stem)
                     v.status = "RECORDING_FAILED"
+                    _audit_recording_failed(db, v, "MISSING_MEDIA")
                     v.recording_finished_at = None
                     v.recording_heartbeat_at = None
                     v.next_recovery_at = None if stopping(v.id) else now() + recovery_delay(max(1, v.recovery_attempts or 0))
@@ -1849,6 +1861,7 @@ def record_video(video_id: int) -> None:
                                 db.add(AuditLog(video_id=v.id, action="LIVE_SEGMENT_INTERRUPTED", reason="STREAM_STILL_LIVE"))
                             else:
                                 v.status = "RECORDING_FAILED"
+                                _audit_recording_failed(db, v, "ATTEMPT_FAILED")
                                 v.recording_finished_at = None
                                 v.next_recovery_at = now() + recovery_delay(max(1, v.recovery_attempts or 0))
                             _update_partial_evidence(v, target, output_stem)
@@ -1891,6 +1904,7 @@ def record_video(video_id: int) -> None:
                         except Exception as salvage_error:
                             log.warning("recording salvage failed for %s: %s", v.youtube_video_id, salvage_error)
                 v.status = "WAITING_FOR_STORAGE" if not v.file_path else "RECORDING_FAILED"
+                _audit_recording_failed(db, v, "ATTEMPT_ERROR")
                 try:
                     db.commit()
                 except Exception:

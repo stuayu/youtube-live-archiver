@@ -22,6 +22,27 @@ def add_channel(*, enabled=True):
 
 
 @pytest.mark.integration
+def test_recording_monitor_reports_current_partial_file_growth(client, tmp_path):
+    channel_id = add_channel()
+    folder = tmp_path / 'video'
+    folder.mkdir()
+    partial = folder / 'video.f134.mp4.part'
+    partial.write_bytes(b'x' * 100)
+    (folder / 'old.mkv').write_bytes(b'x' * 900)
+    video_id = add_video(channel_id, status='RECORDING', file_path=str(folder),
+                         raw_metadata={'attempts': [{'stem': 'video', 'outcome': 'running'}]})
+    with SessionLocal() as db:
+        storage = Storage(name='monitor', root_path=str(tmp_path))
+        db.add(storage)
+        db.flush()
+        db.get(Video, video_id).storage_id = storage.id
+        db.commit()
+    assert client.get(f'/api/videos/{video_id}/recording/monitor').json()['file_size'] == 100
+    partial.write_bytes(b'x' * 250)
+    assert client.get(f'/api/videos/{video_id}/recording/monitor').json()['file_size'] == 250
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("interval", ["90", "120", "180", "240", "360"])
 def test_extended_poll_intervals_and_invalid_values(client, interval):
     channel_id = add_channel()
@@ -296,6 +317,19 @@ def test_schedule_state_guards_and_recording_retry_cleanup(client):
     with SessionLocal() as db:
         video = db.get(Video, waiting)
         assert "user_stopped" not in video.raw_metadata and "recovery_exhausted" not in video.raw_metadata
+
+
+@pytest.mark.integration
+def test_manual_recording_retry_is_visible_in_activity_events(client):
+    channel_id = add_channel()
+    video_id = add_video(channel_id, status="RECORDING_FAILED")
+    assert client.post(f"/api/videos/{video_id}/recording/retry").status_code == 200
+    events = client.get("/api/events", params={"video_id": video_id, "limit": 10}).json()
+    retries = [event for event in events if event["action"] == "MANUAL_RETRY"]
+    assert len(retries) == 1
+    assert retries[0]["reason"] == "RECORDING"
+    assert retries[0]["details"] == {"previous_status": "RECORDING_FAILED"}
+    assert retries[0]["video_id"] == str(video_id) and retries[0]["channel_id"] == str(channel_id)
 
 
 @pytest.mark.integration

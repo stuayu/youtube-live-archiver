@@ -901,11 +901,16 @@ def recording_monitor(video_id: int, db: Session = Depends(get_db)):
     import shutil
     video = db.get(Video, video_id)
     if not video: raise HTTPException(404, "動画がありません")
-    size = 0
+    size = None
     try:
         folder = registered_video_directory(video.file_path, video.storage.root_path if video.storage else None)
-        media = media_file(folder)
-        if media and media.is_file(): size = media.stat().st_size
+        attempts = (video.raw_metadata or {}).get('attempts') or []
+        current = next((a for a in reversed(attempts) if a.get('outcome') == 'running'), None)
+        stem = current.get('stem') if current else None
+        if isinstance(stem, str) and stem and Path(stem).name == stem:
+            pattern = re.compile(re.escape(stem) + r'(?:\.f[\w-]+)?\.(?:mkv|mp4|webm|ts|m4v|mov|flv)(?:\.part)?$', re.I)
+            files = [p for p in folder.iterdir() if pattern.fullmatch(p.name) and not p.is_symlink() and p.is_file()]
+            size = sum(p.stat().st_size for p in files)
     except (OSError, ValueError):
         folder = None
     free = None
@@ -957,6 +962,8 @@ def retry_video_recording(video_id: int, db: Session = Depends(get_db)):
         missing_or_empty = not local_media or local_media.stat().st_size <= 0
         if video.status not in ("RECORDING_FAILED", "WAITING_FOR_STORAGE") and not missing_or_empty and not video.is_partial:
             raise HTTPException(409, "この録画は再開できません")
+        db.add(AuditLog(video_id=video.id, channel_id=video.channel_id, action="MANUAL_RETRY", reason="RECORDING",
+                        details={"previous_status": video.status}))
         video.status = "DISCOVERED"
         video.recording_finished_at = None
         video.raw_metadata = {key: value for key, value in (video.raw_metadata or {}).items()

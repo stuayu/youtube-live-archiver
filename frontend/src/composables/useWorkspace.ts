@@ -12,7 +12,13 @@ import {
   bytesToGb,
   gbToBytes,
 } from '../lib/format'
-import { monitorErrorSummary, monitorStatus, protectionReason, videoStatus } from '../lib/status'
+import {
+  monitorErrorSummary,
+  monitorStatus,
+  protectionReason,
+  recordFailureReason,
+  videoStatus,
+} from '../lib/status'
 import { useAnalysisWorkspace } from './useAnalysisWorkspace'
 import { useChannelWorkspace } from './useChannelWorkspace'
 import { useSettingsWorkspace } from './useSettingsWorkspace'
@@ -148,6 +154,8 @@ export function useWorkspace() {
       recording_completed: '録画が完了しました',
       recording_started: '録画を開始しました',
       RECORD: '録画が完了しました',
+      MANUAL_RETRY: '手動で録画を再試行しました',
+      RECORD_FAILED: `録画に失敗しました: ${recordFailureReason(event.reason)}`,
       PROTECT: `保護しました: ${protectionReason(event.reason)}`,
       MONITOR_ERROR: `監視エラー: ${monitorErrorSummary(event.reason)}`,
       SALVAGE_PARTIAL: '部分録画を保存しました',
@@ -159,7 +167,7 @@ export function useWorkspace() {
       protected: `保護しました: ${protectionReason(event.reason)}`,
       monitor_error: `監視エラー: ${monitorErrorSummary(event.reason)}`,
       video_deleted: '動画を削除しました',
-      recording_failed: `録画に失敗しました: ${event.reason || ''}`,
+      recording_failed: `録画に失敗しました: ${recordFailureReason(event.reason)}`,
       channel_added: 'チャンネルを追加しました',
       channel_updated: 'チャンネル設定を更新しました',
     }

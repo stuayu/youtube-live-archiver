@@ -235,13 +235,18 @@ function hasFilter(key: QueryKey) {
             </span>
             <span v-if="video.archive_backfill === 'queued'">アーカイブ補完中</span>
             <span
-              >{{ ctx.formatBytes(video.file_size) }} · {{ video.storage_name || '保存先なし' }} ·
-              {{ ctx.archiveRetentionLabel(video) }}</span
+              >{{
+                video.status === 'RECORDING'
+                  ? typeof ctx.metrics[video.id]?.file_size === 'number'
+                    ? `録画中 ${ctx.formatBytes(ctx.metrics[video.id].file_size as number)}`
+                    : '録画容量を取得できません'
+                  : ctx.formatBytes(video.file_size)
+              }}
+              · {{ video.storage_name || '保存先なし' }} · {{ ctx.archiveRetentionLabel(video) }}</span
             >
           </div>
           <div v-if="video.status === 'RECORDING'" class="meta">
             <span>経過 {{ ctx.formatDuration(Number(ctx.metrics[video.id]?.elapsed_seconds)) }}</span>
-            <span>書込 {{ ctx.formatBytes(Number(ctx.metrics[video.id]?.write_bytes_per_second)) }}/秒</span>
             <span>heartbeat {{ ctx.relativeTime(video.recording_heartbeat_at) }}</span>
           </div>
           <details v-if="video.last_error" class="inline-error">

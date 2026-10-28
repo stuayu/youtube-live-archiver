@@ -58,9 +58,10 @@ export function useWorkspaceLifecycle(
         await Promise.all(
           recordingRows.map(async (video) => {
             try {
-              state.metrics.value[video.id] = await api.monitor(video.id)
+              const metrics = await api.monitor(video.id)
+              if (generation === loadGeneration) state.metrics.value[video.id] = metrics
             } catch {
-              // A failed metrics request does not hide the video row.
+              if (generation === loadGeneration) delete state.metrics.value[video.id]
             }
           }),
         )
@@ -112,8 +113,8 @@ export function useWorkspaceLifecycle(
     window.clearTimeout(pollTimer)
     const interval =
       ['home', 'videos'].includes(state.tab.value) &&
-      (state.status.value?.recordings.count ??
-        state.videos.value.some((video) => video.status === 'RECORDING'))
+      ((state.status.value?.recordings.count ?? 0) > 0 ||
+        (state.tab.value === 'videos' && state.videos.value.some((video) => video.status === 'RECORDING')))
         ? 5000
         : 20000
     pollTimer = window.setTimeout(() => {

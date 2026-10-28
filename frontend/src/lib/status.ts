@@ -28,6 +28,20 @@ const reasons: Record<string, string> = {
   MANUAL: '手動保護',
   UNKNOWN: '理由不明',
 }
+const recordFailures: Record<string, string> = {
+  RATE_LIMITED: 'YouTube からアクセス制限を受けています',
+  PRIVATE: '非公開のため録画できません',
+  DELETED: '動画が削除されています',
+  MEMBERS_ONLY: 'メンバー限定のため録画できません',
+  UNAVAILABLE: '動画を視聴できない状態です',
+  NO_STREAMS_TAB: 'チャンネルの配信一覧を取得できません',
+  ATTEMPT_FAILED: '録画処理が失敗しました',
+  ATTEMPT_ERROR: '録画処理でエラーが発生しました',
+  MISSING_MEDIA: '録画ファイルが作成されませんでした',
+  INTERRUPTED_RECOVERY: '配信中に録画が中断しました',
+  USER_STOP_EMPTY: '停止時に録画データがありませんでした',
+  USER_STOP_NOT_SALVAGED: '停止時に録画を保存できませんでした',
+}
 const monitorErrors: Record<string, string> = {
   RATE_LIMITED: 'YouTube からアクセス制限を受けています',
   UNKNOWN: '取得に失敗しました（通信エラーなど）',
@@ -42,6 +56,9 @@ export function videoStatus(value: string): StatusPresentation {
 }
 export function protectionReason(value: string | null | undefined): string {
   return value ? (reasons[value] ?? value) : ''
+}
+export function recordFailureReason(value: string | null | undefined): string {
+  return value ? (recordFailures[value] ?? value) : '理由不明'
 }
 export function monitorStatus(value: string): StatusPresentation {
   const states: Record<string, StatusPresentation> = {

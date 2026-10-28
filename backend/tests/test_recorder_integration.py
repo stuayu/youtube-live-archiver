@@ -501,6 +501,46 @@ def test_live_short_zero_exit_uses_recovery_backoff(tmp_path, fake_youtube):
             or (Path(row.file_path) / "video.partial.mkv").is_file())
 
 
+def test_manual_retry_outcome_is_recorded_in_activity(tmp_path, fake_youtube):
+    from app.api import retry_video_recording
+    key = "manual-retry-failure"
+    video_id = _create_video(tmp_path, key, chat=False)
+    with SessionLocal() as db:
+        video = db.get(Video, video_id)
+        video.status = "RECORDING_FAILED"
+        db.commit()
+    with SessionLocal() as db:
+        retry_video_recording(video_id, db)
+    fake_youtube.set_state({"channels": {}, "videos": {key: {
+        "live_status": "is_live", "recording": {"mode": "live", "ended": False,
+        "early_exit": True, "early_exit_after": 0}}}})
+    recorder_worker()
+    assert _wait_for(lambda: _get_video(video_id).status == "RECORDING_FAILED")
+    with SessionLocal() as db:
+        actions = db.scalars(select(AuditLog.action).where(AuditLog.video_id == video_id)).all()
+    assert "MANUAL_RETRY" in actions
+    assert "RECORD_FAILED" in actions
+
+
+@pytest.mark.parametrize(("failure", "expected_reason"), [
+    ("rate_limited", "RATE_LIMITED"),
+    ("network_error", "ATTEMPT_FAILED"),
+])
+def test_record_failed_reason_is_safe_ytdlp_classification(tmp_path, fake_youtube, failure, expected_reason):
+    key = f"record-failed-{failure}"
+    video_id = _create_video(tmp_path, key, chat=False)
+    fake_youtube.set_state({"channels": {}, "videos": {key: {
+        "live_status": "is_live", "release_timestamp": int(time.time()) - 5,
+        "recording": {"mode": "live", "fail_before_media": failure}}}})
+    recorder_worker()
+    assert _wait_for(lambda: _get_video(video_id).status == "RECORDING_FAILED")
+    with SessionLocal() as db:
+        reasons = db.scalars(select(AuditLog.reason).where(
+            AuditLog.video_id == video_id, AuditLog.action == "RECORD_FAILED")).all()
+    assert expected_reason in reasons
+    assert "UNKNOWN" not in reasons
+
+
 def test_recording_stderr_tail_is_bounded(tmp_path, fake_youtube):
     key = "stderr-flood"
     fake_youtube.set_state({"channels": {}, "videos": {key: {
