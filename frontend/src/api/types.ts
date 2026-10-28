@@ -27,6 +27,7 @@ export interface Channel {
   name: string
   enabled: boolean
   poll_interval: string
+  poll_windows?: { start: string; end: string; interval_minutes: number }[]
   storage_id: Id | null
   fallback_storage_id: Id | null
   retention_days: number | null

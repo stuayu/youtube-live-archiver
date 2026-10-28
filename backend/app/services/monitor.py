@@ -70,10 +70,29 @@ def _scheduled_entry(entry: dict) -> datetime | None:
 
 
 def calculate_next_interval(poll_interval: str | None, scheduled_times: list[datetime | None], current: datetime,
-                            profile: Profile | None = None) -> tuple[float, float]:
+                            profile: Profile | None = None, poll_windows: list[dict] | None = None) -> tuple[float, float]:
     """Return lower and upper polling delay bounds in seconds."""
     raw_poll = (poll_interval or "AUTO").strip().upper()
-    if raw_poll == "AUTO":
+    local_current = current.astimezone()
+    minute_of_day = local_current.hour * 60 + local_current.minute
+    window_interval = None
+    next_window_start = None
+    for window in poll_windows or []:
+        try:
+            sh, sm = map(int, window["start"].split(":")); eh, em = map(int, window["end"].split(":"))
+            start, end = sh * 60 + sm, eh * 60 + em
+            active = start <= minute_of_day < end if end > start else minute_of_day >= start or minute_of_day < end
+            if active:
+                window_interval = int(window["interval_minutes"]) * 60.0
+                break
+            delta = (start - minute_of_day) % 1440
+            if delta:
+                next_window_start = delta * 60.0 if next_window_start is None else min(next_window_start, delta * 60.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+    if window_interval is not None:
+        normal_low = normal_high = window_interval
+    elif raw_poll == "AUTO":
         profile = profile or build_profile([])
         normal_low, normal_high = {"hot": (900.0, 1800.0), "warm": (1800.0, 3600.0),
                                    "cold": (7200.0, 14400.0), "normal": (1800.0, 3600.0)}[profile.level_at(current)]
@@ -87,7 +106,9 @@ def calculate_next_interval(poll_interval: str | None, scheduled_times: list[dat
         normal_low = normal_high = float(minutes * 60)
     normal_jitter = (normal_low, normal_high) if normal_low != normal_high else (normal_low * .9, normal_high * 1.1)
     interval = normal_jitter
-    if raw_poll == "AUTO" and profile is not None and profile.level_at(current) != "hot":
+    if window_interval is None and next_window_start is not None:
+        interval = (min(interval[0], next_window_start), min(interval[1], next_window_start))
+    if window_interval is None and raw_poll == "AUTO" and profile is not None and profile.level_at(current) != "hot":
         next_hot = profile.next_hot_start(current)
         if next_hot:
             cap = max(60.0, (next_hot - current).total_seconds() + 600.0)
@@ -144,7 +165,7 @@ def _schedule_next(ch: Channel, db: Session, at: datetime, entries: list[dict]) 
             continue
         schedules.append(row.scheduled_start_at)
     profile = _activity_profile(db, ch.id, at) if (ch.poll_interval or "AUTO").upper() == "AUTO" else None
-    low, high = calculate_next_interval(ch.poll_interval, schedules, at, profile)
+    low, high = calculate_next_interval(ch.poll_interval, schedules, at, profile, ch.poll_windows)
     ch.next_check_at = at + timedelta(seconds=random.uniform(low, high))
 
 
@@ -423,7 +444,7 @@ def _scan_one(channel_pk: int) -> None:
                     ch.consecutive_failures = 0
                     ch.baseline_completed_at = ch.baseline_completed_at or at
                     profile = _activity_profile(db, ch.id, at) if (ch.poll_interval or "AUTO").upper() == "AUTO" else None
-                    low, high = calculate_next_interval(ch.poll_interval, [], at, profile)
+                    low, high = calculate_next_interval(ch.poll_interval, [], at, profile, ch.poll_windows)
                     ch.next_check_at = at + timedelta(seconds=random.uniform(low, high))
                     if recovered:
                         db.add(AuditLog(channel_id=ch.id, action="MONITOR_RECOVERED", reason="SCAN_SUCCEEDED"))

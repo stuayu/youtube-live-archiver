@@ -138,12 +138,33 @@ class StoragePatch(StrictInput):
         return self
 
 
+class PollWindow(StrictInput):
+    start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):(?:00|30)$")
+    end: str = Field(pattern=r"^(?:[01]\d|2[0-3]):(?:00|30)$")
+    interval_minutes: int = Field(ge=30, le=360)
+
+
+def _validate_poll_windows(windows):
+    ranges = []
+    for window in windows or []:
+        start = int(window.start[:2]) * 60 + int(window.start[3:])
+        end = int(window.end[:2]) * 60 + int(window.end[3:])
+        if start == end:
+            raise ValueError("監視時間帯の開始と終了は異なる時刻にしてください")
+        segments = [(start, end)] if end > start else [(start, 1440), (0, end)]
+        if any(a < d and c < b for a, b in segments for c, d in ranges):
+            raise ValueError("監視時間帯を重複させることはできません")
+        ranges.extend(segments)
+    return windows
+
+
 class ChannelIn(StrictInput):
     youtube_channel_id: str | None = None
     url: str | None = None
     name: str
     enabled: bool = True
-    poll_interval: str = "AUTO"
+    poll_interval: str = "360"
+    poll_windows: list[PollWindow] = Field(default_factory=list, max_length=12)
     storage_id: int | None = None
     fallback_storage_id: int | None = None
     retention_days: int | None = 30
@@ -162,6 +183,10 @@ class ChannelIn(StrictInput):
     live_playback_limit_bytes: int = Field(default=5368709120, ge=0)
     live_from_start: bool = True
     chat_enabled: bool = True
+
+    @field_validator("poll_windows")
+    @classmethod
+    def windows_valid(cls, value): return _validate_poll_windows(value)
 
 
 class ChannelOut(ChannelIn):
@@ -292,7 +317,8 @@ class ChannelCreate(StrictInput):
     url: str = Field(min_length=1, max_length=1000)
     name: str | None = Field(default=None, max_length=300)
     enabled: bool = True
-    poll_interval: str = "AUTO"
+    poll_interval: str = "360"
+    poll_windows: list[PollWindow] = Field(default_factory=list, max_length=12)
     storage_id: int | None = None
     fallback_storage_id: int | None = None
     retention_days: int | None = Field(default=30, ge=1)
@@ -312,11 +338,15 @@ class ChannelCreate(StrictInput):
     live_from_start: bool = True
     chat_enabled: bool = True
 
+    @field_validator("poll_windows")
+    @classmethod
+    def windows_valid(cls, value): return _validate_poll_windows(value)
+
     @field_validator("poll_interval")
     @classmethod
     def poll_valid(cls, value):
         if value not in ("30", "45", "60", "90", "120", "180", "240", "360", "AUTO"):
-            raise ValueError("poll_interval は 30/45/60/90/120/180/240/360/AUTO のいずれかです")
+            raise ValueError("poll_interval が不正です")
         return value
 
     @field_validator("edit_detection_mode")
@@ -333,6 +363,7 @@ class ChannelPatch(StrictInput):
     name: str | None = Field(default=None, min_length=1, max_length=300)
     enabled: bool | None = None
     poll_interval: str | None = None
+    poll_windows: list[PollWindow] | None = Field(default=None, max_length=12)
     storage_id: int | None = None
     fallback_storage_id: int | None = None
     retention_days: int | None = None
@@ -352,9 +383,13 @@ class ChannelPatch(StrictInput):
     live_from_start: bool | None = None
     chat_enabled: bool | None = None
 
+    @field_validator("poll_windows")
+    @classmethod
+    def windows_valid(cls, value): return _validate_poll_windows(value)
+
     @model_validator(mode="after")
     def validate_patch_nulls(self):
-        nullable = {"url", "youtube_channel_id", "storage_id", "fallback_storage_id", "retention_days", "cookie_profile"}
+        nullable = {"url", "youtube_channel_id", "storage_id", "fallback_storage_id", "retention_days", "cookie_profile", "poll_windows"}
         if any(getattr(self, key) is None for key in self.model_fields_set - nullable):
             raise ValueError("null は指定できません")
         return self

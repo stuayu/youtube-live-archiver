@@ -19,7 +19,8 @@ const initial = () => ({
   url: '',
   name: '',
   enabled: true,
-  poll_interval: 'AUTO',
+  poll_interval: '360',
+  poll_windows: [] as { start: string; end: string; interval_minutes: number }[],
   storage_id: null as string | null,
   fallback_storage_id: null as string | null,
   retention_days: 30 as number | null,
@@ -256,7 +257,7 @@ async function save() {
             <div class="field">
               <label for="poll-interval">監視間隔</label>
               <select id="poll-interval" v-model="form.poll_interval">
-                <option value="AUTO">自動（配信の多い時間帯に合わせる）</option>
+                <option value="AUTO">自動（配信状況に合わせる）</option>
                 <option value="30">30 分</option>
                 <option value="45">45 分</option>
                 <option value="60">60 分</option>
@@ -283,6 +284,22 @@ async function save() {
                 >常に約
                 {{ form.poll_interval }} 分ごとに確認します。配信予定の開始前後は自動で間隔を詰めます</small
               >
+              <div class="poll-windows">
+                <strong>時間帯ごとの監視間隔</strong>
+                <small>時間は福島サーバーの現地時刻です。指定時間外は上の通常間隔で監視します。</small>
+                <div v-for="(window, index) in form.poll_windows" :key="index" class="form-grid">
+                  <label>開始 <input v-model="window.start" type="time" step="1800" /></label>
+                  <label>終了 <input v-model="window.end" type="time" step="1800" /></label>
+                  <label>間隔
+                    <select v-model.number="window.interval_minutes">
+                      <option v-for="minutes in [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360]" :key="minutes" :value="minutes">{{ minutes < 60 ? `${minutes}分` : `${minutes / 60}時間${minutes % 60 ? ` ${minutes % 60}分` : ''}` }}</option>
+                    </select>
+                  </label>
+                  <button type="button" class="button secondary small" @click="form.poll_windows.splice(index, 1)">削除</button>
+                </div>
+                <button type="button" class="button secondary small" :disabled="form.poll_windows.length >= 12" @click="form.poll_windows.push({ start: '18:00', end: '22:00', interval_minutes: 60 })">時間帯を追加</button>
+                <small v-if="errors.poll_windows" class="inline-error">{{ errors.poll_windows }}</small>
+              </div>
             </div>
           </div>
         </fieldset>
