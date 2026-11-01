@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import math
 import json
+import re
 from pathlib import Path
 
 from sqlalchemy import case, select
@@ -99,6 +100,57 @@ def enqueue_transcription(db, video_id: int, *, force=False):
     video.transcription_error = None
     db.commit()
     return job
+
+
+def _summary_error_message(exc) -> str:
+    from .summarization import (ProviderHTTPError, ProviderResponseError, RateLimitError,
+                                TruncatedProviderResponseError)
+    if isinstance(exc, RateLimitError):
+        message = f"プロバイダーの利用上限に達しました。約{max(60, exc.retry_after)}秒後に自動再試行します。"
+    elif isinstance(exc, TruncatedProviderResponseError):
+        message = ("プロバイダーの応答が出力上限で途中終了しました (finish_reason=length)。"
+                   "別のモデルを選ぶか、チャンク長を短くしてください。")
+    elif isinstance(exc, ProviderResponseError):
+        if exc.finish_reason == "error":
+            message = ("プロバイダーが空の応答を返しました (finish_reason=error)。"
+                       "モデルの混雑または入力の長さが原因の可能性があります。別のモデルを選ぶか、"
+                       "チャンク長を短くしてください。")
+        elif "not valid JSON" in str(exc):
+            message = "モデルの返答が JSON 形式ではありませんでした。別のモデルをお試しください。"
+        elif "missing finish_reason" in str(exc):
+            message = "プロバイダー応答に finish_reason がありませんでした。モデルの応答形式を確認してください。"
+        elif exc.finish_reason:
+            message = (f"プロバイダーが空の応答を返しました (finish_reason={exc.finish_reason[:40]}). "
+                       "別のモデルを選ぶか、チャンク長を短くしてください。")
+        elif exc.provider_code or exc.provider_message:
+            detail = ", ".join(value for value in (
+                f"code={exc.provider_code}" if exc.provider_code else None,
+                f"message={exc.provider_message}" if exc.provider_message else None) if value)
+            message = f"プロバイダーがエラーを返しました ({detail})。時間をおいて再試行してください。"
+        else:
+            message = ("プロバイダーから有効な応答がありませんでした。モデルの混雑や入力形式を確認し、"
+                       "別のモデルもお試しください。")
+    elif isinstance(exc, ProviderHTTPError):
+        if exc.status_code >= 500:
+            message = f"プロバイダー側で一時的な障害が発生しました (HTTP {exc.status_code})。自動再試行します。"
+        else:
+            message = f"プロバイダーがリクエストを拒否しました (HTTP {exc.status_code})。モデル設定を確認してください。"
+    elif isinstance(exc, ValueError):
+        detail = str(exc)
+        missing = re.search(r"(?:missing|invalid) key '([a-z_]+)'", detail)
+        if not missing:
+            missing = re.search(r"invalid (topics|keywords|important_moments|summary|topic|moment)", detail)
+        if missing:
+            message = f"モデルの返答形式で '{missing.group(1)}' が不足または不正です。別のモデルをお試しください。"
+        elif "JSON" in detail:
+            message = "モデルの返答が JSON 形式ではありませんでした。別のモデルをお試しください。"
+        else:
+            message = "モデルの返答形式が要約に必要な項目を満たしていません。別のモデルをお試しください。"
+    elif isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        message = "要約プロバイダーへの接続がタイムアウトまたは切断されました。自動再試行します。"
+    else:
+        message = "要約プロバイダーで一時的なエラーが発生しました。時間をおいて自動再試行します。"
+    return str(message).replace("\n", " ")[:500]
 
 
 def _process_transcription(job_id):
@@ -200,7 +252,9 @@ def _process_transcription(job_id):
 
 def _process_summary(job_id):
     from .summarization import (split_transcript, format_transcript, call_openrouter, validate_chunk, validate_final,
-                                cache_key, chunk_messages, final_messages)
+                                cache_key, chunk_messages, final_messages, intermediate_messages,
+                                compact_final_chunks, serialize_final_chunks, FINAL_INPUT_MAX_CHARS,
+                                FINAL_MERGE_GROUP_SIZE, assemble_final_from_chunks)
     db = SessionLocal()
     try:
         job = db.get(ProcessingJob, job_id)
@@ -209,42 +263,38 @@ def _process_summary(job_id):
         if not video or video.transcription_status != "completed":
             job.status, job.error, job.finished_at = "disabled", "transcript unavailable", now(); db.commit(); return
         opts = effective_summary_settings(db)
+        video_id = video.id
+        job_kind = job.kind
         secret_row = db.get(AppSetting, "openrouter_api_key")
         api_key = settings.openrouter_api_key or (secret_row.value.get("value", "") if secret_row else "")
         if not opts["summary_enabled"] or not api_key or not (job.payload or {}).get("model"):
             job.status = "disabled"; video.summary_status = "disabled"; job.finished_at = now(); db.commit(); return
         video.summary_status = "processing"; job.status = "processing"; job.attempts += 1
         job.started_at = now(); job.next_attempt_at = None; job.updated_at = now(); db.commit()
-        rows = db.scalars(select(TranscriptSegment).where(TranscriptSegment.video_id == video.id, TranscriptSegment.raw.is_(False)).order_by(TranscriptSegment.start)).all()
+        rows = db.scalars(select(TranscriptSegment).where(TranscriptSegment.video_id == video_id, TranscriptSegment.raw.is_(False)).order_by(TranscriptSegment.start)).all()
         segments = [{"start": r.start, "end": r.end, "text": r.text} for r in rows]
         model = (job.payload or {}).get("model", opts["openrouter_model"])
         max_attempts = max(1, int(opts["openrouter_max_attempts"]))
-        def request(text, validator, build_messages):
-            key = cache_key(text, model)
+        def request(text, validator, build_messages, *, cache_text=None):
+            key = cache_key(cache_text if cache_text is not None else text, model)
             cached = db.get(SummaryCache, key)
-            if cached: return cached.result
+            if cached:
+                return validator(cached.result)
             # プロバイダー呼び出し (最大数分) の間 DB トランザクションを開いたままにしない。
             db.commit()
-            last = None
-            for _ in range(2):  # retry schema-invalid output, but persist provider failures immediately
-                response = call_openrouter(build_messages(text), api_key=api_key, model=model,
-                    base_url=opts["openrouter_base_url"], attempts=1)
-                try:
-                    result = validator(response)
-                except (TypeError, ValueError) as exc:
-                    last = exc
-                    continue
-                try:
-                    # キャッシュは任意。保存に失敗してもセッションを戻して結果は使う
-                    # (戻さないと次の DB 操作が PendingRollbackError になり要約全体が失敗する)。
-                    db.merge(SummaryCache(key=key, result=result)); db.commit()
-                except Exception:
-                    db.rollback()
-                    log.warning("summary cache write failed for video %s", video.id)
-                return result
-            raise last
+            # commit() returns the checked-out connection before HTTP I/O; the
+            # cache write below checks out a fresh connection after the response.
+            result = validator(call_openrouter(build_messages(text), api_key=api_key, model=model,
+                base_url=opts["openrouter_base_url"], attempts=1))
+            try:
+                # Cache is optional; a failed write must not discard the valid result.
+                db.merge(SummaryCache(key=key, result=result)); db.commit()
+            except Exception:
+                db.rollback()
+                log.warning("summary cache write failed for video %s", video_id)
+            return result
         payload = dict(job.payload or {})
-        if job.kind == "SUMMARIZE_CHUNKS":
+        if job_kind == "SUMMARIZE_CHUNKS":
             # 再開時に区間がずれないよう、開始時のチャンク長を使い続ける。
             chunk_minutes = int(payload.get("chunk_minutes") or opts["summary_chunk_minutes"])
             chunks = split_transcript(segments, chunk_minutes)
@@ -265,18 +315,63 @@ def _process_summary(job_id):
                     db.commit()
                     return
                 db.commit()
-            final = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video.id, ProcessingJob.kind == "SUMMARIZE_FINAL"))
+            final = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video_id, ProcessingJob.kind == "SUMMARIZE_FINAL"))
             if not final:
-                final = ProcessingJob(video_id=video.id, kind="SUMMARIZE_FINAL", status="pending", attempts=0, payload={"model": model, "chunks": summaries}); db.add(final)
+                final = ProcessingJob(video_id=video_id, kind="SUMMARIZE_FINAL", status="pending", attempts=0, payload={"model": model, "chunks": summaries}); db.add(final)
             else: final.status, final.payload = "pending", {"model": model, "chunks": summaries}
             job.status, job.error, job.attempts, job.next_attempt_at, job.finished_at = "completed", None, 0, None, now()
             video.summary_status, video.summary_error = "pending", None
             db.commit(); return
         summaries = payload.get("chunks")
         if not summaries:
-            chunks_job = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video.id, ProcessingJob.kind == "SUMMARIZE_CHUNKS"))
+            chunks_job = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video_id, ProcessingJob.kind == "SUMMARIZE_CHUNKS"))
             summaries = (chunks_job.payload or {}).get("chunks", []) if chunks_job else []
-        text = json.dumps(summaries, ensure_ascii=False, separators=(",", ":"))
+
+        def yield_final_progress(updated_payload):
+            job.payload = updated_payload
+            job.status, job.attempts, job.error, job.next_attempt_at = "pending", 0, None, None
+            job.updated_at = now()
+            video.summary_status, video.summary_error = "pending", None
+            db.commit()
+
+        merge_state = payload.get("final_merge")
+        if not merge_state:
+            merged_chunks = payload.get("merged_chunks")
+            final_summaries = compact_final_chunks(merged_chunks) if merged_chunks else compact_final_chunks(summaries)
+            compact_text = json.dumps(final_summaries, ensure_ascii=False, separators=(",", ":"))
+            if len(compact_text) > FINAL_INPUT_MAX_CHARS:
+                merge_state = {"level": 1, "source": final_summaries, "results": [], "next_group": 0}
+                payload["final_merge"] = merge_state
+
+        if merge_state:
+            source = merge_state.get("source", [])
+            group_index = int(merge_state.get("next_group", 0))
+            group_start = group_index * FINAL_MERGE_GROUP_SIZE
+            group = source[group_start:group_start + FINAL_MERGE_GROUP_SIZE]
+            merge_text = json.dumps(group, ensure_ascii=False, separators=(",", ":"))
+            result = request(merge_text, validate_chunk, intermediate_messages,
+                             cache_text=f"intermediate:{merge_state.get('level', 1)}:{merge_text}")
+            numeric_starts = [item["start"] for item in group if isinstance(item.get("start"), (int, float))]
+            numeric_ends = [item["end"] for item in group if isinstance(item.get("end"), (int, float))]
+            merged = {"start": min(numeric_starts, default=0), "end": max(numeric_ends, default=0), **result}
+            results = [*merge_state.get("results", []), merged]
+            if group_start + len(group) < len(source):
+                payload["final_merge"] = {**merge_state, "results": results, "next_group": group_index + 1}
+            else:
+                reduced_text = serialize_final_chunks(results)
+                if len(reduced_text) > FINAL_INPUT_MAX_CHARS:
+                    payload["final_merge"] = {"level": int(merge_state.get("level", 1)) + 1,
+                                              "source": compact_final_chunks(results),
+                                              "results": [], "next_group": 0}
+                else:
+                    payload.pop("final_merge", None)
+                    payload["merged_chunks"] = compact_final_chunks(results)
+            yield_final_progress(payload)
+            return
+
+        merged_chunks = payload.get("merged_chunks")
+        final_summaries = compact_final_chunks(merged_chunks) if merged_chunks else compact_final_chunks(summaries)
+        text = json.dumps(final_summaries, ensure_ascii=False, separators=(",", ":"))
         result = request(text, validate_final, final_messages)
         video.summary_data, video.summary_model, video.summary_status, video.summary_error = result, model, "completed", None
         job.status, job.error, job.attempts, job.next_attempt_at, job.finished_at = "completed", None, 0, None, now()
@@ -284,15 +379,34 @@ def _process_summary(job_id):
     except Exception as exc:
         db.rollback(); job = db.get(ProcessingJob, job_id)
         if job:
-            video = db.get(Video, job.video_id); job.error = f"summary provider failed ({type(exc).__name__})"
-            if job.attempts >= max(1, int(effective_summary_settings(db)["openrouter_max_attempts"])):
+            video = db.get(Video, job.video_id)
+            error_message = _summary_error_message(exc)
+            job.error = error_message
+            max_attempts = max(1, int(effective_summary_settings(db)["openrouter_max_attempts"]))
+            if job.attempts >= max_attempts and job.kind == "SUMMARIZE_FINAL":
+                fallback_chunks = (job.payload or {}).get("chunks") or []
+                if not fallback_chunks:
+                    chunks_job = db.scalar(select(ProcessingJob).where(
+                        ProcessingJob.video_id == job.video_id, ProcessingJob.kind == "SUMMARIZE_CHUNKS"))
+                    fallback_chunks = (chunks_job.payload or {}).get("chunks", []) if chunks_job else []
+                if video and fallback_chunks:
+                    fallback_note = ("AI による最終統合に失敗したため、チャンク要約を結合して作成しました。"
+                                     "内容は自動統合の結果と異なる場合があります。")
+                    video.summary_data = assemble_final_from_chunks(fallback_chunks)
+                    video.summary_model = (job.payload or {}).get("model") or effective_summary_settings(db)["openrouter_model"]
+                    video.summary_status, video.summary_error = "completed", fallback_note
+                    job.status, job.error, job.next_attempt_at, job.finished_at = "completed", fallback_note, None, now()
+                else:
+                    job.status, job.finished_at = "failed", now()
+                    if video: video.summary_status, video.summary_error = "failed", error_message
+            elif job.attempts >= max_attempts:
                 job.status, job.finished_at = "failed", now()
-                if video: video.summary_status, video.summary_error = "failed", job.error
+                if video: video.summary_status, video.summary_error = "failed", error_message
             else:
                 delay = max(60, min(86400, 60 * (2 ** max(0, job.attempts - 1))))
                 delay = max(delay, int(getattr(exc, "retry_after", 0)))
                 job.status, job.next_attempt_at = "retry_wait", now() + timedelta(seconds=delay)
-                if video: video.summary_status, video.summary_error = "retry_wait", job.error
+                if video: video.summary_status, video.summary_error = "retry_wait", error_message
             db.commit()
         log.warning("summary job %s failed (%s)", job_id, type(exc).__name__)
     finally: db.close()

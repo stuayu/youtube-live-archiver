@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
@@ -34,6 +35,19 @@ FINAL_INSTRUCTIONS = (
     '"keywords": [string], '
     '"timeline": [{"start": number, "title": string}]}\n'
     "Use empty lists when there is nothing to report.\n\nSection summaries (JSON):\n")
+MERGE_INSTRUCTIONS = (
+    "Combine these adjacent section summaries into one intermediate summary. Preserve the supplied timestamps, "
+    "retain important facts and topic titles, and write in the same language as the summaries. "
+    "Do not invent facts or timestamps. Return only a JSON object with exactly these keys:\n"
+    '{"summary": string, "topics": [{"start": number, "end": number, "title": string, "summary": string}], '
+    '"keywords": [string], "important_moments": [{"timestamp": number, "description": string}]}\n'
+    "Use empty lists when there is nothing to report.\n\nSection summaries (JSON):\n")
+
+FINAL_INPUT_MAX_CHARS = 12_000
+FINAL_MERGE_GROUP_SIZE = 3
+FINAL_SUMMARY_CHAR_LIMIT = 1_000
+FINAL_TOPIC_LIMIT = 8
+FINAL_MOMENT_LIMIT = 8
 
 
 def chunk_messages(transcript_text: str) -> list[dict]:
@@ -44,6 +58,90 @@ def final_messages(summaries_json: str) -> list[dict]:
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": FINAL_INSTRUCTIONS + summaries_json}]
 
 
+def intermediate_messages(summaries_json: str) -> list[dict]:
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": MERGE_INSTRUCTIONS + summaries_json}]
+
+
+def compact_final_chunks(chunks: list[dict]) -> list[dict]:
+    """Drop redundant chunk fields and cap verbose detail before final integration."""
+    compacted = []
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        summary = str(chunk.get("summary") or "").strip()
+        if len(summary) > FINAL_SUMMARY_CHAR_LIMIT:
+            summary = summary[:FINAL_SUMMARY_CHAR_LIMIT].rstrip() + "…"
+        item = {"start": chunk.get("start"), "end": chunk.get("end"), "summary": summary}
+        topics = []
+        for topic in chunk.get("topics") or []:
+            if not isinstance(topic, dict):
+                continue
+            topics.append({"start": topic.get("start"), "end": topic.get("end"),
+                           "title": str(topic.get("title") or "")[:160]})
+            if len(topics) >= FINAL_TOPIC_LIMIT:
+                break
+        moments = []
+        for moment in chunk.get("important_moments") or []:
+            if not isinstance(moment, dict):
+                continue
+            description = str(moment.get("description") or "")
+            if len(description) > 240:
+                description = description[:240].rstrip() + "…"
+            moments.append({"timestamp": moment.get("timestamp"), "description": description})
+            if len(moments) >= FINAL_MOMENT_LIMIT:
+                break
+        item["topics"] = topics
+        item["important_moments"] = moments
+        compacted.append(item)
+    return compacted
+
+
+def serialize_final_chunks(chunks: list[dict]) -> str:
+    return json.dumps(compact_final_chunks(chunks), ensure_ascii=False, separators=(",", ":"))
+
+
+def assemble_final_from_chunks(chunks: list[dict]) -> dict:
+    """Create a stable, usable final result without making another provider request."""
+    summaries, topics, highlights = [], [], []
+    keyword_counts: Counter[str] = Counter()
+    keyword_order: dict[str, int] = {}
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        summary = str(chunk.get("summary") or "").strip()
+        if summary:
+            start, end = chunk.get("start"), chunk.get("end")
+            span = f"[{start:g}–{end:g}秒] " if isinstance(start, (int, float)) and isinstance(end, (int, float)) else ""
+            summaries.append(span + summary)
+        for topic in chunk.get("topics") or []:
+            if isinstance(topic, dict) and isinstance(topic.get("title"), str):
+                topics.append({"start": topic.get("start", chunk.get("start", 0)),
+                               "end": topic.get("end", chunk.get("end", 0)),
+                               "title": topic["title"], "summary": str(topic.get("summary") or "")})
+        for moment in chunk.get("important_moments") or []:
+            if isinstance(moment, dict) and isinstance(moment.get("timestamp"), (int, float)):
+                highlights.append({"timestamp": moment["timestamp"],
+                                   "description": str(moment.get("description") or "")})
+        for keyword in chunk.get("keywords") or []:
+            if isinstance(keyword, str) and keyword.strip():
+                normalized = keyword.strip()
+                if normalized not in keyword_order:
+                    keyword_order[normalized] = len(keyword_order)
+                keyword_counts[normalized] += 1
+    topics.sort(key=lambda item: (item["start"] if isinstance(item["start"], (int, float)) else 0,
+                                  item["title"]))
+    highlights.sort(key=lambda item: item["timestamp"])
+    keywords = sorted(keyword_counts, key=lambda word: (-keyword_counts[word], keyword_order[word]))[:30]
+    return {
+        "summary": "\n\n".join(summaries) or "チャンク要約の内容を全体要約としてまとめました。",
+        "topics": topics,
+        "highlights": highlights,
+        "keywords": keywords,
+        "timeline": [{"start": topic["start"], "title": topic["title"]} for topic in topics],
+        "assembled": True,
+    }
+
+
 REQUEST_TIMEOUT_SECONDS = 300
 
 
@@ -51,6 +149,95 @@ class RateLimitError(RuntimeError):
     def __init__(self, retry_after):
         super().__init__("OpenRouter rate limited the request")
         self.retry_after = max(60, int(retry_after))
+
+
+class ProviderResponseError(RuntimeError):
+    """Retryable provider failure with only safe response metadata attached."""
+    def __init__(self, message: str, *, finish_reason: str | None = None,
+                 provider_code: str | None = None, provider_message: str | None = None):
+        finish_reason = re.sub(r"[^A-Za-z0-9_.-]", "", finish_reason)[:40] if finish_reason else None
+        details = []
+        if finish_reason and f"finish_reason={finish_reason}" not in message:
+            details.append(f"finish_reason={finish_reason}")
+        if provider_code:
+            details.append(f"provider_code={provider_code}")
+        if provider_message:
+            details.append(f"provider_message={provider_message}")
+        if details:
+            message = f"{message} ({', '.join(details)})"
+        super().__init__(message)
+        self.finish_reason = finish_reason
+        self.provider_code = provider_code
+        self.provider_message = provider_message
+
+
+class TruncatedProviderResponseError(ProviderResponseError):
+    """The provider stopped generation at its output limit."""
+
+
+class ProviderHTTPError(RuntimeError):
+    def __init__(self, status_code: int):
+        super().__init__(f"OpenRouter HTTP {status_code}")
+        self.status_code = status_code
+
+
+def _safe_provider_error(error, *, messages, api_key):
+    if not isinstance(error, dict):
+        return None, None
+    code = error.get("code") or error.get("type")
+    code = str(code)[:40] if code is not None else None
+    if code and (not re.fullmatch(r"[A-Za-z0-9_.-]+", code) or re.match(r"(?i)sk(?:-or)?-", code)):
+        code = None
+    message = error.get("message")
+    message = message.strip()[:4_000] if isinstance(message, str) else ""
+    if len(message) >= 4_000:
+        return code, None
+    for request_message in messages:
+        content = request_message.get("content")
+        if isinstance(content, str) and len(content) >= 12:
+            message = message.replace(content, "[request content]")
+            if len(content) >= 32 and any(content[index:index + 32] in message
+                                          for index in range(len(content) - 31)):
+                return code, None
+    if api_key:
+        message = message.replace(api_key, "[redacted]")
+    message = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [redacted]", message)
+    message = re.sub(r"(?i)\b(?:sk-or-v1-|sk-or-|sk-)\w+", "[redacted]", message)
+    message = re.sub(r"(?i)\b(?:api[_ -]?key|token|authorization)\s*[:=]\s*\S+", "[redacted]", message)
+    message = re.sub(r"[\x00-\x1f\x7f]", " ", message)
+    return code, message[:160].strip() or None
+
+
+def _provider_response_error(payload, *, messages, api_key):
+    if not isinstance(payload, dict):
+        raise ProviderResponseError("provider returned an invalid response")
+    provider_error = payload.get("error")
+    if "error" in payload and provider_error is not None:
+        code, message = _safe_provider_error(provider_error, messages=messages, api_key=api_key)
+        raise ProviderResponseError("provider returned an error", provider_code=code, provider_message=message)
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ProviderResponseError("provider response is missing a choice")
+    choice = choices[0]
+    if "error" in choice and choice["error"] is not None:
+        code, message = _safe_provider_error(choice["error"], messages=messages, api_key=api_key)
+        raise ProviderResponseError("provider returned a choice error", provider_code=code,
+                                    provider_message=message)
+    finish_reason = choice.get("finish_reason")
+    if finish_reason == "length":
+        raise TruncatedProviderResponseError("provider response was truncated", finish_reason="length")
+    if not isinstance(finish_reason, str) or not finish_reason.strip():
+        raise ProviderResponseError("provider response is missing finish_reason")
+    if finish_reason == "error":
+        raise ProviderResponseError("provider returned an empty response (finish_reason=error)", finish_reason="error")
+    message = choice.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise ProviderResponseError("provider returned an empty response", finish_reason=finish_reason)
+    try:
+        return repair_json(content)
+    except (TypeError, ValueError) as exc:
+        raise ProviderResponseError("provider response was not valid JSON", finish_reason=finish_reason) from exc
 
 def split_transcript(rows, chunk_minutes=30):
     """Group utterance-atomic rows in bounded windows, preferring a nearby sentence end."""
@@ -90,9 +277,13 @@ def validate_chunk(data):
     return data
 
 def validate_final(data):
-    if not isinstance(data, dict) or not isinstance(data.get("summary"), str): raise ValueError("invalid summary")
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str) or not data["summary"].strip():
+        raise ValueError("schema missing key 'summary' or summary text is empty")
     for key in ("topics", "highlights", "keywords", "timeline"):
-        if not isinstance(data.get(key), list): raise ValueError(f"invalid {key}")
+        if data.get(key) is None:
+            data[key] = []
+        elif not isinstance(data[key], list):
+            raise ValueError(f"schema invalid key '{key}'")
     return data
 
 def repair_json(text):
@@ -111,7 +302,11 @@ def call_openrouter(messages, *, api_key, model, base_url, attempts=5, opener=No
         try:
             # 大きなモデルは 30 分ぶんの文字起こしの要約に数分かかることがある。
             with open_fn(request, timeout=REQUEST_TIMEOUT_SECONDS) as response: raw = response.read()
-            payload=json.loads(raw); return repair_json(payload["choices"][0]["message"]["content"])
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError) as exc:
+                raise ProviderResponseError("provider returned an invalid response") from exc
+            return _provider_response_error(payload, messages=messages, api_key=api_key)
         except HTTPError as exc:
             delay = None
             if exc.code == 429:
@@ -123,7 +318,7 @@ def call_openrouter(messages, *, api_key, model, base_url, attempts=5, opener=No
             retry_delay = max(60, delay if delay is not None else min(86400, 60 * (2 ** attempt)))
             if attempt + 1 >= max(1, attempts):
                 if exc.code == 429: raise RateLimitError(retry_delay) from None
-                raise RuntimeError(f"OpenRouter HTTP {exc.code}") from None
+                raise ProviderHTTPError(exc.code) from None
             sleeper(retry_delay)
         except Exception as exc:
             if attempt + 1 >= max(1, attempts): raise

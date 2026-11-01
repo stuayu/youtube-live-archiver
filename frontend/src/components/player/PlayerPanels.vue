@@ -85,6 +85,11 @@ const tabs = [
   ['info', '情報'],
 ] as const
 const searchable = computed(() => Boolean(props.chatQuery || props.chatKind))
+const isAssembledSummary = computed(() => {
+  const data = props.summary?.summary
+  return typeof data === 'object' && data !== null && 'assembled' in data && data.assembled === true
+})
+const assembledSummaryError = computed(() => (isAssembledSummary.value ? props.summary?.error : null))
 const allRows = computed(() => props.chat.messages)
 const replayPending = computed(() => ['queued', 'running'].includes(props.chat.replay?.state || ''))
 const activeTranscriptKey = computed(() => {
@@ -553,6 +558,10 @@ watch(
     </section>
     <section v-else-if="tab === 'summary'" class="panel-content">
       <p>{{ summary?.status || '要約なし' }}</p>
+      <p v-if="isAssembledSummary" class="summary-assembled-note">
+        AI による最終統合なし。チャンク要約を組み合わせて作成しました。
+        <span v-if="assembledSummaryError">{{ assembledSummaryError }}</span>
+      </p>
       <pre v-if="summary?.summary" class="summary-text">{{ JSON.stringify(summary.summary, null, 2) }}</pre>
       <button class="button secondary" :disabled="busy" @click="emit('runSummary', 'all')">要約を生成</button>
       <button class="button secondary" :disabled="busy" @click="emit('runSummary', 'final')">

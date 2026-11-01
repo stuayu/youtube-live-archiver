@@ -921,6 +921,14 @@ legend {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.summary-assembled-note {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.summary-assembled-note span {
+  display: block;
+  margin-top: 4px;
+}
 .player-backdrop {
   padding: 0;
 }

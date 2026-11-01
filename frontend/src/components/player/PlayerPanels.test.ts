@@ -95,6 +95,37 @@ function renderChat(messages: ChatMessage[], following = true) {
 }
 
 describe('PlayerPanels chat rendering', () => {
+  it('marks a deterministic assembled summary', () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'summary',
+        video,
+        chat: emptyChat,
+        transcript,
+        timeline: [],
+        summary: {
+          status: 'completed',
+          summary: { summary: 'opening section', assembled: true },
+          error: 'AI による最終統合に失敗したため、チャンク要約を結合して作成しました。',
+        },
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: true,
+        transcriptQuery: '',
+        playbackSeconds: 0,
+        following: true,
+      },
+    })
+
+    expect(wrapper.text()).toContain('AI による最終統合に失敗したため、チャンク要約を結合して作成しました。')
+    expect(wrapper.text()).toContain('AI による最終統合なし')
+  })
+
   it('highlights the transcript segment at playback time and lets the user turn sync off', async () => {
     const wrapper = mount(PlayerPanels, {
       props: {

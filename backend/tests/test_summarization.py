@@ -24,6 +24,211 @@ def test_json_validation_and_repair():
     except ValueError: pass
     else: assert False, "invalid schema accepted"
 
+def test_final_validation_defaults_missing_and_null_lists():
+    result = summarization.validate_final({"summary": "s", "topics": None, "highlights": [], "keywords": []})
+    assert result == {"summary": "s", "topics": [], "highlights": [], "keywords": [], "timeline": []}
+    with pytest.raises(ValueError, match="summary"):
+        summarization.validate_final({"topics": []})
+
+def test_openrouter_error_finish_reason_is_a_retryable_provider_error(monkeypatch):
+    def opener(request, timeout):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"choices": [{"finish_reason": "error", "message": {
+                    "content": None, "reasoning": "private reasoning text"}}]}).encode()
+        return Response()
+
+    monkeypatch.setattr(summarization, "urlopen", opener)
+    with pytest.raises(RuntimeError, match="finish_reason=error") as raised:
+        summarization.call_openrouter([], api_key="never-log-this", model="model",
+                                      base_url="https://unit.test", attempts=1)
+    assert "private reasoning text" not in str(raised.value)
+    assert "never-log-this" not in str(raised.value)
+
+@pytest.mark.parametrize(("payload", "error_type", "finish_reason"), [
+    ({"error": {"code": "overloaded", "message": "Provider is temporarily busy"}},
+     summarization.ProviderResponseError, None),
+    ({"choices": [{"finish_reason": "stop", "error": {
+        "code": "capacity", "message": "Provider capacity reached"}}]},
+     summarization.ProviderResponseError, None),
+    ({"choices": [{"finish_reason": "length", "message": {"content": None}}]},
+     summarization.TruncatedProviderResponseError, "length"),
+    ({"choices": [{"message": {"content": "{}"}}]}, summarization.ProviderResponseError, None),
+    ({"choices": [{"finish_reason": "stop", "message": {"content": ""}}]},
+     summarization.ProviderResponseError, "stop"),
+])
+def test_openrouter_classifies_provider_errors_and_truncation(monkeypatch, payload, error_type, finish_reason):
+    def opener(request, timeout):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return json.dumps(payload).encode()
+        return Response()
+
+    monkeypatch.setattr(summarization, "urlopen", opener)
+    with pytest.raises(error_type) as raised:
+        summarization.call_openrouter([], api_key="test-key", model="model",
+                                      base_url="https://unit.test", attempts=1)
+    assert raised.value.finish_reason == finish_reason
+    if payload.get("error"):
+        assert raised.value.provider_code == "overloaded"
+        assert raised.value.provider_message == "Provider is temporarily busy"
+        assert "provider_code=overloaded" in str(raised.value)
+        assert "provider_message=Provider is temporarily busy" in str(raised.value)
+    if payload.get("choices", [{}])[0].get("error"):
+        assert raised.value.provider_code == "capacity"
+
+def test_openrouter_provider_error_metadata_redacts_key_and_request_content(monkeypatch):
+    messages = [{"role": "user", "content": "private transcript excerpt"}]
+    def opener(request, timeout):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"error": {"code": "rejected", "message":
+                    "private transcript excerpt uses api_key=never-log-this"}}).encode()
+        return Response()
+
+    monkeypatch.setattr(summarization, "urlopen", opener)
+    with pytest.raises(summarization.ProviderResponseError) as raised:
+        summarization.call_openrouter(messages, api_key="never-log-this", model="model",
+                                      base_url="https://unit.test", attempts=1)
+    assert "private transcript excerpt" not in str(raised.value)
+    assert "never-log-this" not in str(raised.value)
+
+def test_final_provider_error_is_retry_wait_with_readable_message(monkeypatch, tmp_path):
+    from sqlalchemy import event
+    engine=create_engine(f"sqlite:///{tmp_path / 'provider-error.sqlite'}"); Base.metadata.create_all(engine); factory=sessionmaker(bind=engine, expire_on_commit=False)
+    db=factory(); video=Video(youtube_video_id="provider-error", channel_id=1, status="ACTIVE",
+                              transcription_status="completed", summary_status="processing")
+    db.add(video); db.flush(); vid=video.id
+    db.add_all([AppSetting(key="summary_enabled", value={"value":True}),
+                AppSetting(key="openrouter_model", value={"value":"model"}),
+                AppSetting(key="openrouter_api_key", value={"value":"never-log-this"}),
+                AppSetting(key="openrouter_max_attempts", value={"value":2})])
+    job=ProcessingJob(video_id=vid, kind="SUMMARIZE_FINAL", status="processing", attempts=0,
+                      payload={"model":"model", "chunks":[{"start":0,"end":10,"summary":"opening"}]},
+                      created_at=now(), updated_at=now())
+    db.add(job); db.commit(); jid=job.id; db.close()
+
+    checked_out = 0
+    def on_checkout(*args):
+        nonlocal checked_out
+        checked_out += 1
+    def on_checkin(*args):
+        nonlocal checked_out
+        checked_out -= 1
+    event.listen(engine, "checkout", on_checkout)
+    event.listen(engine, "checkin", on_checkin)
+    def opener(request, timeout):
+        assert checked_out == 0, "provider request held an idle database connection"
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"choices": [{"finish_reason": "error", "message": {
+                    "content": None, "reasoning": "private reasoning text"}}]}).encode()
+        return Response()
+
+    monkeypatch.setattr(processing, "SessionLocal", factory)
+    monkeypatch.setattr(summarization, "urlopen", opener)
+    processing._process_summary(jid)
+
+    check=factory(); saved=check.get(ProcessingJob, jid); saved_video=check.get(Video, vid)
+    assert saved.status == "retry_wait"
+    assert "finish_reason=error" in saved.error
+    assert "別のモデル" in saved.error or "短いチャンク長" in saved.error
+    assert saved_video.summary_status == "retry_wait" and saved_video.summary_error == saved.error
+    assert "ValueError" not in saved.error
+    assert "private reasoning text" not in saved.error and "never-log-this" not in saved.error
+    assert len(saved.error) <= 500
+    check.close()
+
+def test_large_final_merge_resumes_after_each_provider_call(monkeypatch, tmp_path):
+    engine=create_engine(f"sqlite:///{tmp_path / 'merge-resume.sqlite'}"); Base.metadata.create_all(engine); factory=sessionmaker(bind=engine, expire_on_commit=False)
+    db=factory(); video=Video(youtube_video_id="merge-resume", channel_id=1, status="ACTIVE",
+                              transcription_status="completed", summary_status="pending")
+    db.add(video); db.flush(); vid=video.id
+    db.add_all([AppSetting(key="summary_enabled", value={"value":True}),
+                AppSetting(key="openrouter_model", value={"value":"model"}),
+                AppSetting(key="openrouter_api_key", value={"value":"test-key"})])
+    chunks=[{"start":i*60, "end":(i+1)*60, "summary":f"chunk-{i} " + ("context " * 200),
+             "topics":[{"start":i*60,"end":i*60+20,"title":f"topic-{i}","summary":"detail"}],
+             "keywords":[f"keyword-{i}"], "important_moments":[]} for i in range(30)]
+    job=ProcessingJob(video_id=vid, kind="SUMMARIZE_FINAL", status="pending", attempts=0,
+                      payload={"model":"model", "chunks":chunks}, created_at=now(), updated_at=now())
+    db.add(job); db.commit(); jid=job.id; db.close()
+
+    requests=[]
+    def respond(messages, **kwargs):
+        content=messages[1]["content"]
+        requests.append(content)
+        if "Combine these per-section summaries" in content:
+            return {"summary":"Final summary", "topics":[], "highlights":[], "keywords":[], "timeline":[]}
+        return {"summary":"Merged group", "topics":[], "keywords":[], "important_moments":[]}
+
+    monkeypatch.setattr(processing, "SessionLocal", factory)
+    monkeypatch.setattr(summarization, "call_openrouter", respond)
+
+    processing._process_summary(jid)
+    check=factory(); first=check.get(ProcessingJob, jid)
+    assert first.status == "pending"
+    assert first.payload["final_merge"]["next_group"] == 1
+    first_request=requests[0]
+    check.close()
+
+    # A new worker invocation starts from the database checkpoint, not group zero.
+    processing._process_summary(jid)
+    assert requests[1] != first_request
+    for _ in range(20):
+        check=factory(); saved=check.get(ProcessingJob, jid); status=saved.status; check.close()
+        if status == "completed": break
+        processing._process_summary(jid)
+
+    check=factory(); saved=check.get(ProcessingJob, jid); saved_video=check.get(Video, vid)
+    assert saved.status == "completed" and saved_video.summary_data["summary"] == "Final summary"
+    assert len(requests) > 2
+    assert len(requests) == len(set(requests))
+    check.close()
+
+def test_exhausted_final_job_falls_back_to_deterministic_chunk_assembly(monkeypatch, tmp_path):
+    engine=create_engine(f"sqlite:///{tmp_path / 'final-fallback.sqlite'}"); Base.metadata.create_all(engine); factory=sessionmaker(bind=engine, expire_on_commit=False)
+    db=factory(); video=Video(youtube_video_id="final-fallback", channel_id=1, status="ACTIVE",
+                              transcription_status="completed", summary_status="pending")
+    db.add(video); db.flush(); vid=video.id
+    db.add_all([AppSetting(key="summary_enabled", value={"value":True}),
+                AppSetting(key="openrouter_model", value={"value":"model"}),
+                AppSetting(key="openrouter_api_key", value={"value":"test-key"}),
+                AppSetting(key="openrouter_max_attempts", value={"value":1})])
+    chunks=[{"start":0,"end":10,"summary":"opening section", "topics":[
+                 {"start":2,"end":8,"title":"Opening","summary":"topic detail"}],
+             "keywords":["live", "news"], "important_moments":[
+                 {"timestamp":5,"description":"A key moment"}]},
+            {"start":10,"end":20,"summary":"closing section", "topics":[
+                 {"start":12,"end":19,"title":"Closing","summary":"more detail"}],
+             "keywords":["news", "music"], "important_moments":[]}]
+    job=ProcessingJob(video_id=vid, kind="SUMMARIZE_FINAL", status="pending", attempts=0,
+                      payload={"model":"model", "chunks":chunks}, created_at=now(), updated_at=now())
+    db.add(job); db.commit(); jid=job.id; db.close()
+
+    monkeypatch.setattr(processing, "SessionLocal", factory)
+    monkeypatch.setattr(summarization, "call_openrouter",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider unavailable")))
+    processing._process_summary(jid)
+
+    check=factory(); saved=check.get(ProcessingJob, jid); saved_video=check.get(Video, vid)
+    assert saved.status == "completed" and saved.error == saved_video.summary_error
+    assert saved_video.summary_status == "completed"
+    assert saved_video.summary_data["assembled"] is True
+    assert "opening section" in saved_video.summary_data["summary"]
+    assert [topic["title"] for topic in saved_video.summary_data["topics"]] == ["Opening", "Closing"]
+    assert saved_video.summary_data["highlights"] == [{"timestamp":5,"description":"A key moment"}]
+    assert saved_video.summary_data["keywords"] == ["news", "live", "music"]
+    assert "AI" in saved_video.summary_error
+    check.close()
+
 def test_429_retry_after_and_backoff(monkeypatch):
     calls, delays = [], []
     def opener(request, timeout):
@@ -32,7 +237,7 @@ def test_429_retry_after_and_backoff(monkeypatch):
         class Response:
             def __enter__(self): return self
             def __exit__(self, *args): pass
-            def read(self): return json.dumps({"choices":[{"message":{"content":"{}"}}]}).encode()
+            def read(self): return json.dumps({"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}).encode()
         return Response()
     monkeypatch.setattr(summarization, "urlopen", opener)
     result = summarization.call_openrouter([], api_key="secret", model="x", base_url="https://unit.test", attempts=2, sleeper=delays.append)
@@ -53,7 +258,7 @@ def test_429_retry_wait_is_never_shorter_than_one_minute(monkeypatch):
         class Response:
             def __enter__(self): return self
             def __exit__(self, *args): pass
-            def read(self): return json.dumps({"choices":[{"message":{"content":"{}"}}]}).encode()
+            def read(self): return json.dumps({"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}).encode()
         return Response()
     monkeypatch.setattr(summarization, "urlopen", opener)
     summarization.call_openrouter([], api_key="secret", model="x", base_url="https://unit.test",
@@ -196,7 +401,11 @@ def test_provider_failure_does_not_change_recording_or_transcription(monkeypatch
     if retry_at.tzinfo is None:
         retry_at=retry_at.replace(tzinfo=timezone.utc)
     assert retry_at >= retry_started + timedelta(seconds=59)
-    assert type(provider_error).__name__ in saved_job.error and saved.summary_error == saved_job.error
+    assert saved.summary_error == saved_job.error
+    if isinstance(provider_error, summarization.RateLimitError):
+        assert "利用上限" in saved_job.error and "60秒後" in saved_job.error
+    else:
+        assert "タイムアウト" in saved_job.error
     assert len(calls) == 1
     assert "never-log-this" not in caplog.text and "local words" not in caplog.text
     check.close()
