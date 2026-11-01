@@ -190,6 +190,57 @@ export interface Page<T> {
   items: T[]
   total: number
 }
+export interface ProcessingProgress {
+  done: number
+  total: number
+}
+export interface ProcessingChunkRange {
+  start: number
+  end: number
+}
+export interface ProcessingChunk {
+  index: number
+  start: number
+  end: number
+  state: 'done' | 'current' | 'pending'
+  summary: string | null
+}
+export interface ProcessingJob {
+  id: Id
+  kind: 'TRANSCRIBE' | 'SUMMARIZE_CHUNKS' | 'SUMMARIZE_FINAL' | 'CHAT_REPLAY' | string
+  status: string
+  attempts: number
+  error: string | null
+  next_attempt_at: string | null
+  created_at: string
+  started_at: string | null
+  updated_at: string
+  finished_at: string | null
+  video: {
+    id: Id
+    youtube_video_id: string
+    title: string
+    channel_name: string
+  }
+  progress: ProcessingProgress | null
+  current_chunk: ProcessingChunkRange | null
+  queue_position: number | null
+}
+export interface ProcessingJobDetail extends ProcessingJob {
+  chunks: ProcessingChunk[]
+}
+export interface ProcessingJobCounts {
+  total: number
+  by_kind: Record<string, Record<string, number>>
+  by_status: Record<string, number>
+}
+export interface ProcessingJobPage {
+  items: ProcessingJob[]
+  total: number
+  offset: number
+  limit: number
+  counts: ProcessingJobCounts
+}
 export type ChannelInput = Omit<
   Partial<Channel>,
   | 'id'

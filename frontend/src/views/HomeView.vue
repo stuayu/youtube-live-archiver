@@ -50,6 +50,16 @@ const ctx = reactive(useWorkspaceContext())
         <strong>{{ ctx.status?.counts.PROTECTED ?? 0 }}</strong>
       </button>
     </div>
+    <section
+      class="card"
+      style="display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap"
+    >
+      <div>
+        <h2>処理状況</h2>
+        <p class="muted">文字起こし・要約区間・チャット取得の待ち順や再試行予定を確認できます。</p>
+      </div>
+      <button class="button secondary" @click="ctx.setTab('processing')">処理状況を確認</button>
+    </section>
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr))">
       <section class="card">
         <div class="card-header">

@@ -8,6 +8,7 @@ export const tabs = [
   'storages',
   'analysis',
   'activity',
+  'processing',
   'settings',
 ] as const
 export type Tab = (typeof tabs)[number]

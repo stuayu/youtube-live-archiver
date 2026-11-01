@@ -29,6 +29,7 @@ export function useWorkspaceState() {
   const rules = ref<RecordingRule[]>([])
   const loading = ref(true)
   const refreshing = ref(false)
+  const processingRefresh = ref(0)
   const lastUpdated = ref('')
   const pageSize = 30
   const offset = ref(0)
@@ -103,6 +104,7 @@ export function useWorkspaceState() {
     { id: 'storages', label: 'ストレージ', icon: 'storage' },
     { id: 'analysis', label: '分析', icon: 'analysis' },
     { id: 'activity', label: 'アクティビティ', icon: 'activity' },
+    { id: 'processing', label: '処理状況', icon: 'processing' },
     { id: 'settings', label: '設定', icon: 'settings' },
   ]
   const mobileTabs = mainTabs.slice(0, 4)
@@ -135,6 +137,7 @@ export function useWorkspaceState() {
     rules,
     loading,
     refreshing,
+    processingRefresh,
     lastUpdated,
     pageSize,
     offset,

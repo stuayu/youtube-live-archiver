@@ -7,6 +7,8 @@ import type {
   EventItem,
   ManualVideoPreview,
   ManualVideoResult,
+  ProcessingJobDetail,
+  ProcessingJobPage,
   QualityPreset,
   RecordingRule,
   SearchResponse,
@@ -46,6 +48,24 @@ export const api = {
   deleteStorage: (id: string) => request<void>(`/storages/${id}`, { method: 'DELETE' }),
   videos: (params: Record<string, string | number | boolean | null | undefined>) =>
     request<Video[]>(`/videos?${query(params)}`),
+  processingJobs: (
+    params: {
+      kind?: string
+      status?: string[]
+      q?: string
+      limit?: number
+      offset?: number
+    } = {},
+  ) => {
+    const p = new URLSearchParams()
+    if (params.kind) p.set('kind', params.kind)
+    for (const status of params.status ?? []) p.append('status', status)
+    if (params.q) p.set('q', params.q)
+    p.set('limit', String(params.limit ?? 30))
+    p.set('offset', String(params.offset ?? 0))
+    return request<ProcessingJobPage>(`/processing/jobs?${p}`)
+  },
+  processingJob: (id: string) => request<ProcessingJobDetail>(`/processing/jobs/${id}`),
   previewManualVideo: (url: string) =>
     request<ManualVideoPreview>('/videos/manual/preview', jsonBody({ url })),
   addManualVideo: (body: { url: string; storage_id?: string | null; protected?: boolean }) =>

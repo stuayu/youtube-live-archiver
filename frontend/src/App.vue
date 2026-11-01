@@ -10,6 +10,7 @@ import SearchView from './views/SearchView.vue'
 import SettingsView from './views/SettingsView.vue'
 import StoragesView from './views/StoragesView.vue'
 import UpcomingView from './views/UpcomingView.vue'
+import ProcessingView from './views/ProcessingView.vue'
 import ChannelFormDialog from './components/ChannelFormDialog.vue'
 import StorageFormDialog from './components/StorageFormDialog.vue'
 import Icon from './components/ui/Icon.vue'
@@ -36,6 +37,7 @@ const views: Record<Tab, Component> = {
   storages: StoragesView,
   analysis: AnalysisView,
   activity: ActivityView,
+  processing: ProcessingView,
   settings: SettingsView,
 }
 const activeView = computed(() => views[ctx.tab])

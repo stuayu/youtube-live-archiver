@@ -269,6 +269,66 @@ class VideoOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ProcessingProgressOut(BaseModel):
+    done: int
+    total: int
+
+
+class ProcessingChunkRangeOut(BaseModel):
+    start: float
+    end: float
+
+
+class ProcessingVideoOut(BaseModel):
+    id: ApiId
+    youtube_video_id: str
+    title: str
+    channel_name: str
+
+
+class ProcessingChunkOut(BaseModel):
+    index: int
+    start: float
+    end: float
+    state: Literal["done", "current", "pending"]
+    summary: str | None = None
+
+
+class ProcessingJobOut(BaseModel):
+    id: ApiId
+    kind: str
+    status: str
+    attempts: int
+    error: str | None
+    next_attempt_at: UTCDateTime | None
+    created_at: UTCDateTime
+    started_at: UTCDateTime | None
+    updated_at: UTCDateTime
+    finished_at: UTCDateTime | None
+    video: ProcessingVideoOut
+    progress: ProcessingProgressOut | None = None
+    current_chunk: ProcessingChunkRangeOut | None = None
+    queue_position: int | None = None
+
+
+class ProcessingJobDetailOut(ProcessingJobOut):
+    chunks: list[ProcessingChunkOut] = Field(default_factory=list)
+
+
+class ProcessingJobCountsOut(BaseModel):
+    total: int
+    by_kind: dict[str, dict[str, int]]
+    by_status: dict[str, int]
+
+
+class ProcessingJobPageOut(BaseModel):
+    items: list[ProcessingJobOut]
+    total: int
+    offset: int
+    limit: int
+    counts: ProcessingJobCountsOut
+
+
 class ManualVideoPreviewIn(StrictInput):
     url: str = Field(max_length=2000)
 

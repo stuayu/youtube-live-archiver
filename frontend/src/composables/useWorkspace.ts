@@ -57,6 +57,10 @@ export function useWorkspace() {
     void load()
   }
   function refresh() {
+    if (tab.value === 'processing') {
+      state.processingRefresh.value += 1
+      return
+    }
     void load(true)
   }
   function refreshAnalysis() {

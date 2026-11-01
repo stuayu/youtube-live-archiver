@@ -8,6 +8,7 @@ export type IconName =
   | 'storage'
   | 'analysis'
   | 'activity'
+  | 'processing'
   | 'settings'
   | 'more'
   | 'refresh'
@@ -64,6 +65,10 @@ defineProps<{
     </template>
     <template v-else-if="name === 'activity'">
       <path d="M2 12h4l3-8 5 16 3-8h5" />
+    </template>
+    <template v-else-if="name === 'processing'">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7v5l3.5 2" />
     </template>
     <template v-else-if="name === 'settings'">
       <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
