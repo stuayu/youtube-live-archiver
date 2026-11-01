@@ -54,7 +54,7 @@ def utf8_subprocess_kwargs(kwargs: dict) -> dict:
 
 def run_ytdlp(args: list[str], *, timeout: float | None = None, **kwargs) -> subprocess.CompletedProcess:
     from .youtube_ip import note_ipv6_failure, ytdlp_ip_args
-    command = [*ytdlp_command(), *ytdlp_ip_args(args), *_anonymous_args(args)]
+    command = [*ytdlp_command(), "--encoding", "utf-8", *ytdlp_ip_args(args), *_anonymous_args(args)]
     result = subprocess.run(command, timeout=timeout, **utf8_subprocess_kwargs(kwargs))
     if result.returncode:
         note_ipv6_failure(str(getattr(result, "stderr", "") or ""))
@@ -66,7 +66,7 @@ def popen_ytdlp(args: list[str], *, allow_cookies: bool = False, **kwargs) -> su
     from .youtube_cookies import release_snapshot, snapshot_args
     copied_args, snapshot = snapshot_args(args) if allow_cookies else (_anonymous_args(args), None)
     try:
-        command = [*ytdlp_command(), *ytdlp_ip_args(args), *copied_args]
+        command = [*ytdlp_command(), "--encoding", "utf-8", *ytdlp_ip_args(args), *copied_args]
         if os.name == "nt":
             kwargs.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
         else:
@@ -158,13 +158,47 @@ def cookie_args(profile: str | None) -> list[str]:
     raise ValueError("Cookie Profile は cookie ファイルのパス、または chrome[:profile] 形式で指定してください")
 
 
+def _bot_checked(stderr: str | None) -> bool:
+    message = (stderr or "").lower()
+    return "sign in to confirm" in message and "not a bot" in message
+
+
+def _degraded_metadata(data: dict) -> bool:
+    """yt-dlp exits 0 with a near-empty record when YouTube bot-checks the player API."""
+    return isinstance(data, dict) and data.get("live_status") is None and data.get("availability") is None
+
+
 def inspect(url: str, cookie_profile: str | None = None) -> dict:
-    """yt-dlp metadata。失敗/タイムアウトを成功扱いにしない。"""
-    result = run_ytdlp(["--dump-single-json", "--skip-download", "--no-warnings", "--ignore-no-formats-error", *downloader_args(), url],
-                       capture_output=True, text=True, timeout=settings.remote_timeout_seconds, check=False)
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or "yt-dlp failed")[-2000:])
-    return json.loads(result.stdout)
+    """yt-dlp metadata。失敗/タイムアウトを成功扱いにしない。
+
+    まず匿名で取得し、YouTube のボット確認で中身が欠けた (または拒否された) ときだけ、
+    登録済み Cookie で取り直す。サーバーの接続元によっては匿名の取得がほぼ常に欠けるため。"""
+    args = ["--dump-single-json", "--skip-download", "--ignore-no-formats-error", *downloader_args(), url]
+    result = run_ytdlp(args, capture_output=True, text=True, timeout=settings.remote_timeout_seconds, check=False)
+    data = None
+    if result.returncode == 0:
+        try:
+            data = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            data = None
+    if data is not None and not _degraded_metadata(data) and not _bot_checked(result.stderr):
+        return data
+    if data is not None or _bot_checked(result.stderr):
+        try:
+            retried = run_ytdlp_with_cookies(["--no-warnings", *args], cookie_profile,
+                                             timeout=settings.remote_timeout_seconds)
+        except Exception:
+            retried = None
+        if retried is not None and retried.returncode == 0:
+            try:
+                with_cookies = json.loads(retried.stdout)
+            except (TypeError, ValueError):
+                with_cookies = None
+            if isinstance(with_cookies, dict) and not _degraded_metadata(with_cookies):
+                return with_cookies
+    if data is not None:
+        return data
+    raise RuntimeError((result.stderr or "yt-dlp failed")[-2000:])
 
 
 _TAB_SUFFIXES = ("/streams", "/videos", "/live", "/shorts", "/playlists", "/featured")

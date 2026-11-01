@@ -357,7 +357,7 @@ YouTube 側の仕様変更で録画やチャンネル確認が失敗する場合
 
 YouTube の完全な取得には Deno 2.3.0 以降と yt-dlp-ejs が必要です。Python 依存関係から導入する場合は `yt-dlp[default]` により EJS が入ります。設定画面に Deno と EJS の検出状態を別々に表示し、Deno 未導入時は[公式インストール手順](https://docs.deno.com/runtime/getting_started/installation/)を案内します。Bot 判定やログイン要求が続く場合は yt-dlp の更新だけで解消しないことがあります。
 
-「設定」→「yt-dlp の更新」→「YouTube のCookie」から、[yt-dlp公式手順](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)で書き出したNetscape形式のCookieファイルを選んで登録できます。YouTube以外のドメインのCookieは保存しません。Cookieは録画・アーカイブの動画ダウンロードと、匿名で失敗したチャットリプレイ取得の再試行にのみ使用し、定期監視、チャンネル登録時の確認、動画情報・形式の確認、保護判定には使用しません。チャンネルのCookie Profileに個別設定がある場合も同様です。個別設定がある場合は共通Cookieより優先します。登録・更新・削除は次の動画ダウンロードから反映され、実行中の録画は開始時のCookieを使い続けます。登録状態はYouTubeへのログイン成功を保証しません。匿名の定期監視がYouTubeに制限される場合は、Cookie登録後も監視や自動発見に失敗することがあります。
+「設定」→「yt-dlp の更新」→「YouTube のCookie」から、[yt-dlp公式手順](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)で書き出したNetscape形式のCookieファイルを選んで登録できます。YouTube以外のドメインのCookieは保存しません。Cookieは録画・アーカイブの動画ダウンロードに使用します。動画情報の確認（配信状態の確認、録画失敗からの復旧、配信終了の判定）とチャットリプレイ取得は、まず匿名で行い、YouTube のボット確認（Sign in to confirm you're not a bot）で拒否されたり中身が欠けたりしたときだけ Cookie で取り直します。チャンネル一覧の定期監視、チャンネル登録時の確認、形式の確認、保護判定には使用しません。チャンネルのCookie Profileに個別設定がある場合も同様です。個別設定がある場合は共通Cookieより優先します。登録・更新・削除は次の動画ダウンロードから反映され、実行中の録画は開始時のCookieを使い続けます。登録状態はYouTubeへのログイン成功を保証しません。匿名の定期監視がYouTubeに制限される場合は、Cookie登録後も監視や自動発見に失敗することがあります。
 
 Cookieはログイン情報です。アプリへの通信には信頼できるLANまたはHTTPSを使い、ファイルや内容をチャット・ログ・共有資料へ貼り付けないでください。共通Cookieは `DATA_DIR/youtube-credentials` に保存し、Windowsではサービスの実行アカウント・SYSTEM・Administrators、Unixでは実行ユーザーにアクセスを制限します。アプリに認証はないため、アプリへ接続できる利用者を信頼できる範囲に限定してください。
 

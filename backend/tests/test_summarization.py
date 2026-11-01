@@ -72,3 +72,27 @@ def test_provider_failure_does_not_change_recording_or_transcription(monkeypatch
     assert saved.status == "ACTIVE" and saved.transcription_status == "completed" and saved.summary_status == "retry_wait"
     assert "never-log-this" not in caplog.text and "local words" not in caplog.text
     check.close()
+
+
+def test_summary_survives_cache_write_failure(monkeypatch, tmp_path):
+    """A failed SummaryCache commit used to poison the session (PendingRollbackError)."""
+    from sqlalchemy.exc import OperationalError
+    engine=create_engine(f"sqlite:///{tmp_path / 'cachefail.sqlite'}"); Base.metadata.create_all(engine); factory=sessionmaker(bind=engine, expire_on_commit=False)
+    db=factory(); video=Video(youtube_video_id="cachefail", channel_id=1, status="ACTIVE", transcription_status="completed")
+    db.add(video); db.flush()
+    db.add(TranscriptSegment(video_id=video.id, start=0, end=2, text="words")); db.add(AppSetting(key="summary_enabled", value={"value":True})); db.add(AppSetting(key="openrouter_model", value={"value":"model"})); db.add(AppSetting(key="openrouter_api_key", value={"value":"secret"}))
+    job=ProcessingJob(video_id=video.id, kind="SUMMARIZE_CHUNKS", status="pending", attempts=0, payload={"model":"model","chunks":[],"next_chunk":0},created_at=now(),updated_at=now()); db.add(job); db.commit(); jid=job.id; db.close()
+    monkeypatch.setattr(processing,"SessionLocal",factory)
+    result={"summary":"ok","topics":[],"keywords":[],"important_moments":[]}
+    monkeypatch.setattr(summarization,"call_openrouter",lambda *a,**k: result)
+    from sqlalchemy.orm import Session as OrmSession
+    original_merge = OrmSession.merge
+    def failing_merge(self, instance, *args, **kwargs):
+        if type(instance).__name__ == "SummaryCache":
+            raise OperationalError("INSERT", {}, Exception("connection dropped"))
+        return original_merge(self, instance, *args, **kwargs)
+    monkeypatch.setattr(OrmSession, "merge", failing_merge)
+    processing._process_summary(jid)
+    check=factory(); job=check.get(ProcessingJob,jid)
+    assert job.status == "completed" and job.payload["next_chunk"] == 1 and job.payload["total_chunks"] == 1
+    check.close()

@@ -211,3 +211,47 @@ def test_stick_window_and_future_schedules_are_left_to_channel_scan():
     assert _watch_interval(at - timedelta(hours=25), at, manual=False) is None
     assert _watch_interval(at + timedelta(minutes=5), at, manual=False) is None
     assert _watch_interval(at + timedelta(minutes=5), at, manual=True) == timedelta(minutes=1)
+
+
+def _completed(stdout="", stderr="", code=0):
+    return subprocess.CompletedProcess(["yt-dlp"], code, stdout, stderr)
+
+
+BOT = "WARNING: [youtube] Sign in to confirm you�fre not a bot. Use --cookies"
+
+
+def test_inspect_retries_with_cookies_when_anonymous_result_is_bot_checked(monkeypatch):
+    import json
+    from app.services import youtube
+    monkeypatch.setattr(youtube, "run_ytdlp", lambda *a, **k: _completed(json.dumps({"id": "x", "formats": []}), BOT))
+    calls = []
+
+    def with_cookies(args, profile, **_kwargs):
+        calls.append((args, profile))
+        return _completed(json.dumps({"id": "x", "live_status": "is_live", "availability": "public"}))
+
+    monkeypatch.setattr(youtube, "run_ytdlp_with_cookies", with_cookies)
+    data = youtube.inspect("https://www.youtube.com/watch?v=x", "cookies.txt")
+    assert data["live_status"] == "is_live" and calls and calls[0][1] == "cookies.txt"
+
+
+def test_inspect_stays_anonymous_when_result_is_complete(monkeypatch):
+    import json
+    from app.services import youtube
+    monkeypatch.setattr(youtube, "run_ytdlp",
+                        lambda *a, **k: _completed(json.dumps({"live_status": "was_live", "availability": "public"})))
+    monkeypatch.setattr(youtube, "run_ytdlp_with_cookies", lambda *a, **k: pytest.fail("cookies must not be used"))
+    assert youtube.inspect("https://www.youtube.com/watch?v=x")["live_status"] == "was_live"
+
+
+def test_inspect_cookie_retry_on_bot_check_error_and_keeps_errors_otherwise(monkeypatch):
+    import json
+    from app.services import youtube
+    monkeypatch.setattr(youtube, "run_ytdlp", lambda *a, **k: _completed("", "ERROR: " + BOT, 1))
+    monkeypatch.setattr(youtube, "run_ytdlp_with_cookies",
+                        lambda *a, **k: _completed(json.dumps({"live_status": "is_upcoming", "availability": "public"})))
+    assert youtube.inspect("https://www.youtube.com/watch?v=x")["live_status"] == "is_upcoming"
+    monkeypatch.setattr(youtube, "run_ytdlp", lambda *a, **k: _completed("", "ERROR: Private video", 1))
+    monkeypatch.setattr(youtube, "run_ytdlp_with_cookies", lambda *a, **k: pytest.fail("not for private videos"))
+    with pytest.raises(RuntimeError, match="Private video"):
+        youtube.inspect("https://www.youtube.com/watch?v=x")

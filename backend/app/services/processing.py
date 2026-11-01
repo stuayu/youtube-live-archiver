@@ -222,14 +222,25 @@ def _process_summary(job_id):
             key = cache_key(text, model)
             cached = db.get(SummaryCache, key)
             if cached: return cached.result
+            # プロバイダー呼び出し (最大数分) の間 DB トランザクションを開いたままにしない。
+            db.commit()
             last = None
             for _ in range(2):  # try conservative JSON repair, then retry provider
                 try:
                     result = call_openrouter(build_messages(text), api_key=api_key, model=model,
                         base_url=opts["openrouter_base_url"], attempts=max_attempts)
                     result = validator(result)
-                    db.add(SummaryCache(key=key, result=result)); db.commit(); return result
-                except Exception as exc: last = exc
+                except Exception as exc:
+                    last = exc
+                    continue
+                try:
+                    # キャッシュは任意。保存に失敗してもセッションを戻して結果は使う
+                    # (戻さないと次の DB 操作が PendingRollbackError になり要約全体が失敗する)。
+                    db.merge(SummaryCache(key=key, result=result)); db.commit()
+                except Exception:
+                    db.rollback()
+                    log.warning("summary cache write failed for video %s", video.id)
+                return result
             raise last
         payload = dict(job.payload or {})
         if job.kind == "SUMMARIZE_CHUNKS":
