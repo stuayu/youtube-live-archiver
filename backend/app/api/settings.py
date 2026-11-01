@@ -1,5 +1,6 @@
 from .common import *
 from ..schemas import YtDlpSettingsIn, YtDlpUpdateIn
+from fastapi.responses import JSONResponse
 import subprocess
 from urllib.parse import urlsplit
 from starlette.concurrency import run_in_threadpool
@@ -145,12 +146,71 @@ def get_summary_settings(db: Session = Depends(get_db)):
     db.commit()
     return result
 
+def _summary_provider_target(db: Session, values: dict) -> dict:
+    """Settings the summary jobs will actually use after applying ``values``.
+
+    Uses the same key precedence as the summary jobs (environment first), and
+    never sends a stored key to a base URL that only this request supplied."""
+    from ..services.processing import effective_summary_settings
+    from ..services.summarization import ProviderCheckError
+    current = effective_summary_settings(db)
+    entered = str(values.get("openrouter_api_key") or "")
+    base_url = str(values.get("openrouter_base_url", current["openrouter_base_url"]) or "")
+    if entered and settings.openrouter_api_key:
+        raise ProviderCheckError("サーバーの .env に OPENROUTER_API_KEY が設定されているため、画面で登録したキーは"
+                                 "使われません。.env から OPENROUTER_API_KEY を削除してサービスを再起動するか、"
+                                 ".env のキーを更新してください", field="openrouter_api_key", code="env_key_overrides")
+    if not entered and base_url.rstrip("/") != str(current["openrouter_base_url"] or "").rstrip("/"):
+        raise ProviderCheckError("API ベース URL を変える場合は、API キーも入力し直してください"
+                                 "（登録済みのキーを新しい送信先へ送らないため）",
+                                 field="openrouter_api_key", code="key_required_for_new_url")
+    saved = db.get(AppSetting, "openrouter_api_key")
+    key = settings.openrouter_api_key or entered or (saved.value.get("value", "") if saved else "")
+    return {"api_key": str(key or ""),
+            "model": str(values.get("openrouter_model", current["openrouter_model"]) or ""),
+            "base_url": base_url}
+
+
+def _provider_check_response(exc) -> JSONResponse:
+    fields = {exc.field: str(exc)} if exc.field else {}
+    return JSONResponse(status_code=422, content={"error": str(exc), "fields": fields, "code": exc.code})
+
+
+@router.post("/settings/summary/test")
+def test_summary_provider(data: SummarySettingsIn, db: Session = Depends(get_db)):
+    """Send a small sample transcript to the provider with the given (or saved) settings."""
+    from ..services.summarization import ProviderCheckError, check_provider
+    try:
+        target = _summary_provider_target(db, data.model_dump(exclude_unset=True))
+        db.commit()
+        return check_provider(**target)
+    except ProviderCheckError as exc:
+        db.rollback()
+        return _provider_check_response(exc)
+
+
 @router.put("/settings/summary")
 def put_summary_settings(data: SummarySettingsIn, db: Session = Depends(get_db)):
     from ..services.processing import SUMMARY_DEFAULTS, effective_summary_settings
+    from ..services.summarization import ProviderCheckError, check_provider
     allowed = set(SUMMARY_DEFAULTS) - {"openrouter_api_key_set"}
     values = data.model_dump(exclude_unset=True)
     if set(values) - allowed: raise HTTPException(422, "不明な設定項目です")
+    if not values.get("openrouter_api_key"): values.pop("openrouter_api_key", None)
+    # 接続に関わる値を変えたときは、保存前に実際にプロバイダーへテスト送信する。
+    current = effective_summary_settings(db)
+    connection_changed = bool(values.get("openrouter_api_key")) or any(
+        key in values and values[key] != current.get(key) for key in ("openrouter_model", "openrouter_base_url"))
+    enabling = values.get("summary_enabled", current["summary_enabled"])
+    if connection_changed:
+        try:
+            target = _summary_provider_target(db, values)
+            if target["api_key"] or enabling:
+                db.commit()
+                check_provider(**target)
+        except ProviderCheckError as exc:
+            db.rollback()
+            return _provider_check_response(exc)
     for key, value in values.items():
         if key == "openrouter_api_key":
             if value:

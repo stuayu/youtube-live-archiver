@@ -1,4 +1,6 @@
 import json
+import re
+from datetime import datetime, timedelta
 import subprocess
 import os
 import sys
@@ -35,10 +37,25 @@ def _anonymous_args(args: list[str]) -> list[str]:
     return ['--ignore-config', '--no-cookies', '--no-cookies-from-browser', *args]
 
 
+def utf8_subprocess_kwargs(kwargs: dict) -> dict:
+    """Make child Python tools write UTF-8 and decode text output as UTF-8.
+
+    Windows otherwise uses the ANSI code page (cp932) for pipes, and Japanese
+    titles in yt-dlp JSON make the reader thread crash, leaving stdout None."""
+    env = dict(kwargs.get("env") or os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    kwargs["env"] = env
+    if (kwargs.get("text") or kwargs.get("universal_newlines")) and not kwargs.get("encoding"):
+        kwargs["encoding"] = "utf-8"
+        kwargs.setdefault("errors", "replace")
+    return kwargs
+
+
 def run_ytdlp(args: list[str], *, timeout: float | None = None, **kwargs) -> subprocess.CompletedProcess:
     from .youtube_ip import note_ipv6_failure, ytdlp_ip_args
     command = [*ytdlp_command(), *ytdlp_ip_args(args), *_anonymous_args(args)]
-    result = subprocess.run(command, timeout=timeout, **kwargs)
+    result = subprocess.run(command, timeout=timeout, **utf8_subprocess_kwargs(kwargs))
     if result.returncode:
         note_ipv6_failure(str(getattr(result, "stderr", "") or ""))
     return result
@@ -54,7 +71,7 @@ def popen_ytdlp(args: list[str], *, allow_cookies: bool = False, **kwargs) -> su
             kwargs.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
         else:
             kwargs.setdefault("start_new_session", True)
-        process = subprocess.Popen(command, **kwargs)
+        process = subprocess.Popen(command, **utf8_subprocess_kwargs(kwargs))
     except Exception:
         release_snapshot(snapshot)
         raise
@@ -67,6 +84,29 @@ def popen_ytdlp(args: list[str], *, allow_cookies: bool = False, **kwargs) -> su
                 release_snapshot(snapshot)
         threading.Thread(target=cleanup_cookie, name='ytdlp-cookie-cleanup', daemon=True).start()
     return process
+
+
+def run_ytdlp_with_cookies(args: list[str], cookie_profile: str | None, *, timeout: float | None = None,
+                           text: bool = True) -> subprocess.CompletedProcess | None:
+    """Run a finite yt-dlp command with the configured YouTube cookies.
+
+    Returns None when no cookie is configured. The cookie file is copied per
+    process (see youtube_cookies.snapshot_args) and removed when it exits."""
+    try:
+        cookies = cookie_args(cookie_profile)
+    except ValueError:
+        return None
+    if not cookies:
+        return None
+    process = popen_ytdlp([*cookies, *args], allow_cookies=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=text)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def classify_ytdlp_error(stderr: str) -> str:
@@ -87,6 +127,23 @@ def classify_ytdlp_error(stderr: str) -> str:
         if any(phrase in message for phrase in phrases):
             return status
     return "UNKNOWN"
+
+
+_UPCOMING_IN = re.compile(
+    r"(?:this live event will begin in|premieres? in|premiere will begin in)\s+"
+    r"(?:(a few moments|shortly)|(\d+)\s*(second|minute|hour|day)s?)",
+    re.IGNORECASE)
+
+
+def upcoming_start_from_error(message: str, at: datetime) -> datetime | None:
+    """Estimate the start time from yt-dlp's "This live event will begin in N minutes."."""
+    match = _UPCOMING_IN.search(message or "")
+    if not match:
+        return None
+    if match.group(1):
+        return at
+    unit = {"second": "seconds", "minute": "minutes", "hour": "hours", "day": "days"}[match.group(3).lower()]
+    return at + timedelta(**{unit: int(match.group(2))})
 
 
 def cookie_args(profile: str | None) -> list[str]:

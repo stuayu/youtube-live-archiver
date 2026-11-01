@@ -1,5 +1,5 @@
 import { api } from '../api/resources'
-import { request } from '../api/client'
+import { HttpError, request } from '../api/client'
 import type { RecordingRule } from '../api/types'
 import type { useWorkspaceState } from './useWorkspaceState'
 
@@ -102,18 +102,66 @@ export function useSettingsWorkspace(state: WorkspaceState, load: LoadData, conf
     }
   }
 
+  function summaryPayload(): Record<string, unknown> {
+    const payload: Record<string, unknown> = { ...state.summarySettings.value }
+    // 表示専用の項目は送らない。API キーは入力したときだけ送る（空なら登録済みのキーを保持）。
+    delete payload.openrouter_api_key_set
+    if (!payload.openrouter_api_key) delete payload.openrouter_api_key
+    return payload
+  }
+
+  function summaryError(error: unknown, fallback: string) {
+    const message = error instanceof Error ? error.message : fallback
+    state.summaryFeedback.value = {
+      tone: 'error',
+      message,
+      fields: error instanceof HttpError ? error.fields : {},
+    }
+    state.push(message, 'error')
+  }
+
   async function saveSettings(kind: 'transcription' | 'summary') {
-    const payload = kind === 'transcription' ? state.transcription.value : state.summarySettings.value
+    const payload: Record<string, unknown> =
+      kind === 'transcription' ? { ...state.transcription.value } : summaryPayload()
+    if (kind === 'summary') {
+      state.summaryFeedback.value = {
+        tone: 'info',
+        message: '接続設定を変えた場合はプロバイダーにテスト送信して確認しています…',
+        fields: {},
+      }
+    }
     try {
       const result = await request<Record<string, unknown>>(`/settings/${kind}`, {
         method: 'PUT',
         body: JSON.stringify(payload),
       })
       if (kind === 'transcription') state.transcription.value = result
-      else state.summarySettings.value = { ...result, openrouter_api_key: '' }
+      else {
+        state.summarySettings.value = { ...result, openrouter_api_key: '' }
+        state.summaryFeedback.value = { tone: 'ok', message: '要約設定を保存しました', fields: {} }
+      }
       state.push(`${kind === 'summary' ? '要約' : '文字起こし'}設定を保存しました`)
     } catch (error) {
-      state.push(error instanceof Error ? error.message : '設定を保存できません', 'error')
+      if (kind === 'summary') summaryError(error, '設定を保存できません')
+      else state.push(error instanceof Error ? error.message : '設定を保存できません', 'error')
+    }
+  }
+
+  async function testSummaryProvider() {
+    state.summaryFeedback.value = { tone: 'info', message: 'テスト用の文字起こしを送信しています…', fields: {} }
+    try {
+      const result = await request<{ model?: string; latency_ms?: number; sample?: string }>(
+        '/settings/summary/test',
+        { method: 'POST', body: JSON.stringify(summaryPayload()) },
+      )
+      const seconds = ((result.latency_ms ?? 0) / 1000).toFixed(1)
+      state.summaryFeedback.value = {
+        tone: 'ok',
+        message: `接続できました（${result.model ?? 'モデル'}・${seconds} 秒）。応答例: ${result.sample || '（空）'}`,
+        fields: {},
+      }
+    } catch (error) {
+      summaryError(error, '接続テストに失敗しました')
     }
   }
 
@@ -126,5 +174,6 @@ export function useSettingsWorkspace(state: WorkspaceState, load: LoadData, conf
     deleteRule,
     previewRule,
     saveSettings,
+    testSummaryProvider,
   }
 }

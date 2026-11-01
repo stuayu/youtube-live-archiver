@@ -1,4 +1,5 @@
 import logging
+import random
 import json
 import os
 import subprocess
@@ -19,7 +20,8 @@ from .services.fingerprints import sample, video_phash, audio_fingerprint, POSIT
 from .services.ffmpeg import launch_ffmpeg
 from .services.youtube import inspect, run_ytdlp, popen_ytdlp, ytdlp_command, classify_ytdlp_error
 
-_manual_video_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="manual-video")
+_UPCOMING_WATCH_WORKERS = 4
+_manual_video_pool = ThreadPoolExecutor(max_workers=_UPCOMING_WATCH_WORKERS, thread_name_prefix="upcoming-watch")
 _manual_video_lock = threading.Lock()
 _manual_video_inflight: set[int] = set()
 from .services.download import downloader_args
@@ -258,22 +260,65 @@ def channel_monitor(background: bool = False):
     run_channel_monitor(background=background)
 
 
-def manual_video_worker(background: bool = False):
-    """Advance manually-added scheduled videos without requiring channel monitoring."""
-    from .services.youtube import inspect, classify_ytdlp_error
-    from .services.monitor import _cooldown_active, _apply_rate_limit
-    from .services.manual_video import canonical_video_url
+def _watch_next_check_key(metadata: dict) -> str:
+    return "manual_next_check_at" if metadata.get("manual") is True else "watch_next_check_at"
+
+
+# (予定時刻からの遅れの上限, 確認間隔の下限)。base 間隔より短くはしない。
+_STICK_TIERS = (
+    (timedelta(hours=1), timedelta(0)),           # 予定時刻〜1 時間: base 間隔 (既定 1 分)
+    (timedelta(hours=3), timedelta(minutes=5)),
+    (timedelta.max, timedelta(minutes=15)),
+)
+
+
+def _watch_interval(scheduled: datetime | None, at: datetime, manual: bool) -> timedelta | None:
+    """How long to wait before re-inspecting a WAITING_LIVE video; None = leave it to the channel scan."""
+    stick = timedelta(seconds=max(60, settings.upcoming_stick_interval_seconds))
+    stick_window = timedelta(hours=max(0, settings.upcoming_stick_max_hours))
+    if scheduled is None:
+        return timedelta(minutes=10) if manual else None
+    delta = scheduled - at
+    if delta > timedelta(minutes=10):
+        return timedelta(minutes=30) if manual else None
+    if delta > timedelta(0):
+        return timedelta(minutes=1) if manual else None
+    # 予定時刻を過ぎた予定枠は開始するまで張り付く。「まもなく開始」のまま
+    # 1 時間以上待たされることもあるので、遅れが長引くほど間隔を広げて
+    # 問い合わせ回数（アクセス制限の原因）を抑える。
+    overdue = -delta
+    if overdue <= stick_window:
+        for limit, interval in _STICK_TIERS:
+            if overdue <= limit:
+                return max(stick, interval)
+        return max(stick, _STICK_TIERS[-1][1])
+    return timedelta(minutes=10) if manual else None
+
+
+def upcoming_watch_worker(background: bool = False):
+    """Watch WAITING_LIVE videos individually so a stream is queued as soon as it starts.
+
+    Manually-added videos are tracked across their whole schedule; channel videos
+    are tracked once their scheduled start has passed (the channel scan handles
+    the rest)."""
+    from .services.monitor import _cooldown_active
     at = now()
     if _cooldown_active(at):
         return
     with SessionLocal() as db:
-        candidates = list(db.scalars(select(Video).where(Video.status == "WAITING_LIVE")).all())
+        candidates = list(db.scalars(select(Video).where(Video.status == "WAITING_LIVE")
+                                     .order_by(Video.scheduled_start_at.asc().nulls_last(), Video.id)).all())
         due = []
         for video in candidates:
             metadata = video.raw_metadata or {}
-            if metadata.get("manual") is not True or metadata.get("schedule_enabled") is False:
+            if metadata.get("schedule_enabled") is False:
                 continue
-            next_check = metadata.get("manual_next_check_at")
+            manual = metadata.get("manual") is True
+            if not manual and (video.channel is None or not video.channel.enabled):
+                continue
+            if _watch_interval(video.scheduled_start_at, at, manual) is None:
+                continue
+            next_check = metadata.get(_watch_next_check_key(metadata))
             if next_check:
                 try:
                     parsed = datetime.fromisoformat(next_check.replace("Z", "+00:00"))
@@ -283,38 +328,47 @@ def manual_video_worker(background: bool = False):
                         continue
                 except (ValueError, AttributeError):
                     pass
-            due.append(video.id)
-        due = due[:5]
+            closeness = abs((video.scheduled_start_at - at).total_seconds()) if video.scheduled_start_at else float("inf")
+            due.append((closeness, video.id))
+        # 予定時刻が今に近いもの (始まりそうなもの) から確認する。
+        due = [video_id for _, video_id in sorted(due)][:max(1, settings.upcoming_watch_batch_size)]
         db.commit()
     for video_pk in due:
         with _manual_video_lock:
             if video_pk in _manual_video_inflight:
                 continue
+            # 空いている枠の分だけ投入する。溢れた分は次回 (予定時刻が近い順) に回す。
+            if background and len(_manual_video_inflight) >= _UPCOMING_WATCH_WORKERS:
+                break
             _manual_video_inflight.add(video_pk)
-        future = _manual_video_pool.submit(_inspect_manual_video, video_pk, at)
+        future = _manual_video_pool.submit(_inspect_waiting_video, video_pk, at)
         if background:
             future.add_done_callback(lambda completed, pk=video_pk: _finish_manual_inspect(pk, completed))
         else:
             try:
                 future.result()
             except Exception:
-                log.exception("manual video inspection worker failed video_id=%s", video_pk)
+                log.exception("upcoming watch inspection failed video_id=%s", video_pk)
             finally:
                 with _manual_video_lock:
                     _manual_video_inflight.discard(video_pk)
+
+
+# Backwards-compatible name used by older callers/tests.
+manual_video_worker = upcoming_watch_worker
 
 
 def _finish_manual_inspect(video_pk: int, future) -> None:
     try:
         future.result()
     except Exception:
-        log.exception("manual video inspection worker failed video_id=%s", video_pk)
+        log.exception("upcoming watch inspection failed video_id=%s", video_pk)
     finally:
         with _manual_video_lock:
             _manual_video_inflight.discard(video_pk)
 
 
-def _inspect_manual_video(video_pk: int, at: datetime) -> None:
+def _inspect_waiting_video(video_pk: int, at: datetime) -> None:
     from .services.youtube import inspect, classify_ytdlp_error
     from .services.monitor import _apply_rate_limit, _cooldown_active
     from .services.manual_video import canonical_video_url
@@ -324,15 +378,12 @@ def _inspect_manual_video(video_pk: int, at: datetime) -> None:
         video = db.get(Video, video_pk)
         if not video or video.status != "WAITING_LIVE":
             return
-        scheduled = video.scheduled_start_at
         metadata = dict(video.raw_metadata or {})
-        if scheduled is None:
-            interval = timedelta(minutes=10)
-        else:
-            delta = (scheduled - at).total_seconds()
-            interval = (timedelta(minutes=30) if delta > 600 else
-                        timedelta(minutes=1) if delta >= -7200 else timedelta(minutes=10))
-        metadata["manual_next_check_at"] = (at + interval).isoformat()
+        manual = metadata.get("manual") is True
+        interval = _watch_interval(video.scheduled_start_at, at, manual) or timedelta(minutes=10)
+        # 複数の予定枠が同じ瞬間に問い合わせないよう ±10% ずらす。
+        interval = max(interval * random.uniform(0.9, 1.1), timedelta(minutes=1))
+        metadata[_watch_next_check_key(metadata)] = (at + interval).isoformat()
         video.raw_metadata = metadata
         video_id = video.youtube_video_id
         channel_id = video.channel.youtube_channel_id if video.channel else "unknown"
@@ -357,8 +408,8 @@ def _inspect_manual_video(video_pk: int, at: datetime) -> None:
         if state == "is_live":
             video.status = "DISCOVERED"
             metadata["live_status"] = "is_live"
-            log.info("manual video is live; queued recording youtube_video_id=%s channel_id=%s",
-                     video.youtube_video_id, channel_id)
+            log.info("%s video is live; queued recording youtube_video_id=%s channel_id=%s",
+                     "manual" if manual else "scheduled", video.youtube_video_id, channel_id)
         elif state in ("was_live", "post_live"):
             video.status = "DISCOVERED"
             metadata["live_status"] = "was_live"
@@ -366,8 +417,8 @@ def _inspect_manual_video(video_pk: int, at: datetime) -> None:
             timestamp = result.get("release_timestamp") or result.get("timestamp")
             if timestamp:
                 video.scheduled_start_at = datetime.fromtimestamp(timestamp, timezone.utc)
-            log.debug("manual video remains scheduled youtube_video_id=%s channel_id=%s",
-                      video.youtube_video_id, channel_id)
+            log.debug("%s video remains scheduled youtube_video_id=%s channel_id=%s",
+                      "manual" if manual else "scheduled", video.youtube_video_id, channel_id)
         elif failure in ("PRIVATE", "DELETED"):
             video.status = "CANCELLED"
             metadata["cancel_reason"] = failure

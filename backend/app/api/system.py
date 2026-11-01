@@ -164,5 +164,8 @@ def list_video_formats(video_id: str, db: Session = Depends(get_db)):
         raise HTTPException(502, f"フォーマット取得に失敗しました: {exc}")
     output = result.stdout or result.stderr
     if result.returncode:
+        from ..services.youtube import classify_ytdlp_error
+        if classify_ytdlp_error(output or "") == "UPCOMING":
+            raise HTTPException(409, "配信開始前のため、まだ画質一覧を取得できません")
         raise HTTPException(502, output[-4000:] or "yt-dlp --list-formats failed")
     return {"video_id": video_id, "formats": output[-20000:]}

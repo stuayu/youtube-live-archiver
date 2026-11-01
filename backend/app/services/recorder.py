@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Callable
@@ -53,7 +54,9 @@ _stderr_tails: dict[int, tuple[deque[bytes], list[int], threading.Thread]] = {}
 STDERR_TAIL_LIMIT = 64 * 1024
 RECORDER_HEARTBEAT_SECONDS = 20
 TEE_YTDLP_EXIT_TIMEOUT_SECONDS = 30
-LIVE_END_INSPECT_DELAYS_SECONDS = (10, 30, 60)
+# YouTube への再問い合わせは 1 分以上空ける。1 回の待ちは stale 判定 (90 秒) 未満に収める。
+LIVE_END_INSPECT_DELAYS_SECONDS = (60, 60, 60)
+RECORDER_CRASH_LIMIT = 5
 
 
 def stopping(video_id: int) -> bool:
@@ -682,6 +685,27 @@ def dispatch(video_id: int, profile: str, target: Callable[[int], None]) -> bool
         def run() -> None:
             try:
                 target(video_id)
+            except Exception:
+                # The row stays DISCOVERED/WAITING_FOR_STORAGE; retry after a minute, not on the next 5s tick.
+                log.exception("recorder worker crashed video_id=%s profile=%s", video_id, profile)
+                try:
+                    with SessionLocal() as crash_db:
+                        row = crash_db.get(Video, video_id)
+                        if row is not None and row.status in ("DISCOVERED", "WAITING_FOR_STORAGE"):
+                            crashes = int((row.raw_metadata or {}).get("recorder_crash_count") or 0) + 1
+                            row.raw_metadata = {**(row.raw_metadata or {}), "recorder_crash_count": crashes}
+                            if crashes >= RECORDER_CRASH_LIMIT:
+                                # 同じ原因で落ち続ける場合は打ち切って画面の「録画失敗」に出す（手動再試行で再開）。
+                                row.status = "RECORDING_FAILED"
+                                row.next_recovery_at = None
+                                row.raw_metadata = {**row.raw_metadata, "recovery_exhausted": True}
+                                crash_db.add(AuditLog(video_id=row.id, action="RECORD_FAILED", reason="RECORDER_CRASH",
+                                                      details={"crashes": crashes}))
+                            else:
+                                row.next_recovery_at = now() + timedelta(minutes=1)
+                            crash_db.commit()
+                except Exception:
+                    log.exception("could not defer crashed recording video_id=%s", video_id)
             finally:
                 with _lock:
                     _stopping.discard(video_id)
@@ -1474,7 +1498,9 @@ def _choose_storage(db: Session, video: Video, channel: Channel) -> Storage | No
     candidates = list({item.id: item for item in (preferred, fallback, default) if item}.values())
     for candidate in candidates:
         root = Path(candidate.root_path)
-        probe = root / f".write-test-{os.getpid()}-{candidate.id}"
+        # Recorder threads share a PID; a per-call name keeps concurrent probes
+        # from colliding (Windows refuses to delete a file another thread holds open).
+        probe = root / f".write-test-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}-{candidate.id}"
         try:
             if not root.is_dir():
                 continue
@@ -1485,7 +1511,10 @@ def _choose_storage(db: Session, video: Video, channel: Channel) -> Storage | No
         except OSError:
             continue
         finally:
-            probe.unlink(missing_ok=True)
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                log.warning("could not remove storage write probe %s", probe)
     return None
 
 
@@ -1619,6 +1648,9 @@ def record_video(video_id: int) -> None:
                 v.status = "RECORDING"
                 v.recording_heartbeat_at = now()
                 v.next_recovery_at = None
+                if (v.raw_metadata or {}).get("recorder_crash_count"):
+                    v.raw_metadata = {key: value for key, value in v.raw_metadata.items()
+                                      if key != "recorder_crash_count"}
                 release_epoch = _timestamp_seconds((v.raw_metadata or {}).get("release_timestamp"))
                 if is_live:
                     recording_offset_ms = (
@@ -1762,11 +1794,22 @@ def record_video(video_id: int) -> None:
                                                 is_live, verified_media, lease, inspected)
                             (target / ".recorder.json").unlink(missing_ok=True)
                             return
-                    log.error("recording failed youtube_video_id=%s channel_id=%s reason=%s",
-                              v.youtube_video_id, ch.youtube_channel_id,
-                              stderr.decode("utf-8", "replace")[-1000:] if isinstance(stderr, bytes)
-                              else str(stderr or error_kind)[-1000:])
+                    stderr_text = (stderr.decode("utf-8", "replace") if isinstance(stderr, bytes)
+                                   else str(stderr or error_kind))
                     if error_kind == "UPCOMING":
+                        # 開始前に録画へ回った場合は失敗ではなく配信予定へ戻す。
+                        # "begin in N minutes" から開始時刻を更新し、張り付き間隔を合わせる。
+                        from .youtube import upcoming_start_from_error
+                        current = now()
+                        estimated = upcoming_start_from_error(stderr_text, current)
+                        # 「まもなく」は予定時刻を過ぎた枠で出続けるので、過去の予定時刻は保つ
+                        # (遅れの経過時間で張り付き間隔を決めているため)。
+                        if estimated is not None and (estimated > current or v.scheduled_start_at is None
+                                                      or v.scheduled_start_at > current):
+                            v.scheduled_start_at = estimated
+                        log.info("live has not started yet; back to waiting youtube_video_id=%s "
+                                 "channel_id=%s scheduled_start_at=%s", v.youtube_video_id,
+                                 ch.youtube_channel_id, v.scheduled_start_at)
                         v.raw_metadata = finish_attempt(v.raw_metadata or {}, output_stem, profile, "upcoming", now())
                         v.status = "WAITING_LIVE"
                         v.raw_metadata = {**(v.raw_metadata or {}), "live_status": "is_upcoming"}
@@ -1774,6 +1817,8 @@ def record_video(video_id: int) -> None:
                         (target / ".recorder.json").unlink(missing_ok=True)
                         db.commit()
                         return
+                    log.error("recording failed youtube_video_id=%s channel_id=%s reason=%s",
+                              v.youtube_video_id, ch.youtube_channel_id, stderr_text[-1000:])
                     v.raw_metadata = finish_attempt(v.raw_metadata or {}, output_stem, profile, "failed", now())
                     user_stopped = bool((v.raw_metadata or {}).get("user_stopped") or user_stopping(v.id))
                     shutdown_requested = stopping(v.id) and not user_stopped

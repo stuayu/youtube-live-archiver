@@ -41,6 +41,7 @@ const recordFailures: Record<string, string> = {
   INTERRUPTED_RECOVERY: '配信中に録画が中断しました',
   USER_STOP_EMPTY: '停止時に録画データがありませんでした',
   USER_STOP_NOT_SALVAGED: '停止時に録画を保存できませんでした',
+  RECORDER_CRASH: '録画処理が繰り返し異常終了したため停止しました。ログを確認して手動で再試行してください',
 }
 const monitorErrors: Record<string, string> = {
   RATE_LIMITED: 'YouTube からアクセス制限を受けています',

@@ -16,7 +16,7 @@ def inspect_media(path: Path, ffprobe: str | None = None, timeout: float = 30) -
     try:
         result = subprocess.run(
             [ffprobe or settings.ffprobe_path, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
-            capture_output=True, text=True, timeout=timeout, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False,
         )
         if result.returncode:
             return None

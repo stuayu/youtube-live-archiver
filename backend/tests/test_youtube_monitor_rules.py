@@ -91,8 +91,8 @@ def test_numeric_interval_uses_ten_percent_jitter(poll):
 @pytest.mark.parametrize(("offset", "expected"), [
     (timedelta(minutes=31), (60, 60)),
     (timedelta(minutes=30), (120, 240)),
-    (timedelta(minutes=5), (20, 40)),
-    (-timedelta(minutes=5), (20, 40)),
+    (timedelta(minutes=5), (60, 120)),
+    (-timedelta(minutes=5), (60, 120)),
     (-timedelta(minutes=10), (60, 120)),
     (-timedelta(minutes=60), (300, 600)),
     (-timedelta(hours=6), (1800, 3600)),
@@ -108,7 +108,7 @@ def test_unknown_schedule_uses_six_to_twenty_minutes_or_shorter():
 
 
 def test_scheduled_shortening_also_applies_to_fixed_interval():
-    assert calculate_next_interval("360", [NOW + timedelta(minutes=4)], NOW) == (20, 40)
+    assert calculate_next_interval("360", [NOW + timedelta(minutes=4)], NOW) == (60, 120)
 
 
 def test_auto_activity_levels_and_hot_start_cap():
@@ -155,3 +155,59 @@ def test_inspection_classifications_protect_local_copy(monkeypatch, message, sta
     assert actual == status
     assert (duration, error, raw) == (None, None, None)
     assert decision.status == "PROTECTED"
+
+
+def test_ytdlp_text_output_is_decoded_as_utf8(monkeypatch):
+    """Windows pipes default to cp932; Japanese yt-dlp JSON must still decode."""
+    import subprocess
+    from app.services import youtube
+
+    captured = {}
+
+    def fake_run(command, timeout=None, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout='{"title": "配信"}', stderr="")
+
+    monkeypatch.setattr(youtube.subprocess, "run", fake_run)
+    youtube.run_ytdlp(["--version"], capture_output=True, text=True, check=False)
+    assert captured["encoding"] == "utf-8" and captured["errors"] == "replace"
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert captured["env"]["PYTHONUTF8"] == "1"
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("ERROR: [youtube] abcdefghijk: This live event will begin in 61 minutes.", timedelta(minutes=61)),
+    ("ERROR: [youtube] abcdefghijk: This live event will begin in 2 hours", timedelta(hours=2)),
+    ("ERROR: [youtube] abcdefghijk: Premieres in 3 days", timedelta(days=3)),
+    ("ERROR: [youtube] abcdefghijk: This live event will begin in a few moments.", timedelta(0)),
+])
+def test_upcoming_start_is_parsed_from_ytdlp_error(message, expected):
+    from datetime import datetime, timezone
+    from app.services.youtube import classify_ytdlp_error, upcoming_start_from_error
+    at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    assert classify_ytdlp_error(message) == "UPCOMING"
+    assert upcoming_start_from_error(message, at) == at + expected
+    assert upcoming_start_from_error("ERROR: Video unavailable", at) is None
+
+
+@pytest.mark.parametrize(("overdue", "expected"), [
+    (timedelta(minutes=1), timedelta(minutes=1)),
+    (timedelta(minutes=14), timedelta(minutes=1)),
+    (timedelta(minutes=40), timedelta(minutes=1)),
+    (timedelta(hours=2), timedelta(minutes=5)),
+    (timedelta(hours=5), timedelta(minutes=15)),
+    (timedelta(hours=20), timedelta(minutes=15)),
+])
+def test_stick_interval_widens_while_live_keeps_not_starting(overdue, expected):
+    from app.workers import _watch_interval
+    at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    assert _watch_interval(at - overdue, at, manual=False) == expected
+    assert _watch_interval(at - overdue, at, manual=True) == expected
+
+
+def test_stick_window_and_future_schedules_are_left_to_channel_scan():
+    from app.workers import _watch_interval
+    at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    assert _watch_interval(at - timedelta(hours=25), at, manual=False) is None
+    assert _watch_interval(at + timedelta(minutes=5), at, manual=False) is None
+    assert _watch_interval(at + timedelta(minutes=5), at, manual=True) == timedelta(minutes=1)

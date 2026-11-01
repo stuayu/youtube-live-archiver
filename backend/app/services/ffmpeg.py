@@ -17,7 +17,8 @@ def ffmpeg_command(args: list[str]) -> list[str]:
 
 def run_ffmpeg(args: list[str], *, timeout=60, text=False):
     """Run a finite ffmpeg command through the shared wrapper."""
-    return subprocess.run(ffmpeg_command(args), capture_output=True, timeout=timeout, text=text, check=False)
+    extra = {"encoding": "utf-8", "errors": "replace"} if text else {}
+    return subprocess.run(ffmpeg_command(args), capture_output=True, timeout=timeout, text=text, check=False, **extra)
 
 
 def launch_ffmpeg(args: list[str], **kwargs):

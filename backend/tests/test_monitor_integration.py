@@ -122,7 +122,7 @@ def test_multiple_schedules_use_shortest_interval():
     now_at = now()
     long = now_at + timedelta(hours=8)
     soon = now_at + timedelta(minutes=4)
-    assert monitor.calculate_next_interval("AUTO", [long, soon], now_at) == (20, 40)
+    assert monitor.calculate_next_interval("AUTO", [long, soon], now_at) == (60, 120)
 
 
 def test_activity_profile_selects_only_release_timestamp_column():

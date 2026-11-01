@@ -114,7 +114,7 @@ def archive_is_complete(media: Path, ffprobe_path: str | None = None) -> bool:
             return False
         result = subprocess.run(
             [ffprobe_path or settings.ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(media)],
-            capture_output=True, text=True, timeout=30, check=False)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False)
         return result.returncode == 0 and float(result.stdout.strip()) > 0
     except (OSError, ValueError, subprocess.SubprocessError):
         return False

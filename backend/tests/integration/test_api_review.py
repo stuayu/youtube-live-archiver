@@ -186,7 +186,7 @@ def test_channel_registration_duplicate_name_fallback_and_non_youtube_url(client
     fake_youtube.set_state({"channels": {"@resolved": resolved, channel_youtube_id: resolved}, "videos": {}})
     first = client.post("/api/channels", json={"url": "https://youtube.com/@resolved", "name": "Input Name"})
     assert first.status_code == 200 and first.json()["name"] == "Metadata Name"
-    assert first.json()["poll_interval"] == "AUTO"
+    assert first.json()["poll_interval"] == "360"  # 通常6時間 (0019_poll_windows)
     duplicate = client.post("/api/channels", json={"url": "https://youtube.com/@resolved"})
     assert duplicate.status_code == 409
     fake_youtube.set_state({"channels": {}, "videos": {}})
@@ -343,7 +343,9 @@ def test_error_shape_404_and_unhandled_error(client, monkeypatch):
 
 
 @pytest.mark.integration
-def test_settings_reject_unknown_keys_and_never_return_api_key(client):
+def test_settings_reject_unknown_keys_and_never_return_api_key(client, monkeypatch):
+    from app.services import summarization
+    monkeypatch.setattr(summarization, "check_provider", lambda **_target: {"ok": True})
     transcription = client.put("/api/settings/transcription", json={"unexpected": True})
     assert transcription.status_code == 422 and transcription.json()["fields"]
     summary = client.put("/api/settings/summary", json={"summary_chunk_minutes": 17})

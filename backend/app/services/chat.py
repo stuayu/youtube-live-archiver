@@ -642,6 +642,27 @@ def chat_replay_worker() -> None:
         return
 
 
+REPLAY_RATE_LIMIT_MAX_RETRIES = 6
+
+
+def _defer_rate_limited_replay(job: ProcessingJob) -> None:
+    """Back off a replay that YouTube bot-checks without pausing channel monitoring.
+
+    Replay is fetched anonymously, so some videos keep answering "Sign in to
+    confirm you're not a bot". Treating that as a global rate limit used to stop
+    monitoring for 10+ minutes every hour."""
+    from datetime import timedelta
+    payload = dict(job.payload or {})
+    hits = int(payload.get("rate_limited_attempts") or 0) + 1
+    payload["rate_limited_attempts"] = hits
+    job.payload = payload
+    if hits >= REPLAY_RATE_LIMIT_MAX_RETRIES:
+        job.status, job.finished_at, job.next_attempt_at = "failed", now(), None
+        return
+    job.status = "retry_wait"
+    job.next_attempt_at = now() + timedelta(hours=min(24, 2 ** (hits - 1)))
+
+
 def process_replay_retry(db, job: ProcessingJob) -> None:
     from datetime import timedelta
     from .youtube import classify_ytdlp_error
@@ -672,9 +693,6 @@ def process_replay_retry(db, job: ProcessingJob) -> None:
         video = db.get(Video, job.video_id)
         metadata = dict(video.raw_metadata or {})
         limited = kind == "RATE_LIMITED"
-        if limited:
-            from .monitor import _apply_rate_limit
-            _apply_rate_limit(now())
         metadata.update(chat_replay="rate_limited" if limited else "failed",
                         chat_replay_checked_at=now().isoformat(),
                         chat_replay_error="アクセス制限中です" if limited else "リプレイ取得に失敗しました")
@@ -682,7 +700,7 @@ def process_replay_retry(db, job: ProcessingJob) -> None:
         job.error = metadata["chat_replay_error"]
         job.updated_at = now()
         if limited:
-            job.status, job.next_attempt_at = "retry_wait", now() + timedelta(hours=1)
+            _defer_rate_limited_replay(job)
         else:
             job.attempts += 1
             job.status = "failed" if job.attempts >= 10 else "retry_wait"
@@ -690,9 +708,6 @@ def process_replay_retry(db, job: ProcessingJob) -> None:
             job.next_attempt_at = None if job.status == "failed" else now() + timedelta(hours=delay)
         db.commit()
         return
-    if (video.raw_metadata or {}).get("chat_replay") == "rate_limited":
-        from .monitor import _apply_rate_limit
-        _apply_rate_limit(now())
     rebase_live_chat_offsets(db, video.id)
     job.updated_at = now()
     metadata = dict(video.raw_metadata or {})
@@ -702,9 +717,8 @@ def process_replay_retry(db, job: ProcessingJob) -> None:
         job.next_attempt_at = None
         job.error = None
     elif metadata.get("chat_replay") == "rate_limited":
-        job.status = "retry_wait"
         job.error = metadata.get("chat_replay_error")
-        job.next_attempt_at = now() + timedelta(hours=1)
+        _defer_rate_limited_replay(job)
     else:
         job.attempts += 1
         delay = (1, 3, 6, 12, 24)[min(job.attempts - 1, 4)]
@@ -849,6 +863,18 @@ def retrieve_replay(db, video_id: int, youtube_video_id: str, cookie_profile: st
         output = str(Path(temp) / "%(id)s.%(ext)s")
         args = ["--no-warnings", "--skip-download", "--write-subs", "--sub-langs", "live_chat", "--sub-format", "json", "-o", output, f"https://www.youtube.com/watch?v={youtube_video_id}"]
         proc = run_ytdlp(args, capture_output=True, text=True, timeout=3600, check=False)
+        if proc.returncode:
+            # 匿名での取得に失敗したら (ボット確認・メンバー限定など) 2 回目は Cookie を使う。
+            from .youtube import run_ytdlp_with_cookies
+            try:
+                with_cookies = run_ytdlp_with_cookies(args, cookie_profile, timeout=3600)
+            except Exception:
+                log.warning("chat replay retry with cookies failed to run for %s", youtube_video_id)
+                with_cookies = None
+            if with_cookies is not None:
+                log.info("chat replay retried with cookies for %s (exit=%s)", youtube_video_id,
+                         with_cookies.returncode)
+                proc = with_cookies
         files = list(Path(temp).glob("*live_chat*")) + list(Path(temp).glob("*.live_chat.json"))
         video = db.get(Video, video_id)
         from .youtube import classify_ytdlp_error

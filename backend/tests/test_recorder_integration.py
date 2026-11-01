@@ -822,6 +822,10 @@ def test_direct_recording_of_upcoming_event_returns_to_waiting_live(tmp_path, fa
     row = _get_video(video_id)
     assert row.raw_metadata["live_status"] == "is_upcoming"
     assert row.status != "RECORDING_FAILED"
+    # "This live event will begin in 2 hours" moves the schedule forward.
+    from datetime import datetime, timedelta, timezone
+    remaining = row.scheduled_start_at - datetime.now(timezone.utc)
+    assert timedelta(hours=1, minutes=55) < remaining <= timedelta(hours=2)
 
 
 def test_archive_retry_reuses_stem_and_resumes_partial_file(tmp_path, fake_youtube):

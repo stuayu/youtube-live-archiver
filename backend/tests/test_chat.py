@@ -786,3 +786,77 @@ def test_chat_replay_worker_prioritizes_manual_and_rate_limit_cooldown(monkeypat
     chat.chat_replay_worker()
     assert called == []
     monitor._clear_rate_limit()
+
+
+def test_rate_limited_replay_backs_off_without_global_cooldown(monkeypatch, tmp_path):
+    from app.db import SessionLocal
+    from app.services import chat, monitor
+    from app.models import now
+
+    monitor._clear_rate_limit()
+    channel_id = "UC" + "b" * 22
+    with SessionLocal() as db:
+        channel = Channel(youtube_channel_id=channel_id, url="https://youtube.com/@botcheck", name="Bot")
+        db.add(channel)
+        db.flush()
+        video = Video(youtube_video_id="botcheck001", channel_id=channel.id, title="done", status="ACTIVE",
+                      file_path=str(tmp_path), recording_finished_at=now())
+        db.add(video)
+        db.flush()
+        job = ProcessingJob(video_id=video.id, kind="CHAT_REPLAY", status="retry_wait",
+                            next_attempt_at=now(), payload={})
+        db.add(job)
+        db.commit()
+
+        def limited(_db, video_id, *_args, **_kwargs):
+            row = _db.get(Video, video_id)
+            row.raw_metadata = {**(row.raw_metadata or {}), "chat_replay": "rate_limited",
+                                "chat_replay_error": "アクセス制限中です"}
+            _db.commit()
+            return "rate_limited"
+
+        monkeypatch.setattr(chat, "retrieve_replay", limited)
+        delays = []
+        for _ in range(chat.REPLAY_RATE_LIMIT_MAX_RETRIES):
+            before = now()
+            chat.process_replay_retry(db, job)
+            db.commit()
+            # A per-video bot check must not pause channel monitoring.
+            assert not monitor._cooldown_active(now())
+            if job.next_attempt_at is not None:
+                delays.append(job.next_attempt_at - before)
+        assert job.status == "failed"
+        assert delays == sorted(delays) and len(delays) == chat.REPLAY_RATE_LIMIT_MAX_RETRIES - 1
+
+
+def test_replay_retries_with_cookies_after_anonymous_failure(db, monkeypatch):
+    import subprocess
+    from pathlib import Path
+    from app.services import chat, youtube
+
+    session, video = db
+    anonymous_calls, cookie_calls = [], []
+
+    def anonymous(args, **_kwargs):
+        anonymous_calls.append(args)
+        return subprocess.CompletedProcess(args, 1, "", "ERROR: Sign in to confirm you're not a bot")
+
+    def with_cookies(args, cookie_profile, **_kwargs):
+        cookie_calls.append((args, cookie_profile))
+        output = Path(args[args.index("-o") + 1].replace("%(id)s.%(ext)s", f"{video.youtube_video_id}.live_chat.json"))
+        output.write_text(json.dumps(entry("cookie-msg")) + "\n", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(youtube, "run_ytdlp", anonymous)
+    monkeypatch.setattr(youtube, "run_ytdlp_with_cookies", with_cookies)
+    assert chat.retrieve_replay(session, video.id, video.youtube_video_id, "chrome") == 1
+    session.refresh(video)
+    assert len(anonymous_calls) == 1 and len(cookie_calls) == 1
+    assert cookie_calls[0][1] == "chrome"
+    assert video.raw_metadata["chat_replay"] == "imported"
+
+
+def test_replay_cookie_retry_is_skipped_without_cookies(monkeypatch):
+    from app.services import youtube
+    monkeypatch.setattr(youtube, "cookie_args", lambda _profile: [])
+    assert youtube.run_ytdlp_with_cookies(["--version"], None) is None

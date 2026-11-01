@@ -85,6 +85,11 @@ export function useWorkspaceState() {
   const manualVideoOpen = ref(false)
   const transcription = ref<Record<string, unknown>>({})
   const summarySettings = ref<Record<string, unknown>>({})
+  const summaryFeedback = ref<{
+    tone: 'ok' | 'error' | 'info'
+    message: string
+    fields: Record<string, string>
+  } | null>(null)
   const recordingSettings = ref<Record<string, unknown>>({})
   const theme = ref<'auto' | 'light' | 'dark'>(
     (localStorage.getItem('yla-theme') as 'auto' | 'light' | 'dark') || 'auto',
@@ -168,6 +173,7 @@ export function useWorkspaceState() {
     manualVideoOpen,
     transcription,
     summarySettings,
+    summaryFeedback,
     recordingSettings,
     theme,
     mainTabs,

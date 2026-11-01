@@ -134,7 +134,7 @@ def calculate_next_interval(poll_interval: str | None, scheduled_times: list[dat
                 elif delta > 300:
                     scheduled_interval = (120.0, 240.0)
                 elif delta > -600:
-                    scheduled_interval = (20.0, 40.0)
+                    scheduled_interval = (60.0, 120.0)
                 elif delta > -3600:
                     scheduled_interval = (60.0, 120.0)
                 elif delta > -21600:

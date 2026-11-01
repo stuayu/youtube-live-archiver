@@ -199,7 +199,8 @@ def _process_transcription(job_id):
         db.close()
 
 def _process_summary(job_id):
-    from .summarization import SYSTEM, split_transcript, format_transcript, call_openrouter, validate_chunk, validate_final, cache_key
+    from .summarization import (split_transcript, format_transcript, call_openrouter, validate_chunk, validate_final,
+                                cache_key, chunk_messages, final_messages)
     db = SessionLocal()
     try:
         job = db.get(ProcessingJob, job_id)
@@ -217,14 +218,14 @@ def _process_summary(job_id):
         segments = [{"start": r.start, "end": r.end, "text": r.text} for r in rows]
         model = (job.payload or {}).get("model", opts["openrouter_model"])
         max_attempts = max(1, int(opts["openrouter_max_attempts"]))
-        def request(text, validator):
+        def request(text, validator, build_messages):
             key = cache_key(text, model)
             cached = db.get(SummaryCache, key)
             if cached: return cached.result
             last = None
             for _ in range(2):  # try conservative JSON repair, then retry provider
                 try:
-                    result = call_openrouter([{"role":"system","content":SYSTEM}, {"role":"user","content":text}], api_key=api_key, model=model,
+                    result = call_openrouter(build_messages(text), api_key=api_key, model=model,
                         base_url=opts["openrouter_base_url"], attempts=max_attempts)
                     result = validator(result)
                     db.add(SummaryCache(key=key, result=result)); db.commit(); return result
@@ -236,7 +237,7 @@ def _process_summary(job_id):
             summaries = list(payload.get("chunks", [])); index = int(payload.get("next_chunk", 0))
             while index < len(chunks):
                 text = format_transcript(chunks[index])
-                result = request(text, validate_chunk)
+                result = request(text, validate_chunk, chunk_messages)
                 summaries.append({"start": chunks[index][0]["start"], "end": chunks[index][-1]["end"], **result})
                 index += 1; job.payload = {**payload, "chunks": summaries, "next_chunk": index}; db.commit()
             final = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video.id, ProcessingJob.kind == "SUMMARIZE_FINAL"))
@@ -249,7 +250,7 @@ def _process_summary(job_id):
             chunks_job = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video.id, ProcessingJob.kind == "SUMMARIZE_CHUNKS"))
             summaries = (chunks_job.payload or {}).get("chunks", []) if chunks_job else []
         text = json.dumps(summaries, ensure_ascii=False, separators=(",", ":"))
-        result = request(text, validate_final)
+        result = request(text, validate_final, final_messages)
         video.summary_data, video.summary_model, video.summary_status, video.summary_error = result, model, "completed", None
         job.status, job.error, job.finished_at = "completed", None, now(); db.commit()
     except Exception as exc:

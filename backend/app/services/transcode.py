@@ -32,7 +32,7 @@ def _run(source: Path, dest: Path, mode: str, ffmpeg: str, progress=None):
         try:
             probe = subprocess.run(
                 [settings.ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(source)],
-                capture_output=True, text=True, timeout=15, check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, check=False,
             )
             if probe.returncode == 0:
                 duration = float(json.loads(probe.stdout).get("format", {}).get("duration") or 0)

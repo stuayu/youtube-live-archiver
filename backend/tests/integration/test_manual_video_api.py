@@ -189,3 +189,47 @@ def test_manual_worker_handles_next_check_and_upcoming_release(client, fake_yout
     assert _job_stats["test-manual-upcoming"]["error_count"] == 0
     assert any(record.levelno == logging.DEBUG and "manual video remains scheduled" in record.getMessage()
                for record in records)
+
+
+@pytest.mark.integration
+def test_upcoming_watch_sticks_to_overdue_channel_schedules(client, fake_youtube):
+    from datetime import datetime, timedelta, timezone
+    from app.workers import upcoming_watch_worker
+
+    channel_id = "UC" + "s" * 22
+    overdue, overdue_waiting, future, disabled = "stickover1", "stickwait01", "stickfutr01", "stickoff001"
+    fake_youtube.set_state({"channels": {}, "videos": {
+        overdue: {"id": overdue, "channel_id": channel_id, "live_status": "is_live"},
+        overdue_waiting: {"id": overdue_waiting, "channel_id": channel_id, "live_status": "is_upcoming"},
+        future: {"id": future, "channel_id": channel_id, "live_status": "is_live"},
+        disabled: {"id": disabled, "channel_id": channel_id, "live_status": "is_live"},
+    }})
+    at = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        channel = Channel(youtube_channel_id=channel_id, url="https://www.youtube.com/channel/" + channel_id,
+                          name="Sticky", enabled=True)
+        db.add(channel)
+        db.flush()
+        for vid, scheduled, extra in ((overdue, at - timedelta(minutes=30), {}),
+                                      (overdue_waiting, at - timedelta(minutes=5), {}),
+                                      (future, at + timedelta(minutes=20), {}),
+                                      (disabled, at - timedelta(minutes=5), {"schedule_enabled": False})):
+            db.add(Video(youtube_video_id=vid, channel_id=channel.id, title=vid, status="WAITING_LIVE",
+                         scheduled_start_at=scheduled, raw_metadata={"live_status": "is_upcoming", **extra}))
+        db.commit()
+
+    upcoming_watch_worker()
+
+    with SessionLocal() as db:
+        rows = {row.youtube_video_id: row for row in db.scalars(select(Video)).all()}
+        assert rows[overdue].status == "DISCOVERED"
+        assert rows[overdue].raw_metadata["live_status"] == "is_live"
+        assert rows[overdue_waiting].status == "WAITING_LIVE"
+        next_check = datetime.fromisoformat(rows[overdue_waiting].raw_metadata["watch_next_check_at"])
+        assert next_check - at <= timedelta(seconds=70)
+        # Future channel schedules stay with the channel scan; disabled ones are never inspected.
+        assert rows[future].status == "WAITING_LIVE"
+        assert "watch_next_check_at" not in rows[future].raw_metadata
+        assert rows[disabled].status == "WAITING_LIVE"
+    calls = json.dumps(fake_youtube.calls())
+    assert future not in calls and disabled not in calls

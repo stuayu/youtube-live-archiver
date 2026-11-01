@@ -15,7 +15,7 @@ from .config import configure_logging
 configure_logging()
 from .api import router
 from .workers import (channel_monitor, recorder_worker, retention_worker, protection_worker,
-                      recovery_worker, integrity_worker, derived_cleanup_worker, manual_video_worker)
+                      recovery_worker, integrity_worker, derived_cleanup_worker, upcoming_watch_worker)
 from .services.processing import processing_worker
 from .services.chat import chat_replay_worker
 
@@ -31,7 +31,7 @@ _job_stats: dict[str, dict] = {}
 _mutation_gate = threading.Lock()
 _active_mutations = 0
 _tool_cache: dict | None = None
-_job_intervals = {"channel-monitor": 5, "recorder": 5, "manual-video": 60,
+_job_intervals = {"channel-monitor": 5, "recorder": 5, "upcoming-watch": 15,
                   "retention": 900, "derived-cleanup": 86400, "protection": 21600,
                   "recording-recovery": 60, "recording-integrity": 1800,
                   "processing-queue": 10, "chat-replay": 60, "yt-dlp-version": 86400}
@@ -120,8 +120,8 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception("startup recording recovery scan failed; scheduler will retry")
         scheduler.add_job(_tracked_job("channel-monitor", lambda: channel_monitor(background=True)), "interval", seconds=5,
                           id="channel-monitor", max_instances=1, coalesce=True, misfire_grace_time=3)
-        scheduler.add_job(_tracked_job("manual-video", lambda: manual_video_worker(background=True)), "interval", seconds=60,
-                          id="manual-video", max_instances=1, coalesce=True, misfire_grace_time=10)
+        scheduler.add_job(_tracked_job("upcoming-watch", lambda: upcoming_watch_worker(background=True)), "interval", seconds=15,
+                          id="upcoming-watch", max_instances=1, coalesce=True, misfire_grace_time=3)
         scheduler.add_job(_tracked_job("recorder", recorder_worker), "interval", seconds=5, id="recorder", max_instances=1, coalesce=True, misfire_grace_time=3)
         scheduler.add_job(_tracked_job("retention", retention_worker), "interval", minutes=15,
                           id="retention", max_instances=1, coalesce=True, misfire_grace_time=60)

@@ -449,6 +449,8 @@ class SummarySettingsIn(StrictInput):
     openrouter_model: str | None = Field(default=None, max_length=500)
     openrouter_base_url: str | None = Field(default=None, max_length=500)
     openrouter_api_key: str | None = Field(default=None, max_length=1000)
+    # GET が返す読み取り専用の表示項目。画面は読み込んだ設定をそのまま送り返すので受け取って捨てる。
+    openrouter_api_key_set: bool | None = Field(default=None, exclude=True)
 
     @field_validator("summary_chunk_minutes")
     @classmethod
@@ -459,7 +461,8 @@ class SummarySettingsIn(StrictInput):
 
     @model_validator(mode="after")
     def validate_summary_nulls(self):
-        if any(getattr(self, key) is None for key in self.model_fields_set - {"openrouter_api_key"}):
+        if any(getattr(self, key) is None
+               for key in self.model_fields_set - {"openrouter_api_key", "openrouter_api_key_set"}):
             raise ValueError("null は指定できません")
         return self
 

@@ -967,7 +967,7 @@ def retry_video_recording(video_id: int, db: Session = Depends(get_db)):
         video.status = "DISCOVERED"
         video.recording_finished_at = None
         video.raw_metadata = {key: value for key, value in (video.raw_metadata or {}).items()
-                              if key not in ("user_stopped", "recovery_exhausted")}
+                              if key not in ("user_stopped", "recovery_exhausted", "recorder_crash_count")}
         video.is_partial = bool(video.file_path and Path(video.file_path).is_dir())
         video.next_recovery_at = None
         # Preserve file_path and any partial evidence. New download output uses the same

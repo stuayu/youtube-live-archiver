@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     monitor_batch_size: int = 20
     monitor_concurrency: int = 3
     monitor_max_inspects_per_scan: int = 5
+    # 予定時刻を過ぎた配信予定を開始まで個別確認する間隔・最大継続時間・1回あたりの件数
+    upcoming_stick_interval_seconds: int = 60
+    upcoming_stick_max_hours: int = 24
+    upcoming_watch_batch_size: int = 10
     max_concurrent_live_recordings: int = 8
     max_concurrent_archive_downloads: int = 2
     recovery_max_attempts: int = 20
