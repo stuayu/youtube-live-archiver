@@ -6,7 +6,7 @@ import math
 import json
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 
 from ..config import settings
 from ..db import SessionLocal
@@ -213,7 +213,8 @@ def _process_summary(job_id):
         api_key = settings.openrouter_api_key or (secret_row.value.get("value", "") if secret_row else "")
         if not opts["summary_enabled"] or not api_key or not (job.payload or {}).get("model"):
             job.status = "disabled"; video.summary_status = "disabled"; job.finished_at = now(); db.commit(); return
-        video.summary_status = "processing"; job.status = "processing"; job.attempts += 1; job.started_at = now(); db.commit()
+        video.summary_status = "processing"; job.status = "processing"; job.attempts += 1
+        job.started_at = now(); job.next_attempt_at = None; job.updated_at = now(); db.commit()
         rows = db.scalars(select(TranscriptSegment).where(TranscriptSegment.video_id == video.id, TranscriptSegment.raw.is_(False)).order_by(TranscriptSegment.start)).all()
         segments = [{"start": r.start, "end": r.end, "text": r.text} for r in rows]
         model = (job.payload or {}).get("model", opts["openrouter_model"])
@@ -225,12 +226,12 @@ def _process_summary(job_id):
             # プロバイダー呼び出し (最大数分) の間 DB トランザクションを開いたままにしない。
             db.commit()
             last = None
-            for _ in range(2):  # try conservative JSON repair, then retry provider
+            for _ in range(2):  # retry schema-invalid output, but persist provider failures immediately
+                response = call_openrouter(build_messages(text), api_key=api_key, model=model,
+                    base_url=opts["openrouter_base_url"], attempts=1)
                 try:
-                    result = call_openrouter(build_messages(text), api_key=api_key, model=model,
-                        base_url=opts["openrouter_base_url"], attempts=max_attempts)
-                    result = validator(result)
-                except Exception as exc:
+                    result = validator(response)
+                except (TypeError, ValueError) as exc:
                     last = exc
                     continue
                 try:
@@ -253,12 +254,24 @@ def _process_summary(job_id):
                 text = format_transcript(chunks[index])
                 result = request(text, validate_chunk, chunk_messages)
                 summaries.append({"start": chunks[index][0]["start"], "end": chunks[index][-1]["end"], **result})
-                index += 1; job.payload = {**payload, "chunks": summaries, "next_chunk": index}; db.commit()
+                index += 1
+                job.payload = {**payload, "chunks": summaries, "next_chunk": index}
+                job.updated_at = now()
+                if index < len(chunks):
+                    # Yield after one provider request so other videos and ready
+                    # final summaries can run before this video takes another turn.
+                    job.status, job.attempts, job.error, job.next_attempt_at = "pending", 0, None, None
+                    video.summary_status, video.summary_error = "pending", None
+                    db.commit()
+                    return
+                db.commit()
             final = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video.id, ProcessingJob.kind == "SUMMARIZE_FINAL"))
             if not final:
                 final = ProcessingJob(video_id=video.id, kind="SUMMARIZE_FINAL", status="pending", attempts=0, payload={"model": model, "chunks": summaries}); db.add(final)
             else: final.status, final.payload = "pending", {"model": model, "chunks": summaries}
-            job.status, job.finished_at = "completed", now(); video.summary_status = "pending"; db.commit(); return
+            job.status, job.error, job.attempts, job.next_attempt_at, job.finished_at = "completed", None, 0, None, now()
+            video.summary_status, video.summary_error = "pending", None
+            db.commit(); return
         summaries = payload.get("chunks")
         if not summaries:
             chunks_job = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video.id, ProcessingJob.kind == "SUMMARIZE_CHUNKS"))
@@ -266,7 +279,8 @@ def _process_summary(job_id):
         text = json.dumps(summaries, ensure_ascii=False, separators=(",", ":"))
         result = request(text, validate_final, final_messages)
         video.summary_data, video.summary_model, video.summary_status, video.summary_error = result, model, "completed", None
-        job.status, job.error, job.finished_at = "completed", None, now(); db.commit()
+        job.status, job.error, job.attempts, job.next_attempt_at, job.finished_at = "completed", None, 0, None, now()
+        job.updated_at = now(); db.commit()
     except Exception as exc:
         db.rollback(); job = db.get(ProcessingJob, job_id)
         if job:
@@ -275,7 +289,7 @@ def _process_summary(job_id):
                 job.status, job.finished_at = "failed", now()
                 if video: video.summary_status, video.summary_error = "failed", job.error
             else:
-                delay = min(86400, 60 * (2 ** max(0, job.attempts - 1)))
+                delay = max(60, min(86400, 60 * (2 ** max(0, job.attempts - 1))))
                 delay = max(delay, int(getattr(exc, "retry_after", 0)))
                 job.status, job.next_attempt_at = "retry_wait", now() + timedelta(seconds=delay)
                 if video: video.summary_status, video.summary_error = "retry_wait", job.error
@@ -321,7 +335,10 @@ def summary_worker():
             return
         concurrency = max(1, min(8, int(opts["openrouter_max_concurrency"])))
         due = db.scalars(select(ProcessingJob.id).where(ProcessingJob.kind.in_(("SUMMARIZE_CHUNKS", "SUMMARIZE_FINAL")),
-            ((ProcessingJob.status == "pending") | ((ProcessingJob.status == "retry_wait") & (ProcessingJob.next_attempt_at <= now())))).order_by(ProcessingJob.created_at).limit(concurrency)).all()
+            ((ProcessingJob.status == "pending") | ((ProcessingJob.status == "retry_wait") & (ProcessingJob.next_attempt_at <= now())))).order_by(
+                case((ProcessingJob.kind == "SUMMARIZE_FINAL", 0), else_=1),
+                ProcessingJob.updated_at.asc(), ProcessingJob.created_at.asc(), ProcessingJob.id.asc()
+            ).limit(concurrency)).all()
     finally: db.close()
     def run(job_id):
         with default_locks.acquire("processing-job", str(job_id)) as lease:
@@ -393,7 +410,7 @@ def processing_worker():
         due = db.scalars(select(ProcessingJob.id).where(
             ProcessingJob.kind == "TRANSCRIBE",
             ((ProcessingJob.status == "pending") | ((ProcessingJob.status == "retry_wait") & (ProcessingJob.next_attempt_at <= now()))),
-        ).order_by(ProcessingJob.created_at).limit(concurrency)).all()
+        ).order_by(ProcessingJob.created_at.asc(), ProcessingJob.id.asc()).limit(concurrency)).all()
     finally:
         db.close()
     def run(job_id):

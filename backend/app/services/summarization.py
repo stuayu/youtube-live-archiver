@@ -50,7 +50,7 @@ REQUEST_TIMEOUT_SECONDS = 300
 class RateLimitError(RuntimeError):
     def __init__(self, retry_after):
         super().__init__("OpenRouter rate limited the request")
-        self.retry_after = max(0, int(retry_after))
+        self.retry_after = max(60, int(retry_after))
 
 def split_transcript(rows, chunk_minutes=30):
     """Group utterance-atomic rows in bounded windows, preferring a nearby sentence end."""
@@ -120,10 +120,11 @@ def call_openrouter(messages, *, api_key, model, base_url, attempts=5, opener=No
                 except ValueError:
                     try: delay=max(0,int((parsedate_to_datetime(value)-datetime.now(timezone.utc)).total_seconds()))
                     except Exception: pass
+            retry_delay = max(60, delay if delay is not None else min(86400, 60 * (2 ** attempt)))
             if attempt + 1 >= max(1, attempts):
-                if exc.code == 429: raise RateLimitError(delay if delay is not None else min(86400, 60 * (2 ** attempt))) from None
+                if exc.code == 429: raise RateLimitError(retry_delay) from None
                 raise RuntimeError(f"OpenRouter HTTP {exc.code}") from None
-            sleeper(delay if delay is not None else min(86400, 60 * (2 ** attempt)))
+            sleeper(retry_delay)
         except Exception as exc:
             if attempt + 1 >= max(1, attempts): raise
             sleeper(min(86400, 60 * (2 ** attempt)))
