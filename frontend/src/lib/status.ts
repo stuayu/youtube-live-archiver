@@ -141,3 +141,16 @@ export function processingStatus(video: ProcessingTarget): StatusPresentation | 
     }
   )
 }
+
+/** Mirrors the API rules: POST /protect for these statuses, DELETE /protect only for manual protection. */
+const protectableStatuses = ['ACTIVE', 'DELETE_ELIGIBLE', 'PROTECTION_PENDING', 'VERIFYING_REMOTE']
+export function protectionAction(video: {
+  status: string
+  protected: boolean
+  protection_reason?: string | null
+}): 'protect' | 'unprotect' | null {
+  if (video.protected) {
+    return video.status === 'PROTECTED' && video.protection_reason === 'MANUAL' ? 'unprotect' : null
+  }
+  return protectableStatuses.includes(video.status) ? 'protect' : null
+}

@@ -69,6 +69,23 @@ def _scheduled_entry(entry: dict) -> datetime | None:
     return _timestamp(entry.get("release_timestamp") or entry.get("scheduled_start_time") or entry.get("timestamp"))
 
 
+def monitoring_paused(poll_windows: list[dict] | None, current: datetime) -> bool:
+    """True while a channel time window with monitor=false is active (server local time)."""
+    local_current = current.astimezone()
+    minute_of_day = local_current.hour * 60 + local_current.minute
+    for window in poll_windows or []:
+        try:
+            if window.get("monitor") is not False:
+                continue
+            sh, sm = map(int, window["start"].split(":")); eh, em = map(int, window["end"].split(":"))
+            start, end = sh * 60 + sm, eh * 60 + em
+            if start <= minute_of_day < end if end > start else minute_of_day >= start or minute_of_day < end:
+                return True
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return False
+
+
 def calculate_next_interval(poll_interval: str | None, scheduled_times: list[datetime | None], current: datetime,
                             profile: Profile | None = None, poll_windows: list[dict] | None = None) -> tuple[float, float]:
     """Return lower and upper polling delay bounds in seconds."""
@@ -261,7 +278,8 @@ def _handle_scan(db: Session, ch: Channel, entries: list[dict], channel_data: di
                 last_inspected = _timestamp(previous_inspected)
                 if scheduled is None or last_inspected is None or at - last_inspected >= timedelta(minutes=30):
                     data, _ = inspect_once(video_id)
-                    if data:
+                    # inspect_once は commit で行を読み直す。その間に張り付き確認が録画へ回していたら触らない。
+                    if data and video.status == "WAITING_LIVE":
                         video.scheduled_start_at = _inspect_datetime(data) or scheduled
                         video.raw_metadata = {**(video.raw_metadata or {}), "schedule_inspected_at": at.isoformat()}
                 continue

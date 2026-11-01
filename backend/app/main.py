@@ -108,6 +108,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("derived temp cleanup failed")
     if settings.scheduler_enabled:
+        from .services.recorder import open_dispatch
+        open_dispatch()
         try:
             from .services.recorder import cleanup_orphan_processes
             cleanup_orphan_processes()
@@ -303,7 +305,10 @@ async def internal_error(request: Request, exc: Exception):
     logging.getLogger(__name__).exception("unhandled API exception", exc_info=exc)
     return JSONResponse(status_code=500, content={"error": "内部エラーが発生しました"})
 # Tailnet 越しのアクセスを許可するため、オリジン制限は行わない（プライベートネットワーク前提）。
-app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_methods=["*"], allow_headers=["*"])
+# 画面はこのアプリ自身が配信する (同一オリジン)。他サイトのページからの操作を防ぐため、
+# クロスオリジンはローカルの開発サーバーだけ許可する。
+app.add_middleware(CORSMiddleware, allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+                   allow_methods=["*"], allow_headers=["*"])
 app.include_router(router)
 
 

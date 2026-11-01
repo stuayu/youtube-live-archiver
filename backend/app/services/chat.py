@@ -566,7 +566,8 @@ def enqueue_replay_retry(db, video_id: int, *, immediate: bool = False,
         if restart and job.status != "processing":
             job.status, job.attempts, job.error = "retry_wait", 0, None
             job.next_attempt_at, job.finished_at = now(), None
-            job.payload = {**(job.payload or {}), "manual_queue": True}
+            job.payload = {**{key: value for key, value in (job.payload or {}).items()
+                              if key != "rate_limited_attempts"}, "manual_queue": True}
             db.commit()
         return job
     job = ProcessingJob(video_id=video_id, kind="CHAT_REPLAY", status="retry_wait",

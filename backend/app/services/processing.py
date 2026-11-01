@@ -233,9 +233,11 @@ def _process_summary(job_id):
             raise last
         payload = dict(job.payload or {})
         if job.kind == "SUMMARIZE_CHUNKS":
-            chunks = split_transcript(segments, int(opts["summary_chunk_minutes"]))
+            # 再開時に区間がずれないよう、開始時のチャンク長を使い続ける。
+            chunk_minutes = int(payload.get("chunk_minutes") or opts["summary_chunk_minutes"])
+            chunks = split_transcript(segments, chunk_minutes)
             summaries = list(payload.get("chunks", [])); index = int(payload.get("next_chunk", 0))
-            payload["total_chunks"] = len(chunks); job.payload = {**payload}; db.commit()
+            payload.update(total_chunks=len(chunks), chunk_minutes=chunk_minutes); job.payload = {**payload}; db.commit()
             while index < len(chunks):
                 text = format_transcript(chunks[index])
                 result = request(text, validate_chunk, chunk_messages)
@@ -316,8 +318,42 @@ def summary_worker():
     with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="summary") as pool: list(pool.map(run, due))
 
 
+_transcription_reconciled_at = None
+TRANSCRIPTION_RECONCILE_DAYS = 7
+
+
+def _reconcile_missing_transcriptions() -> None:
+    """Queue recent finished recordings whose TRANSCRIBE job was never created.
+
+    Recording completion swallows enqueue errors, which used to leave the row at
+    "pending" forever. Limited to recent recordings so old archives are not
+    suddenly transcribed in bulk."""
+    global _transcription_reconciled_at
+    from datetime import timedelta
+    current = now()
+    if _transcription_reconciled_at and current - _transcription_reconciled_at < timedelta(minutes=10):
+        return
+    _transcription_reconciled_at = current
+    with SessionLocal() as db:
+        has_job = select(ProcessingJob.id).where(ProcessingJob.video_id == Video.id,
+                                                  ProcessingJob.kind == "TRANSCRIBE").exists()
+        missing = db.scalars(select(Video.id).where(
+            Video.status.in_(("ACTIVE", "PROTECTED")), Video.file_path.is_not(None),
+            Video.transcription_status == "pending",
+            Video.recording_finished_at >= current - timedelta(days=TRANSCRIPTION_RECONCILE_DAYS),
+            ~has_job).limit(20)).all()
+        for video_id in missing:
+            try:
+                if enqueue_transcription(db, video_id):
+                    log.info("queued missing transcription for video %s", video_id)
+            except Exception:
+                db.rollback()
+                log.exception("could not queue missing transcription for video %s", video_id)
+
+
 def processing_worker():
     """Claim due jobs; pg advisory locks make multiple app processes safe."""
+    _reconcile_missing_transcriptions()
     db = SessionLocal()
     concurrency = max(1, settings.transcription_max_concurrency)
     try:

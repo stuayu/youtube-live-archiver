@@ -832,16 +832,26 @@ def video_thumbnail(video_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "サムネイルがありません")
     return FileResponse(thumb, headers={"Cache-Control": "public, max-age=3600"})
 
+PROTECTABLE_STATUSES = ("ACTIVE", "DELETE_ELIGIBLE", "PROTECTION_PENDING", "VERIFYING_REMOTE")
+
+
 @router.post("/videos/{video_id}/protect")
 def protect_video(video_id: int, db: Session = Depends(get_db)):
+    from ..services.locks import default_locks, retention_lock
     video = db.get(Video, video_id)
     if not video: raise HTTPException(404, "動画がありません")
     db.commit()
-    if video.status not in ("ACTIVE", "DELETE_ELIGIBLE", "PROTECTION_PENDING", "VERIFYING_REMOTE"):
-        raise HTTPException(409, "この状態の動画は保護できません")
-    video.protected, video.protection_reason, video.protected_at, video.status = True, "MANUAL", now(), "PROTECTED"
-    db.add(AuditLog(video_id=video.id, action="PROTECT", reason="MANUAL"))
-    db.commit()
+    # 自動削除と同じロックの中で保護する。ロック外だと削除判定の直後に保護しても消えてしまう。
+    namespace, key = retention_lock(video.youtube_video_id)
+    with default_locks.acquire(namespace, key) as lease:
+        if not lease.acquired:
+            raise HTTPException(409, "保存期間の確認中です。数秒後にもう一度お試しください")
+        db.refresh(video)
+        if video.status not in PROTECTABLE_STATUSES:
+            raise HTTPException(409, "この状態の動画は保護できません")
+        video.protected, video.protection_reason, video.protected_at, video.status = True, "MANUAL", now(), "PROTECTED"
+        db.add(AuditLog(video_id=video.id, action="PROTECT", reason="MANUAL"))
+        db.commit()
     return {"ok": True, "protected": True}
 
 @router.delete("/videos/{video_id}/protect")
@@ -882,6 +892,10 @@ def _delete_video_locked(video: Video, db: Session):
     path = None
     if video.file_path:
         if not Path(video.file_path).exists():
+            # ドライブが外れているだけなら「削除済み」にしない (戻ったときに追跡できなくなる)。
+            if video.storage and not Path(video.storage.root_path).is_dir():
+                raise HTTPException(409, f"保存先 {video.storage.root_path} に接続できません。"
+                                         "ドライブの接続を確認してから削除してください")
             path = Path(video.file_path)
         elif not video.storage:
             raise HTTPException(409, "登録保存先が無いため削除できません")

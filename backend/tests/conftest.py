@@ -139,6 +139,10 @@ def _truncate_test_database():
         # An app lifespan that ended inside the test leaves conversions stopped.
         from app.services import transcode
         transcode.resume()
+        # recorder.shutdown() closes dispatch for the rest of the process; reopen it per test.
+        from app.services import recorder, processing
+        recorder.open_dispatch()
+        processing._transcription_reconciled_at = None
         from app.services import chat_assets
         with chat_assets._lock:
             chat_assets._known_urls.clear()

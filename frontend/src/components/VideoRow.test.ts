@@ -90,8 +90,10 @@ describe('VideoRow', () => {
         expect(wrapper.text()).not.toContain('永久保存')
       } else {
         expect(wrapper.text()).toContain('削除')
-        expect(wrapper.text()).toContain('永久保存')
         expect(wrapper.text()).toContain('再生')
+        // The API only protects these statuses; other rows must not offer an action that returns 409.
+        const protectable = ['ACTIVE', 'DELETE_ELIGIBLE', 'PROTECTION_PENDING', 'VERIFYING_REMOTE']
+        expect(wrapper.text().includes('永久保存')).toBe(protectable.includes(status))
       }
       wrapper.unmount()
     }
@@ -150,5 +152,18 @@ describe('VideoRow', () => {
       expect(wrapper.text()).not.toContain('文字起こし')
       wrapper.unmount()
     }
+  })
+
+  it('offers unprotect only for manual protection', async () => {
+    const manual = mount(VideoRow, {
+      props: { video: { ...sample('PROTECTED'), protected: true, protection_reason: 'MANUAL' } },
+    })
+    await manual.get('summary').trigger('click')
+    expect(manual.text()).toContain('保護解除')
+    const automatic = mount(VideoRow, {
+      props: { video: { ...sample('PROTECTED'), protected: true, protection_reason: 'REMOTE_PRIVATE' } },
+    })
+    await automatic.get('summary').trigger('click')
+    expect(automatic.text()).not.toContain('保護解除')
   })
 })

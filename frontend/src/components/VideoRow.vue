@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Video } from '../api/types'
-import { processingStatus, videoStatus } from '../lib/status'
+import { processingStatus, protectionAction, videoStatus } from '../lib/status'
 import { formatBytes, formatDate } from '../lib/format'
 import { missingOpeningLabel } from '../lib/recording'
 import Icon from './ui/Icon.vue'
@@ -23,7 +23,7 @@ const emit = defineEmits<{
 }>()
 const menuActions = (video: Video) => ({
   canDelete: video.status !== 'RECORDING' && !props.deleted,
-  canProtect: video.status !== 'RECORDING',
+  canProtect: protectionAction(video) !== null,
   canPlay: video.has_file || video.live_playback_available,
 })
 </script>

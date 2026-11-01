@@ -4,6 +4,7 @@ import { useWorkspaceContext } from '../composables/workspaceContext'
 import Icon from '../components/ui/Icon.vue'
 import type { QueryKey } from '../composables/useQueryState'
 import { missingOpeningLabel } from '../lib/recording'
+import { protectionAction } from '../lib/status'
 const ctx = reactive(useWorkspaceContext())
 function filterName(key: QueryKey) {
   return {
@@ -292,7 +293,7 @@ function hasFilter(key: QueryKey) {
               >
               <button v-if="video.has_file" @click="ctx.convertVideo(video, 'remux')">MP4 リマックス</button>
               <button v-if="video.has_file" @click="ctx.convertVideo(video, 'h264')">H.264 変換</button>
-              <button v-if="video.status !== 'RECORDING'" @click="ctx.toggleProtection(video)">
+              <button v-if="protectionAction(video)" @click="ctx.toggleProtection(video)">
                 {{ video.protected ? '保護を解除' : '永久保存にする' }}
               </button>
               <button

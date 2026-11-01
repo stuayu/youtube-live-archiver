@@ -260,6 +260,14 @@ def channel_monitor(background: bool = False):
     run_channel_monitor(background=background)
 
 
+def _parse_iso(value) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _watch_next_check_key(metadata: dict) -> str:
     return "manual_next_check_at" if metadata.get("manual") is True else "watch_next_check_at"
 
@@ -301,12 +309,14 @@ def upcoming_watch_worker(background: bool = False):
     Manually-added videos are tracked across their whole schedule; channel videos
     are tracked once their scheduled start has passed (the channel scan handles
     the rest)."""
-    from .services.monitor import _cooldown_active
+    from sqlalchemy.orm import selectinload
+    from .services.monitor import _cooldown_active, monitoring_paused
     at = now()
     if _cooldown_active(at):
         return
     with SessionLocal() as db:
-        candidates = list(db.scalars(select(Video).where(Video.status == "WAITING_LIVE")
+        candidates = list(db.scalars(select(Video).options(selectinload(Video.channel))
+                                     .where(Video.status == "WAITING_LIVE")
                                      .order_by(Video.scheduled_start_at.asc().nulls_last(), Video.id)).all())
         due = []
         for video in candidates:
@@ -314,7 +324,10 @@ def upcoming_watch_worker(background: bool = False):
             if metadata.get("schedule_enabled") is False:
                 continue
             manual = metadata.get("manual") is True
-            if not manual and (video.channel is None or not video.channel.enabled):
+            channel = video.channel
+            # チャンネル監視と同じ条件に揃える: 無効・アーカイブ済み・「監視しない」時間帯は確認しない。
+            if not manual and (channel is None or not channel.enabled or channel.archived
+                               or monitoring_paused(channel.poll_windows, at)):
                 continue
             if _watch_interval(video.scheduled_start_at, at, manual) is None:
                 continue
@@ -422,6 +435,17 @@ def _inspect_waiting_video(video_pk: int, at: datetime) -> None:
         elif failure in ("PRIVATE", "DELETED"):
             video.status = "CANCELLED"
             metadata["cancel_reason"] = failure
+        elif state == "not_live" and not manual:
+            # 配信枠が通常動画に変わった (取りやめ)。チャンネル監視の照合と同じく中止扱いにする。
+            video.status = "CANCELLED"
+            metadata["cancel_reason"] = "NOT_LIVE"
+            db.add(AuditLog(channel_id=video.channel_id, video_id=video.id, action="UPCOMING_CANCELLED",
+                            reason="NOT_LIVE"))
+        elif failure in ("MEMBERS_ONLY", "UNAVAILABLE", "UNKNOWN") or (failure and not state):
+            # 匿名では見えない枠 (メンバー限定など) に 1 分ごとに問い合わせ続けない。
+            # 録画は Cookie を使うので中止にはせず、確認間隔だけ広げる。
+            metadata[_watch_next_check_key(metadata)] = max(
+                _parse_iso(metadata.get(_watch_next_check_key(metadata))) or at, at + timedelta(minutes=15)).isoformat()
         if result.get("title"):
             video.title = result["title"]
         video.raw_metadata = metadata

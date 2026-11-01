@@ -130,6 +130,10 @@ def test_shutdown_stop_is_failed_but_recovery_starts_a_new_interval(
     assert stopped.next_recovery_at is None
     target = Path(stopped.file_path)
     assert any(path.stat().st_size > 0 for path in target.glob("video*"))
+    # A new process starts with dispatch open (app lifespan calls open_dispatch()).
+    from app.services.recorder import dispatch, open_dispatch
+    assert dispatch(video_id, "live", lambda _pk: None) is False  # closed while shutting down
+    open_dispatch()
     recovery_worker()
     assert _get_video(video_id).status == "DISCOVERED"
     fake_youtube.set_state({"channels": {}, "videos": {key: {

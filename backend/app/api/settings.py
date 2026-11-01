@@ -160,7 +160,13 @@ def _summary_provider_target(db: Session, values: dict) -> dict:
         raise ProviderCheckError("サーバーの .env に OPENROUTER_API_KEY が設定されているため、画面で登録したキーは"
                                  "使われません。.env から OPENROUTER_API_KEY を削除してサービスを再起動するか、"
                                  ".env のキーを更新してください", field="openrouter_api_key", code="env_key_overrides")
-    if not entered and base_url.rstrip("/") != str(current["openrouter_base_url"] or "").rstrip("/"):
+    url_changed = base_url.rstrip("/") != str(current["openrouter_base_url"] or "").rstrip("/")
+    if url_changed and settings.openrouter_api_key:
+        raise ProviderCheckError("サーバーの .env の OPENROUTER_API_KEY を使っているため、画面から送信先を変えられません"
+                                 "（キーを別の送信先へ送らないため）。送信先を変える場合は .env の OPENROUTER_API_KEY を"
+                                 "削除してサービスを再起動し、画面でキーを登録してください",
+                                 field="openrouter_base_url", code="env_key_fixed_url")
+    if not entered and url_changed:
         raise ProviderCheckError("API ベース URL を変える場合は、API キーも入力し直してください"
                                  "（登録済みのキーを新しい送信先へ送らないため）",
                                  field="openrouter_api_key", code="key_required_for_new_url")
@@ -202,7 +208,9 @@ def put_summary_settings(data: SummarySettingsIn, db: Session = Depends(get_db))
     connection_changed = bool(values.get("openrouter_api_key")) or any(
         key in values and values[key] != current.get(key) for key in ("openrouter_model", "openrouter_base_url"))
     enabling = values.get("summary_enabled", current["summary_enabled"])
-    if connection_changed:
+    # 要約を無効にする保存はプロバイダーの状態に関係なく通す。
+    disabling = values.get("summary_enabled") is False and bool(current["summary_enabled"])
+    if connection_changed and not disabling:
         try:
             target = _summary_provider_target(db, values)
             if target["api_key"] or enabling:

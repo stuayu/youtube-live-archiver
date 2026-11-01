@@ -57,6 +57,8 @@ TEE_YTDLP_EXIT_TIMEOUT_SECONDS = 30
 # YouTube への再問い合わせは 1 分以上空ける。1 回の待ちは stale 判定 (90 秒) 未満に収める。
 LIVE_END_INSPECT_DELAYS_SECONDS = (60, 60, 60)
 RECORDER_CRASH_LIMIT = 5
+# 停止要求後、yt-dlp が結合処理を終えるのを待つ猶予。
+STOP_ESCALATE_SECONDS = 120
 
 
 def stopping(video_id: int) -> bool:
@@ -341,6 +343,7 @@ def _wait_for_attempt(db: Session, video: Video, target: Path, stem: str,
                       chat_offsets: dict[str, int]) -> bytes:
     last_heartbeat = time.monotonic()
     last_start_time_probe = 0.0
+    stop_requested_at: float | None = None
     while process.poll() is None:
         try:
             process.wait(timeout=1)
@@ -353,7 +356,15 @@ def _wait_for_attempt(db: Session, video: Video, target: Path, stem: str,
             stop_process(process)
             raise RuntimeError("recorder advisory lock lost during recording")
         if stopping(video.id):
-            request_process_interrupt(process)
+            stop_requested_at = stop_requested_at or time.monotonic()
+            if time.monotonic() - stop_requested_at >= STOP_ESCALATE_SECONDS:
+                # Windows では CTRL_BREAK が届かない・無視されることがある。猶予後はプロセスツリーを終了する
+                # (途中の .part は salvage_live_part で救出する)。
+                log.warning("yt-dlp ignored the stop request; terminating youtube_video_id=%s",
+                            video.youtube_video_id)
+                _terminate_process_tree(process)
+            else:
+                request_process_interrupt(process)
         elapsed = time.monotonic() - last_heartbeat
         if elapsed >= RECORDER_HEARTBEAT_SECONDS:
             try:
@@ -677,9 +688,18 @@ def running_counts() -> tuple[int, int]:
         return live, archive
 
 
+_dispatch_closed = False
+
+
+def open_dispatch() -> None:
+    global _dispatch_closed
+    with _lock:
+        _dispatch_closed = False
+
+
 def dispatch(video_id: int, profile: str, target: Callable[[int], None]) -> bool:
     with _lock:
-        if video_id in _threads:
+        if _dispatch_closed or video_id in _threads:
             return False
         _stopping.discard(video_id)
         def run() -> None:
@@ -721,7 +741,10 @@ def dispatch(video_id: int, profile: str, target: Callable[[int], None]) -> bool
 
 
 def shutdown(stop: Callable[[int], None], timeout: float) -> list[int]:
+    global _dispatch_closed
     with _lock:
+        # 停止対象を確定する前に新規の録画開始を止める (実行中の scheduler ジョブが後から dispatch しないように)。
+        _dispatch_closed = True
         active = list(_threads.items())
     for video_id, _ in active:
         mark_stopping(video_id, user_requested=False)

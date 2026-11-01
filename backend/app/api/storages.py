@@ -72,10 +72,21 @@ def storage_usage(db: Session = Depends(get_db)):
             "critical": free is not None and free < storage.minimum_free_bytes})
     return result
 
+def _guard_root_change(db: Session, item: Storage, new_root: str | None) -> None:
+    """Changing the folder would orphan recordings whose file_path points at the old root."""
+    if new_root is None or str(new_root).rstrip("\\/") == str(item.root_path).rstrip("\\/"):
+        return
+    count = db.scalar(select(func.count(Video.id)).where(Video.storage_id == item.id, Video.file_path.is_not(None)))
+    if count:
+        raise HTTPException(409, f"この保存先には録画が {count} 件あります。フォルダを変えると既存の録画を見失うため"
+                                 "変更できません。新しいフォルダは別の保存先として追加してください")
+
+
 @router.put("/storages/{storage_id}", response_model=StorageOut)
 def update_storage(storage_id: int, body: StorageIn, db: Session = Depends(get_db)):
     item = db.get(Storage, storage_id)
     if not item: raise HTTPException(404, "ストレージがありません")
+    _guard_root_change(db, item, body.root_path)
     for key, value in body.model_dump().items(): setattr(item, key, value)
     db.commit()
     db.refresh(item)
@@ -86,6 +97,7 @@ def patch_storage(storage_id: int, body: StoragePatch, db: Session = Depends(get
     item = db.get(Storage, storage_id)
     if not item: raise HTTPException(404, "ストレージがありません")
     values = body.model_dump(exclude_unset=True)
+    _guard_root_change(db, item, values.get("root_path"))
     for key, value in values.items(): setattr(item, key, value)
     if item.warning_free_bytes < item.minimum_free_bytes:
         raise HTTPException(422, "warning_free_bytes は minimum_free_bytes 以上にしてください")
