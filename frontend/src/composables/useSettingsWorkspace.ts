@@ -148,7 +148,11 @@ export function useSettingsWorkspace(state: WorkspaceState, load: LoadData, conf
   }
 
   async function testSummaryProvider() {
-    state.summaryFeedback.value = { tone: 'info', message: 'テスト用の文字起こしを送信しています…', fields: {} }
+    state.summaryFeedback.value = {
+      tone: 'info',
+      message: 'テスト用の文字起こしを送信しています…',
+      fields: {},
+    }
     try {
       const result = await request<{ model?: string; latency_ms?: number; sample?: string }>(
         '/settings/summary/test',

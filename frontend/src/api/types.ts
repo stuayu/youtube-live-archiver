@@ -143,6 +143,7 @@ export interface Video {
   transcription_error: string | null
   summary_status?: string
   summary_error?: string | null
+  summary_progress?: { done: number; total: number } | null
   storage_id: Id | null
   channel_name: string
   storage_name: string | null

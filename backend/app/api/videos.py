@@ -261,9 +261,21 @@ def videos(offset: int = 0, limit: int = 50, status: str | None = None,
             info = _ensure_media_info(video_id, directory, metadata)
             probes += 1
         media_info_by_id[video_id] = info if isinstance(info, dict) else None
+    # 要約中の動画だけ、区間要約の進み具合 (済み/全体) を 1 クエリで集める。
+    summarizing = [v.id for v in result_rows if v.summary_status in ("pending", "processing", "retry_wait")]
+    summary_progress = {}
+    if summarizing:
+        for job in db.scalars(select(ProcessingJob).where(ProcessingJob.video_id.in_(summarizing),
+                                                           ProcessingJob.kind == "SUMMARIZE_CHUNKS")).all():
+            payload = job.payload or {}
+            total = payload.get("total_chunks")
+            if isinstance(total, int) and total > 0:
+                summary_progress[job.video_id] = {"done": min(int(payload.get("next_chunk") or 0), total),
+                                                  "total": total}
     result = []
     for v in result_rows:
         item = VideoOut.model_validate(v).model_dump()
+        item["summary_progress"] = summary_progress.get(v.id)
         directory = Path(v.file_path) if v.file_path else None
         directory = directory if directory and directory.is_dir() else None
         item["has_file"] = directory is not None

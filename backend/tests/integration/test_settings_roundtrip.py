@@ -112,3 +112,39 @@ def test_video_list_reports_transcription_and_summary_status(client):
     row = next(item for item in rows if item["youtube_video_id"] == "pipeline001")
     assert row["transcription_status"] == "completed"
     assert row["summary_status"] == "processing"
+
+
+@pytest.mark.integration
+def test_interrupted_summary_resumes_and_list_shows_progress(client):
+    from app.db import SessionLocal
+    from app.models import Channel, ProcessingJob, Video, now
+    from app.services.processing import _recover_interrupted_summaries
+    with SessionLocal() as db:
+        channel = Channel(youtube_channel_id="UC" + "q" * 22, url="https://youtube.com/@resume", name="Resume")
+        db.add(channel)
+        db.flush()
+        video = Video(youtube_video_id="resume00001", channel_id=channel.id, title="t", status="ACTIVE",
+                      recording_finished_at=now(), transcription_status="completed", summary_status="processing")
+        db.add(video)
+        db.flush()
+        # A restart left this job in "processing" with no worker holding its lock.
+        db.add(ProcessingJob(video_id=video.id, kind="SUMMARIZE_CHUNKS", status="processing", attempts=1,
+                             payload={"model": "m", "chunks": [{}, {}, {}], "next_chunk": 3, "total_chunks": 19}))
+        db.commit()
+        video_pk = video.id
+    rows = client.get("/api/videos", params={"scope": "all"}).json()
+    row = next(item for item in rows if item["youtube_video_id"] == "resume00001")
+    assert row["summary_progress"] == {"done": 3, "total": 19}
+
+    _recover_interrupted_summaries()
+    with SessionLocal() as db:
+        job = db.scalar(select_job(video_pk))
+        assert job.status == "retry_wait" and job.next_attempt_at is not None
+        assert job.payload["next_chunk"] == 3  # resumes from the saved chunk
+        assert db.get(Video, video_pk).summary_status == "pending"
+
+
+def select_job(video_pk):
+    from sqlalchemy import select
+    from app.models import ProcessingJob
+    return select(ProcessingJob).where(ProcessingJob.video_id == video_pk)

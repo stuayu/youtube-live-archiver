@@ -235,6 +235,7 @@ def _process_summary(job_id):
         if job.kind == "SUMMARIZE_CHUNKS":
             chunks = split_transcript(segments, int(opts["summary_chunk_minutes"]))
             summaries = list(payload.get("chunks", [])); index = int(payload.get("next_chunk", 0))
+            payload["total_chunks"] = len(chunks); job.payload = {**payload}; db.commit()
             while index < len(chunks):
                 text = format_transcript(chunks[index])
                 result = request(text, validate_chunk, chunk_messages)
@@ -269,7 +270,31 @@ def _process_summary(job_id):
         log.warning("summary job %s failed (%s)", job_id, type(exc).__name__)
     finally: db.close()
 
+def _recover_interrupted_summaries() -> None:
+    """Requeue summary jobs left in "processing" by a restart (their worker lock is gone).
+
+    Chunk results are stored in the job payload, so the job resumes where it stopped."""
+    with SessionLocal() as db:
+        interrupted = db.scalars(select(ProcessingJob.id).where(
+            ProcessingJob.kind.in_(("SUMMARIZE_CHUNKS", "SUMMARIZE_FINAL")),
+            ProcessingJob.status == "processing")).all()
+    for job_id in interrupted:
+        with default_locks.acquire("processing-job", str(job_id)) as lease:
+            if not lease.acquired:
+                continue  # a live worker owns it
+            with SessionLocal() as db:
+                job = db.get(ProcessingJob, job_id)
+                if job and job.status == "processing":
+                    job.status, job.next_attempt_at, job.error = "retry_wait", now(), "worker interrupted; resuming"
+                    video = db.get(Video, job.video_id)
+                    if video and video.summary_status == "processing":
+                        video.summary_status = "pending"
+                    db.commit()
+                    log.info("resuming interrupted summary job %s for video %s", job_id, job.video_id)
+
+
 def summary_worker():
+    _recover_interrupted_summaries()
     db = SessionLocal()
     try:
         opts = effective_summary_settings(db)
@@ -330,5 +355,4 @@ def processing_worker():
                 _process_transcription(job_id)
     with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="processing") as pool:
         list(pool.map(run, due))
-    # Summary failures stay in the independent summary job state machine.
-    summary_worker()
+    # 要約は別ジョブ (summary-queue) で動かし、文字起こしの完了を待たせない。

@@ -114,6 +114,22 @@ describe('VideoRow', () => {
       [{ transcription_status: 'completed', summary_status: 'retry_wait' }, '要約再試行待ち'],
       [{ transcription_status: 'completed', summary_status: 'completed' }, '要約済み'],
       [{ transcription_status: 'completed', summary_status: 'disabled' }, '文字起こし済み'],
+      [
+        {
+          transcription_status: 'completed',
+          summary_status: 'processing',
+          summary_progress: { done: 3, total: 19 },
+        },
+        '要約中 3/19',
+      ],
+      [
+        {
+          transcription_status: 'completed',
+          summary_status: 'processing',
+          summary_progress: { done: 19, total: 19 },
+        },
+        '要約中（まとめ）',
+      ],
     ]
     for (const [patch, label] of cases) {
       const wrapper = mount(VideoRow, { props: { video: { ...finished, ...patch } } })
@@ -128,7 +144,9 @@ describe('VideoRow', () => {
 
   it('does not show processing state before a recording has finished', () => {
     for (const status of ['WAITING_LIVE', 'RECORDING', 'RECORDING_FAILED']) {
-      const wrapper = mount(VideoRow, { props: { video: { ...sample(status), transcription_status: 'pending' } } })
+      const wrapper = mount(VideoRow, {
+        props: { video: { ...sample(status), transcription_status: 'pending' } },
+      })
       expect(wrapper.text()).not.toContain('文字起こし')
       wrapper.unmount()
     }

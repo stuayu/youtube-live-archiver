@@ -259,6 +259,7 @@ class VideoOut(BaseModel):
     transcription_finished_at: UTCDateTime | None = None
     summary_status: str = "disabled"
     summary_error: str | None = None
+    summary_progress: dict | None = None
     storage_id: ApiId | None = None
     channel_name: str = ""
     storage_name: str | None = None

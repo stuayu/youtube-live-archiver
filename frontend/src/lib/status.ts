@@ -83,6 +83,7 @@ type ProcessingTarget = {
   transcription_error?: string | null
   summary_status?: string | null
   summary_error?: string | null
+  summary_progress?: { done: number; total: number } | null
 }
 
 /** One compact badge for the transcript → summary pipeline, or null when there is nothing to show. */
@@ -105,11 +106,27 @@ export function processingStatus(video: ProcessingTarget): StatusPresentation | 
     },
   }
   if (transcription !== 'completed') return transcriptionStates[transcription] ?? null
+  const progress = video.summary_progress
+  // 区間要約が全部済んだら最後のまとめ段階。
+  const step = progress
+    ? progress.done >= progress.total
+      ? '（まとめ）'
+      : ` ${progress.done}/${progress.total}`
+    : ''
+  const stepNote = progress ? `（区間要約 ${progress.done}/${progress.total} 済み）` : ''
   const summaryStates: Record<string, StatusPresentation> = {
-    pending: { label: '要約待ち', tone: 'neutral', description: '文字起こし済み。要約の順番を待っています' },
-    processing: { label: '要約中', tone: 'info', description: '外部プロバイダーで要約しています' },
+    pending: {
+      label: `要約待ち${step}`,
+      tone: 'neutral',
+      description: `文字起こし済み。要約の順番を待っています${stepNote}`,
+    },
+    processing: {
+      label: `要約中${step}`,
+      tone: 'info',
+      description: `外部プロバイダーで要約しています${stepNote}`,
+    },
     retry_wait: {
-      label: '要約再試行待ち',
+      label: `要約再試行待ち${step}`,
       tone: 'warning',
       description: video.summary_error || 'プロバイダーの制限などで、時間をおいて再試行します',
     },

@@ -44,6 +44,9 @@ def final_messages(summaries_json: str) -> list[dict]:
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": FINAL_INSTRUCTIONS + summaries_json}]
 
 
+REQUEST_TIMEOUT_SECONDS = 300
+
+
 class RateLimitError(RuntimeError):
     def __init__(self, retry_after):
         super().__init__("OpenRouter rate limited the request")
@@ -106,7 +109,8 @@ def call_openrouter(messages, *, api_key, model, base_url, attempts=5, opener=No
     open_fn = opener or urlopen
     for attempt in range(max(1, attempts)):
         try:
-            with open_fn(request, timeout=90) as response: raw = response.read()
+            # 大きなモデルは 30 分ぶんの文字起こしの要約に数分かかることがある。
+            with open_fn(request, timeout=REQUEST_TIMEOUT_SECONDS) as response: raw = response.read()
             payload=json.loads(raw); return repair_json(payload["choices"][0]["message"]["content"])
         except HTTPError as exc:
             delay = None

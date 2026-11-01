@@ -16,7 +16,7 @@ configure_logging()
 from .api import router
 from .workers import (channel_monitor, recorder_worker, retention_worker, protection_worker,
                       recovery_worker, integrity_worker, derived_cleanup_worker, upcoming_watch_worker)
-from .services.processing import processing_worker
+from .services.processing import processing_worker, summary_worker
 from .services.chat import chat_replay_worker
 
 scheduler = BackgroundScheduler(timezone="UTC")
@@ -34,7 +34,7 @@ _tool_cache: dict | None = None
 _job_intervals = {"channel-monitor": 5, "recorder": 5, "upcoming-watch": 15,
                   "retention": 900, "derived-cleanup": 86400, "protection": 21600,
                   "recording-recovery": 60, "recording-integrity": 1800,
-                  "processing-queue": 10, "chat-replay": 60, "yt-dlp-version": 86400}
+                  "processing-queue": 10, "summary-queue": 30, "chat-replay": 60, "yt-dlp-version": 86400}
 
 
 def _tracked_job(job_id: str, callback):
@@ -135,6 +135,8 @@ async def lifespan(app: FastAPI):
                           id="recording-integrity", max_instances=1, coalesce=True, misfire_grace_time=60)
         scheduler.add_job(_tracked_job("processing-queue", processing_worker), "interval", seconds=10,
                           id="processing-queue", max_instances=1, coalesce=True, misfire_grace_time=5)
+        scheduler.add_job(_tracked_job("summary-queue", summary_worker), "interval", seconds=30,
+                          id="summary-queue", max_instances=1, coalesce=True, misfire_grace_time=10)
         scheduler.add_job(_tracked_job("chat-replay", chat_replay_worker), "interval", seconds=60,
                           id="chat-replay", max_instances=1, coalesce=True, misfire_grace_time=10)
         from .services.ytdlp_update import check_version
