@@ -95,3 +95,20 @@ def test_env_key_takes_precedence_like_summary_jobs(client, monkeypatch):
     assert rejected.status_code == 422 and rejected.json()["code"] == "env_key_overrides"
     tested = client.post("/api/settings/summary/test", json={})
     assert tested.status_code == 200 and checked[-1]["api_key"] == "sk-or-env"
+
+
+@pytest.mark.integration
+def test_video_list_reports_transcription_and_summary_status(client):
+    from app.db import SessionLocal
+    from app.models import Channel, Video, now
+    with SessionLocal() as db:
+        channel = Channel(youtube_channel_id="UC" + "p" * 22, url="https://youtube.com/@pipeline", name="Pipeline")
+        db.add(channel)
+        db.flush()
+        db.add(Video(youtube_video_id="pipeline001", channel_id=channel.id, title="t", status="ACTIVE",
+                     recording_finished_at=now(), transcription_status="completed", summary_status="processing"))
+        db.commit()
+    rows = client.get("/api/videos", params={"scope": "all"}).json()
+    row = next(item for item in rows if item["youtube_video_id"] == "pipeline001")
+    assert row["transcription_status"] == "completed"
+    assert row["summary_status"] == "processing"

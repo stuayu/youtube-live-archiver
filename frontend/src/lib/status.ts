@@ -76,3 +76,51 @@ export function monitorErrorSummary(value: string | null | undefined): string {
   const code = value.split(':', 1)[0]?.trim() ?? ''
   return monitorErrors[code] ?? '監視情報の取得に失敗しました'
 }
+
+type ProcessingTarget = {
+  recording_finished_at?: string | null
+  transcription_status?: string | null
+  transcription_error?: string | null
+  summary_status?: string | null
+  summary_error?: string | null
+}
+
+/** One compact badge for the transcript → summary pipeline, or null when there is nothing to show. */
+export function processingStatus(video: ProcessingTarget): StatusPresentation | null {
+  // 状態の初期値が pending なので、録画が完了した動画にだけ出す（配信予定・録画中・失敗は対象外）。
+  if (!video.recording_finished_at) return null
+  const transcription = video.transcription_status || 'disabled'
+  const transcriptionStates: Record<string, StatusPresentation> = {
+    pending: { label: '文字起こし待ち', tone: 'neutral', description: '文字起こしの順番を待っています' },
+    processing: { label: '文字起こし中', tone: 'info', description: '文字起こしを実行しています' },
+    retry_wait: {
+      label: '文字起こし再試行待ち',
+      tone: 'warning',
+      description: video.transcription_error || '失敗したため、時間をおいて再試行します',
+    },
+    failed: {
+      label: '文字起こし失敗',
+      tone: 'danger',
+      description: video.transcription_error || '文字起こしに失敗しました',
+    },
+  }
+  if (transcription !== 'completed') return transcriptionStates[transcription] ?? null
+  const summaryStates: Record<string, StatusPresentation> = {
+    pending: { label: '要約待ち', tone: 'neutral', description: '文字起こし済み。要約の順番を待っています' },
+    processing: { label: '要約中', tone: 'info', description: '外部プロバイダーで要約しています' },
+    retry_wait: {
+      label: '要約再試行待ち',
+      tone: 'warning',
+      description: video.summary_error || 'プロバイダーの制限などで、時間をおいて再試行します',
+    },
+    failed: { label: '要約失敗', tone: 'danger', description: video.summary_error || '要約に失敗しました' },
+    completed: { label: '要約済み', tone: 'success', description: '文字起こしと要約が完了しています' },
+  }
+  return (
+    summaryStates[video.summary_status || 'disabled'] ?? {
+      label: '文字起こし済み',
+      tone: 'success',
+      description: '文字起こしが完了しています（要約は無効または未設定）',
+    }
+  )
+}

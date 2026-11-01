@@ -102,4 +102,35 @@ describe('VideoRow', () => {
     await wrapper.get('summary').trigger('click')
     expect(wrapper.text()).not.toContain('削除')
   })
+
+  it('shows where the transcript and summary pipeline is for finished recordings', () => {
+    const finished = { ...sample('ACTIVE'), recording_finished_at: '2026-11-01T00:00:00Z' }
+    const cases: Array<[Partial<Video>, string]> = [
+      [{ transcription_status: 'pending' }, '文字起こし待ち'],
+      [{ transcription_status: 'processing' }, '文字起こし中'],
+      [{ transcription_status: 'failed', transcription_error: 'CUDA error' }, '文字起こし失敗'],
+      [{ transcription_status: 'completed', summary_status: 'pending' }, '要約待ち'],
+      [{ transcription_status: 'completed', summary_status: 'processing' }, '要約中'],
+      [{ transcription_status: 'completed', summary_status: 'retry_wait' }, '要約再試行待ち'],
+      [{ transcription_status: 'completed', summary_status: 'completed' }, '要約済み'],
+      [{ transcription_status: 'completed', summary_status: 'disabled' }, '文字起こし済み'],
+    ]
+    for (const [patch, label] of cases) {
+      const wrapper = mount(VideoRow, { props: { video: { ...finished, ...patch } } })
+      expect(wrapper.text()).toContain(label)
+      wrapper.unmount()
+    }
+    const failed = mount(VideoRow, {
+      props: { video: { ...finished, transcription_status: 'failed', transcription_error: 'CUDA error' } },
+    })
+    expect(failed.get('[title="CUDA error"]').text()).toBe('文字起こし失敗')
+  })
+
+  it('does not show processing state before a recording has finished', () => {
+    for (const status of ['WAITING_LIVE', 'RECORDING', 'RECORDING_FAILED']) {
+      const wrapper = mount(VideoRow, { props: { video: { ...sample(status), transcription_status: 'pending' } } })
+      expect(wrapper.text()).not.toContain('文字起こし')
+      wrapper.unmount()
+    }
+  })
 })

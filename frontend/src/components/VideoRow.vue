@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Video } from '../api/types'
-import { videoStatus } from '../lib/status'
+import { processingStatus, videoStatus } from '../lib/status'
 import { formatBytes, formatDate } from '../lib/format'
 import { missingOpeningLabel } from '../lib/recording'
 import Icon from './ui/Icon.vue'
@@ -49,6 +49,13 @@ const menuActions = (video: Video) => ({
           missingOpeningLabel(video.recording_start_offset_ms || 0, video.live_from_start)
         }}</span>
         <span v-if="video.archive_backfill === 'queued'">アーカイブ補完中</span>
+        <span
+          v-if="processingStatus(video)"
+          class="badge"
+          :class="processingStatus(video)?.tone"
+          :title="processingStatus(video)?.description"
+          >{{ processingStatus(video)?.label }}</span
+        >
       </div>
     </div>
     <div class="actions">

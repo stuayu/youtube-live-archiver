@@ -141,6 +141,8 @@ export interface Video {
   live_status: string | null
   transcription_status: string
   transcription_error: string | null
+  summary_status?: string
+  summary_error?: string | null
   storage_id: Id | null
   channel_name: string
   storage_name: string | null
