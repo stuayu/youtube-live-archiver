@@ -90,6 +90,61 @@ const isAssembledSummary = computed(() => {
   return typeof data === 'object' && data !== null && 'assembled' in data && data.assembled === true
 })
 const assembledSummaryError = computed(() => (isAssembledSummary.value ? props.summary?.error : null))
+const summaryStatusLabels: Record<string, { label: string; tone: string }> = {
+  completed: { label: '要約済み', tone: 'success' },
+  processing: { label: '要約中', tone: 'info' },
+  pending: { label: '要約待ち', tone: '' },
+  retry_wait: { label: '再試行待ち', tone: 'warning' },
+  failed: { label: '要約失敗', tone: 'danger' },
+  disabled: { label: '要約は無効', tone: '' },
+}
+const summaryStatus = computed(
+  () => summaryStatusLabels[String(props.summary?.status || '')] ?? { label: '要約なし', tone: '' },
+)
+const summaryModel = computed(() => (typeof props.summary?.model === 'string' ? props.summary.model : ''))
+const summaryFailureMessage = computed(() => {
+  const status = props.summary?.status
+  const error = props.summary?.error
+  return (status === 'failed' || status === 'retry_wait') && typeof error === 'string' ? error : ''
+})
+function asNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+function asText(value: unknown) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+// LLM の出力は形が揺れるので、表示できる項目だけ拾う。生の JSON は出さない。
+const summaryView = computed(() => {
+  const data = props.summary?.summary
+  if (typeof data === 'string') {
+    const overview = data.trim()
+    return overview ? { overview, topics: [], highlights: [], keywords: [] } : null
+  }
+  if (typeof data !== 'object' || data === null) return null
+  const record = data as Record<string, unknown>
+  const list = (key: string) => (Array.isArray(record[key]) ? (record[key] as unknown[]) : [])
+  const objects = (key: string) =>
+    list(key).filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+  const topics = objects('topics')
+    .map((item) => ({
+      start: asNumber(item.start),
+      end: asNumber(item.end),
+      title: asText(item.title),
+      summary: asText(item.summary),
+    }))
+    .filter((item) => item.title || item.summary)
+  const highlights = [...objects('highlights'), ...objects('important_moments')]
+    .map((item) => ({
+      timestamp: asNumber(item.timestamp ?? item.start),
+      description: asText(item.description),
+    }))
+    .filter((item) => item.description)
+    .sort((a, b) => a.timestamp - b.timestamp)
+  const keywords = [...new Set(list('keywords').map(asText).filter(Boolean))]
+  const overview = asText(record.summary)
+  if (!overview && !topics.length && !highlights.length && !keywords.length) return null
+  return { overview, topics, highlights, keywords }
+})
 const allRows = computed(() => props.chat.messages)
 const replayPending = computed(() => ['queued', 'running'].includes(props.chat.replay?.state || ''))
 const activeTranscriptKey = computed(() => {
@@ -557,16 +612,64 @@ watch(
       </button>
     </section>
     <section v-else-if="tab === 'summary'" class="panel-content">
-      <p>{{ summary?.status || '要約なし' }}</p>
+      <div class="summary-meta">
+        <span class="badge" :class="summaryStatus.tone">{{ summaryStatus.label }}</span>
+        <span v-if="summaryModel" class="summary-model">{{ summaryModel }}</span>
+      </div>
+      <p v-if="summaryFailureMessage" class="summary-error">{{ summaryFailureMessage }}</p>
       <p v-if="isAssembledSummary" class="summary-assembled-note">
         AI による最終統合なし。チャンク要約を組み合わせて作成しました。
         <span v-if="assembledSummaryError">{{ assembledSummaryError }}</span>
       </p>
-      <pre v-if="summary?.summary" class="summary-text">{{ JSON.stringify(summary.summary, null, 2) }}</pre>
-      <button class="button secondary" :disabled="busy" @click="emit('runSummary', 'all')">要約を生成</button>
-      <button class="button secondary" :disabled="busy" @click="emit('runSummary', 'final')">
-        全体要約のみ再生成
-      </button>
+      <template v-if="summaryView">
+        <section v-if="summaryView.overview" class="summary-section">
+          <h3>概要</h3>
+          <p class="summary-text">{{ summaryView.overview }}</p>
+        </section>
+        <section v-if="summaryView.topics.length" class="summary-section">
+          <h3>トピック</h3>
+          <ol class="summary-topics">
+            <li v-for="topic in summaryView.topics" :key="`${topic.start}-${topic.title}`">
+              <button type="button" class="summary-topic" @click="emit('seek', topic.start)">
+                <span class="summary-time">
+                  {{ formatDuration(topic.start)
+                  }}<template v-if="topic.end > topic.start"> – {{ formatDuration(topic.end) }}</template>
+                </span>
+                <strong>{{ topic.title }}</strong>
+                <span v-if="topic.summary" class="summary-topic-body">{{ topic.summary }}</span>
+              </button>
+            </li>
+          </ol>
+        </section>
+        <section v-if="summaryView.highlights.length" class="summary-section">
+          <h3>見どころ</h3>
+          <ul class="summary-highlights">
+            <li v-for="item in summaryView.highlights" :key="`${item.timestamp}-${item.description}`">
+              <button type="button" class="summary-highlight" @click="emit('seek', item.timestamp)">
+                <span class="summary-time">{{ formatDuration(item.timestamp) }}</span>
+                <span>{{ item.description }}</span>
+              </button>
+            </li>
+          </ul>
+        </section>
+        <section v-if="summaryView.keywords.length" class="summary-section">
+          <h3>キーワード</h3>
+          <div class="summary-keywords">
+            <span v-for="keyword in summaryView.keywords" :key="keyword" class="chip">{{ keyword }}</span>
+          </div>
+        </section>
+      </template>
+      <p v-else-if="summary?.status !== 'processing' && summary?.status !== 'pending'" class="empty-state">
+        要約はまだありません
+      </p>
+      <div class="summary-actions">
+        <button class="button secondary" :disabled="busy" @click="emit('runSummary', 'all')">
+          要約を生成
+        </button>
+        <button class="button secondary" :disabled="busy" @click="emit('runSummary', 'final')">
+          全体要約のみ再生成
+        </button>
+      </div>
     </section>
     <section v-else-if="tab === 'timeline'" class="panel-content timeline-panel">
       <div class="timeline-mode-tabs" role="tablist" aria-label="タイムラインの表示">

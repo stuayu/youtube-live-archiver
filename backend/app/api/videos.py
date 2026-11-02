@@ -451,10 +451,24 @@ def request_transcription(video_id: int, db: Session = Depends(get_db)):
         raise HTTPException(409, "録画ファイルがありません")
     return {"ok": True, "job_id": str(job.id), "status": job.status}
 
+def _display_summary(data):
+    """Older rows may hold loosely shaped model output; return the same shape new rows have."""
+    from ..services.summarization import validate_final
+    if not isinstance(data, dict):
+        return None
+    try:
+        normalized = validate_final(dict(data))
+    except ValueError:
+        return None
+    if data.get("assembled") is True:
+        normalized["assembled"] = True
+    return normalized
+
 @router.get("/videos/{video_id}/summary")
 def get_summary(video_id: int, db: Session = Depends(get_db)):
     video = _video_or_404(db, video_id)
-    result = {"status": video.summary_status, "error": video.summary_error, "model": video.summary_model, "summary": video.summary_data}
+    result = {"status": video.summary_status, "error": video.summary_error, "model": video.summary_model,
+              "summary": _display_summary(video.summary_data)}
     db.commit()
     return result
 

@@ -11,37 +11,53 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 log = logging.getLogger(__name__)
-PROMPT_VERSION = "transcript-summary-v2"
+PROMPT_VERSION = "transcript-summary-v3"
 SYSTEM = ("Summarize only the supplied timestamped transcript. Do not infer or invent facts, "
-          "do not invent timestamps, and say when something is unknown. Return only valid JSON.")
+          "do not invent timestamps, and say when something is unknown. "
+          "Reply with exactly one JSON object and nothing else: no Markdown, no code fences, no commentary.")
 
-# The validators below are strict, so the model must be told the exact shape.
+# The output is shown directly in the UI, so the shape must never vary.
+OUTPUT_RULES = (
+    "Output rules (follow all of them):\n"
+    "- Reply with one JSON object only. Do not wrap it in ``` fences or add any text before or after it.\n"
+    "- Use exactly the keys shown above. Do not add, rename, or nest keys.\n"
+    "- Every timestamp (start, end, timestamp) is a number of seconds from the start of the stream, "
+    "such as 754. Never write \"00:12:34\" or other strings for a timestamp.\n"
+    "- \"summary\" values are plain prose sentences. Never put JSON, lists, bullet marks, Markdown, "
+    "or timestamps inside them.\n"
+    "- \"title\" is a short heading (under 40 characters). \"keywords\" are short words or names, "
+    "without # or other symbols.\n"
+    "- Use an empty list [] when there is nothing to report. Never use null.\n")
 CHUNK_INSTRUCTIONS = (
     "Summarize this part of a live stream transcript. Write in the same language as the transcript. "
-    "Timestamps are seconds from the start of the stream, taken from the [HH:MM:SS - HH:MM:SS] markers. "
+    "Timestamps are seconds from the start of the stream, taken from the [HH:MM:SS - HH:MM:SS] markers "
+    "(for example [00:12:34 - 00:12:40] starts at 754). "
     "Return a JSON object with exactly these keys:\n"
     '{"summary": string, '
     '"topics": [{"start": number, "end": number, "title": string, "summary": string}], '
     '"keywords": [string], '
     '"important_moments": [{"timestamp": number, "description": string}]}\n'
-    "Use empty lists when there is nothing to report.\n\nTranscript:\n")
+    + OUTPUT_RULES + "\nTranscript:\n")
 FINAL_INSTRUCTIONS = (
     "Combine these per-section summaries of one live stream into a final summary. Write in the same "
-    "language as the summaries. Timestamps are seconds from the start of the stream. "
+    "language as the summaries. Timestamps are seconds from the start of the stream; reuse the supplied "
+    "timestamps instead of inventing new ones. "
     "Return a JSON object with exactly these keys:\n"
     '{"summary": string, '
     '"topics": [{"start": number, "end": number, "title": string, "summary": string}], '
     '"highlights": [{"timestamp": number, "description": string}], '
     '"keywords": [string], '
     '"timeline": [{"start": number, "title": string}]}\n'
-    "Use empty lists when there is nothing to report.\n\nSection summaries (JSON):\n")
+    "\"summary\" is an overview of the whole stream in 3 to 8 sentences. List topics in time order "
+    "(at most 15), highlights for the most notable moments (at most 10), and at most 15 keywords.\n"
+    + OUTPUT_RULES + "\nSection summaries (JSON):\n")
 MERGE_INSTRUCTIONS = (
     "Combine these adjacent section summaries into one intermediate summary. Preserve the supplied timestamps, "
     "retain important facts and topic titles, and write in the same language as the summaries. "
-    "Do not invent facts or timestamps. Return only a JSON object with exactly these keys:\n"
+    "Do not invent facts or timestamps. Return a JSON object with exactly these keys:\n"
     '{"summary": string, "topics": [{"start": number, "end": number, "title": string, "summary": string}], '
     '"keywords": [string], "important_moments": [{"timestamp": number, "description": string}]}\n'
-    "Use empty lists when there is nothing to report.\n\nSection summaries (JSON):\n")
+    + OUTPUT_RULES + "\nSection summaries (JSON):\n")
 
 FINAL_INPUT_MAX_CHARS = 12_000
 FINAL_MERGE_GROUP_SIZE = 3
@@ -100,6 +116,11 @@ def serialize_final_chunks(chunks: list[dict]) -> str:
     return json.dumps(compact_final_chunks(chunks), ensure_ascii=False, separators=(",", ":"))
 
 
+def _clock(seconds: float) -> str:
+    total = max(0, int(seconds)); hours, rem = divmod(total, 3600); minutes, secs = divmod(rem, 60)
+    return f"{hours}:{minutes:02}:{secs:02}" if hours else f"{minutes}:{secs:02}"
+
+
 def assemble_final_from_chunks(chunks: list[dict]) -> dict:
     """Create a stable, usable final result without making another provider request."""
     summaries, topics, highlights = [], [], []
@@ -111,7 +132,8 @@ def assemble_final_from_chunks(chunks: list[dict]) -> dict:
         summary = str(chunk.get("summary") or "").strip()
         if summary:
             start, end = chunk.get("start"), chunk.get("end")
-            span = f"[{start:g}–{end:g}秒] " if isinstance(start, (int, float)) and isinstance(end, (int, float)) else ""
+            span = (f"[{_clock(start)}–{_clock(end)}] "
+                    if isinstance(start, (int, float)) and isinstance(end, (int, float)) else "")
             summaries.append(span + summary)
         for topic in chunk.get("topics") or []:
             if isinstance(topic, dict) and isinstance(topic.get("title"), str):
@@ -265,26 +287,134 @@ def format_transcript(rows):
         return f"{h:02}:{m:02}:{s:02}"
     return "\n\n".join(f"[{stamp(x['start'])} - {stamp(x['end'])}]\n{x['text']}" for x in rows)
 
-def validate_chunk(data):
-    if not isinstance(data, dict) or not isinstance(data.get("summary"), str): raise ValueError("invalid summary")
-    for key in ("topics", "keywords", "important_moments"):
-        if not isinstance(data.get(key), list): raise ValueError(f"invalid {key}")
-    for topic in data["topics"]:
-        if not isinstance(topic, dict) or not isinstance(topic.get("start"), (int,float)) or not isinstance(topic.get("end"), (int,float)) or topic["end"] < topic["start"] or not isinstance(topic.get("title"), str) or not isinstance(topic.get("summary"), str): raise ValueError("invalid topic")
-    for moment in data["important_moments"]:
-        if not isinstance(moment, dict) or not isinstance(moment.get("timestamp"), (int,float)) or not isinstance(moment.get("description"), str): raise ValueError("invalid moment")
-    if not all(isinstance(k, str) for k in data["keywords"]): raise ValueError("invalid keyword")
+TOPIC_LIMIT = 30
+MOMENT_LIMIT = 20
+KEYWORD_LIMIT = 20
+
+
+def _seconds(value):
+    """Accept 754, 754.0, "754" or "00:12:34" and return seconds, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value >= 0 and value == value and value != float("inf") else None
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            return float(text)
+        match = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:\.\d+)?", text)
+        if match:
+            hours, minutes, secs = (int(part or 0) for part in match.groups())
+            return float(hours * 3600 + minutes * 60 + secs)
+    return None
+
+
+def _plain_text(value, limit=None):
+    """Return clean prose; unwrap JSON or code fences a model put inside a text field."""
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", value.strip()).strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            inner = json.loads(text)
+        except ValueError:
+            inner = None
+        if isinstance(inner, dict):
+            text = _plain_text(inner.get("summary") or inner.get("description") or inner.get("title") or "")
+    if limit and len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
+def _items(value):
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _unwrap(data):
+    """Some models wrap the object, e.g. {"result": {...}}; take the inner object."""
+    if isinstance(data, dict) and "summary" not in data and len(data) == 1:
+        inner = next(iter(data.values()))
+        if isinstance(inner, dict):
+            return inner
     return data
 
+
+def _normalize_topics(value):
+    topics = []
+    for item in _items(value):
+        start = _seconds(item.get("start", item.get("timestamp")))
+        title = _plain_text(item.get("title") or item.get("topic"), 160)
+        summary = _plain_text(item.get("summary") or item.get("description"), 1_000)
+        if start is None or not (title or summary):
+            continue
+        end = _seconds(item.get("end"))
+        end = start if end is None or end < start else end
+        topics.append({"start": start, "end": end, "title": title or summary[:40], "summary": summary})
+    topics.sort(key=lambda topic: topic["start"])
+    return topics[:TOPIC_LIMIT]
+
+
+def _normalize_moments(value):
+    moments = []
+    for item in _items(value):
+        timestamp = _seconds(item.get("timestamp", item.get("start")))
+        description = _plain_text(item.get("description") or item.get("title") or item.get("summary"), 400)
+        if timestamp is not None and description:
+            moments.append({"timestamp": timestamp, "description": description})
+    moments.sort(key=lambda moment: moment["timestamp"])
+    return moments[:MOMENT_LIMIT]
+
+
+def _normalize_keywords(value):
+    if isinstance(value, str):
+        value = re.split(r"[,、，]", value)
+    keywords = []
+    for item in value if isinstance(value, list) else []:
+        word = _plain_text(item, 60).lstrip("#＃").strip() if isinstance(item, str) else ""
+        if word and word not in keywords:
+            keywords.append(word)
+    return keywords[:KEYWORD_LIMIT]
+
+
+def validate_chunk(data):
+    """Normalize a section summary to the exact shape the pipeline and UI expect."""
+    data = _unwrap(data)
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str):
+        raise ValueError("schema missing key 'summary'")
+    for key in ("topics", "keywords", "important_moments"):
+        if data.get(key) is not None and not isinstance(data[key], (list, str) if key == "keywords" else list):
+            raise ValueError(f"schema invalid key '{key}'")
+    return {
+        "summary": _plain_text(data["summary"]),
+        "topics": _normalize_topics(data.get("topics")),
+        "keywords": _normalize_keywords(data.get("keywords")),
+        "important_moments": _normalize_moments(data.get("important_moments")),
+    }
+
+
 def validate_final(data):
-    if not isinstance(data, dict) or not isinstance(data.get("summary"), str) or not data["summary"].strip():
+    """Normalize the final summary; anything the UI cannot show is dropped, not passed through."""
+    data = _unwrap(data)
+    summary = _plain_text(data.get("summary")) if isinstance(data, dict) else ""
+    if not summary:
         raise ValueError("schema missing key 'summary' or summary text is empty")
     for key in ("topics", "highlights", "keywords", "timeline"):
-        if data.get(key) is None:
-            data[key] = []
-        elif not isinstance(data[key], list):
+        if data.get(key) is not None and not isinstance(data[key], (list, str) if key == "keywords" else list):
             raise ValueError(f"schema invalid key '{key}'")
-    return data
+    topics = _normalize_topics(data.get("topics"))
+    highlights = _normalize_moments(data.get("highlights") if data.get("highlights") is not None
+                                    else data.get("important_moments"))
+    timeline = []
+    for item in _items(data.get("timeline")):
+        start = _seconds(item.get("start", item.get("timestamp")))
+        title = _plain_text(item.get("title") or item.get("description"), 160)
+        if start is not None and title:
+            timeline.append({"start": start, "title": title})
+    timeline.sort(key=lambda row: row["start"])
+    if not timeline:
+        timeline = [{"start": topic["start"], "title": topic["title"]} for topic in topics]
+    return {"summary": summary, "topics": topics, "highlights": highlights,
+            "keywords": _normalize_keywords(data.get("keywords")), "timeline": timeline[:TOPIC_LIMIT]}
 
 def repair_json(text):
     try: return json.loads(text)

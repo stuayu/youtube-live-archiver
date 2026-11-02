@@ -20,9 +20,40 @@ def test_chunks_preserve_utterances_and_have_timestamps():
 def test_json_validation_and_repair():
     valid = {"summary":"s", "topics":[{"start":1,"end":2,"title":"t","summary":"x"}], "keywords":[], "important_moments":[]}
     assert summarization.validate_chunk(summarization.repair_json("prefix " + json.dumps(valid) + " trailing")) == valid
-    try: summarization.validate_chunk({"summary":"bad"})
-    except ValueError: pass
-    else: assert False, "invalid schema accepted"
+    assert summarization.validate_chunk({"summary": "only"}) == {
+        "summary": "only", "topics": [], "keywords": [], "important_moments": []}
+    for bad in ({"topics": []}, ["summary"], {"summary": "s", "topics": "nope"}):
+        with pytest.raises(ValueError):
+            summarization.validate_chunk(bad)
+
+
+def test_final_normalizes_loose_model_output_to_the_ui_shape():
+    raw = {"result": {
+        "summary": "```json\n{\"summary\": \"全体の概要。\"}\n```",
+        "topics": [{"start": "00:12:34", "end": "700", "title": "雑談", "summary": "近況", "extra": 1},
+                   {"start": 5, "end": 60, "title": "挨拶", "summary": ""},
+                   {"start": "unknown", "title": "捨てる"}, "not a topic"],
+        "important_moments": [{"timestamp": "1:05", "description": "告知"}],
+        "keywords": "朝活、#ラジオ, 朝活",
+        "timeline": None,
+        "unexpected": {"x": 1},
+    }}
+    result = summarization.validate_final(raw)
+    assert result == {
+        "summary": "全体の概要。",
+        "topics": [{"start": 5.0, "end": 60.0, "title": "挨拶", "summary": ""},
+                   {"start": 754.0, "end": 754.0, "title": "雑談", "summary": "近況"}],
+        "highlights": [{"timestamp": 65.0, "description": "告知"}],
+        "keywords": ["朝活", "ラジオ"],
+        "timeline": [{"start": 5.0, "title": "挨拶"}, {"start": 754.0, "title": "雑談"}],
+    }
+
+
+def test_prompts_spell_out_the_strict_output_rules():
+    for messages in (summarization.chunk_messages("x"), summarization.final_messages("[]"),
+                     summarization.intermediate_messages("[]")):
+        prompt = messages[1]["content"]
+        assert "Never write \"00:12:34\"" in prompt and "code fences" in messages[0]["content"]
 
 def test_final_validation_defaults_missing_and_null_lists():
     result = summarization.validate_final({"summary": "s", "topics": None, "highlights": [], "keywords": []})
@@ -433,3 +464,11 @@ def test_summary_survives_cache_write_failure(monkeypatch, tmp_path):
     check=factory(); job=check.get(ProcessingJob,jid)
     assert job.status == "completed" and job.payload["next_chunk"] == 1 and job.payload["total_chunks"] == 1
     check.close()
+
+
+def test_display_summary_normalizes_stored_rows_and_keeps_assembled_flag():
+    from app.api.videos import _display_summary
+    assert _display_summary(None) is None
+    assert _display_summary({"topics": []}) is None
+    shown = _display_summary({"summary": "s", "topics": [{"start": "0:30", "title": "t"}], "assembled": True})
+    assert shown["assembled"] is True and shown["topics"][0]["start"] == 30.0 and shown["highlights"] == []

@@ -126,6 +126,51 @@ describe('PlayerPanels chat rendering', () => {
     expect(wrapper.text()).toContain('AI による最終統合なし')
   })
 
+  it('renders a structured summary without raw JSON and seeks from topics', async () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        tab: 'summary',
+        video,
+        chat: emptyChat,
+        transcript,
+        timeline: [],
+        summary: {
+          status: 'completed',
+          model: 'test-model',
+          summary: {
+            summary: '配信の概要です。',
+            topics: [{ start: 65, end: 130, title: 'オープニング', summary: '挨拶をした' }],
+            highlights: [{ timestamp: 90, description: '告知' }],
+            keywords: ['朝活', '朝活', 'ラジオ'],
+            timeline: [{ start: 65, title: 'オープニング' }],
+          },
+        },
+        error: '',
+        busy: false,
+        videoId: video.id,
+        chatPage: 0,
+        transcriptPage: 0,
+        chatQuery: '',
+        chatKind: '',
+        includeDeleted: true,
+        transcriptQuery: '',
+        playbackSeconds: 0,
+        following: true,
+      },
+    })
+
+    const text = wrapper.text()
+    expect(text).toContain('要約済み')
+    expect(text).toContain('配信の概要です。')
+    expect(text).toContain('オープニング')
+    expect(text).toContain('告知')
+    expect(wrapper.findAll('.summary-keywords .chip')).toHaveLength(2)
+    expect(text).not.toContain('"summary"')
+    expect(text).not.toContain('{')
+    await wrapper.find('.summary-topic').trigger('click')
+    expect(wrapper.emitted('seek')?.[0]).toEqual([65])
+  })
+
   it('highlights the transcript segment at playback time and lets the user turn sync off', async () => {
     const wrapper = mount(PlayerPanels, {
       props: {
