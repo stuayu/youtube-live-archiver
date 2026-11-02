@@ -98,8 +98,10 @@ const summaryStatusLabels: Record<string, { label: string; tone: string }> = {
   failed: { label: '要約失敗', tone: 'danger' },
   disabled: { label: '要約は無効', tone: '' },
 }
-const summaryStatus = computed(
-  () => summaryStatusLabels[String(props.summary?.status || '')] ?? { label: '要約なし', tone: '' },
+const summaryStatus = computed(() =>
+  props.summary === null
+    ? { label: '読み込み中…', tone: '' }
+    : (summaryStatusLabels[String(props.summary.status || '')] ?? { label: '要約なし', tone: '' }),
 )
 const summaryModel = computed(() => (typeof props.summary?.model === 'string' ? props.summary.model : ''))
 const summaryFailureMessage = computed(() => {
@@ -659,7 +661,10 @@ watch(
           </div>
         </section>
       </template>
-      <p v-else-if="summary?.status !== 'processing' && summary?.status !== 'pending'" class="empty-state">
+      <p
+        v-else-if="summary !== null && summary.status !== 'processing' && summary.status !== 'pending'"
+        class="empty-state"
+      >
         要約はまだありません
       </p>
       <div class="summary-actions">
