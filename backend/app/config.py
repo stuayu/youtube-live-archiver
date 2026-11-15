@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
     auto_migrate: bool = True
     database_connect_retry_seconds: float = 30
+    # 組み込み PostgreSQL (Windows) の起動待ち秒数。異常終了後のクラッシュ回復を待ち切れるよう長めにする。
+    embedded_postgres_start_timeout_seconds: float = 300
+    # 組み込み PostgreSQL (Windows) の bin ディレクトリ。空なら pgserver 同梱版を使う。
+    # 同じメジャー版の新しいマイナー版（バグ修正版）へ差し替えるときに指定する。
+    embedded_postgres_bin_dir: str = ""
     yt_dlp_path: str = "yt-dlp"
     youtube_ip_mode: Literal["prefer_ipv6", "ipv6", "ipv4", "auto"] = "prefer_ipv6"
     yt_dlp_auto_update: bool = True
