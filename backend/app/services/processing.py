@@ -29,7 +29,8 @@ TRANSCRIPTION_DEFAULTS = {
 }
 SUMMARY_DEFAULTS = {"summary_enabled": settings.summary_enabled, "openrouter_api_key": "", "openrouter_api_key_set": bool(settings.openrouter_api_key),
     "openrouter_model": settings.openrouter_model, "openrouter_base_url": settings.openrouter_base_url,
-    "summary_chunk_minutes": settings.summary_chunk_minutes, "openrouter_max_concurrency": settings.openrouter_max_concurrency,
+    "summary_chunk_minutes": settings.summary_chunk_minutes, "summary_language": settings.summary_language,
+    "openrouter_max_concurrency": settings.openrouter_max_concurrency,
     "openrouter_max_attempts": settings.openrouter_max_attempts}
 
 
@@ -275,8 +276,11 @@ def _process_summary(job_id):
         segments = [{"start": r.start, "end": r.end, "text": r.text} for r in rows]
         model = (job.payload or {}).get("model", opts["openrouter_model"])
         max_attempts = max(1, int(opts["openrouter_max_attempts"]))
+        payload = dict(job.payload or {})
+        # 再開時やFINALで言語が混ざらないよう、ジョブ開始時の言語を使い続ける。
+        language = str(payload.get("language") or opts["summary_language"] or "auto")
         def request(text, validator, build_messages, *, cache_text=None):
-            key = cache_key(cache_text if cache_text is not None else text, model)
+            key = cache_key(cache_text if cache_text is not None else text, model, language)
             cached = db.get(SummaryCache, key)
             if cached:
                 return validator(cached.result)
@@ -284,7 +288,7 @@ def _process_summary(job_id):
             db.commit()
             # commit() returns the checked-out connection before HTTP I/O; the
             # cache write below checks out a fresh connection after the response.
-            result = validator(call_openrouter(build_messages(text), api_key=api_key, model=model,
+            result = validator(call_openrouter(build_messages(text, language), api_key=api_key, model=model,
                 base_url=opts["openrouter_base_url"], attempts=1))
             try:
                 # Cache is optional; a failed write must not discard the valid result.
@@ -293,13 +297,12 @@ def _process_summary(job_id):
                 db.rollback()
                 log.warning("summary cache write failed for video %s", video_id)
             return result
-        payload = dict(job.payload or {})
         if job_kind == "SUMMARIZE_CHUNKS":
             # 再開時に区間がずれないよう、開始時のチャンク長を使い続ける。
             chunk_minutes = int(payload.get("chunk_minutes") or opts["summary_chunk_minutes"])
             chunks = split_transcript(segments, chunk_minutes)
             summaries = list(payload.get("chunks", [])); index = int(payload.get("next_chunk", 0))
-            payload.update(total_chunks=len(chunks), chunk_minutes=chunk_minutes); job.payload = {**payload}; db.commit()
+            payload.update(total_chunks=len(chunks), chunk_minutes=chunk_minutes, language=language); job.payload = {**payload}; db.commit()
             while index < len(chunks):
                 text = format_transcript(chunks[index])
                 result = request(text, validate_chunk, chunk_messages)
@@ -317,8 +320,8 @@ def _process_summary(job_id):
                 db.commit()
             final = db.scalar(select(ProcessingJob).where(ProcessingJob.video_id == video_id, ProcessingJob.kind == "SUMMARIZE_FINAL"))
             if not final:
-                final = ProcessingJob(video_id=video_id, kind="SUMMARIZE_FINAL", status="pending", attempts=0, payload={"model": model, "chunks": summaries}); db.add(final)
-            else: final.status, final.payload = "pending", {"model": model, "chunks": summaries}
+                final = ProcessingJob(video_id=video_id, kind="SUMMARIZE_FINAL", status="pending", attempts=0, payload={"model": model, "chunks": summaries, "language": language}); db.add(final)
+            else: final.status, final.payload = "pending", {"model": model, "chunks": summaries, "language": language}
             job.status, job.error, job.attempts, job.next_attempt_at, job.finished_at = "completed", None, 0, None, now()
             video.summary_status, video.summary_error = "pending", None
             db.commit(); return

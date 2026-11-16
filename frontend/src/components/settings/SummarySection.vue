@@ -14,6 +14,9 @@ const busy = computed(() => ctx.summaryFeedback?.tone === 'info')
       API キー・モデル・API ベース URL を変えて保存すると、短いテスト用の文字起こしをプロバイダーへ送り、
       要約できることを確かめてから保存します。
     </p>
+    <p class="hint">
+      要約の言語は、これから作る要約に使われます。作成済みの要約は、動画の要約タブで「要約を生成」を押すと新しい言語で作り直されます。
+    </p>
     <div class="form-grid">
       <label class="check-field"
         ><input v-model="ctx.summarySettings.summary_enabled" type="checkbox" />有効</label
@@ -55,6 +58,15 @@ const busy = computed(() => ctx.summaryFeedback?.tone === 'info')
           <option :value="20">20</option>
           <option :value="30">30</option>
           <option :value="60">60</option>
+        </select></label
+      >
+      <label class="field"
+        >要約の言語<select v-model="ctx.summarySettings.summary_language">
+          <option value="auto">自動（文字起こしと同じ言語）</option>
+          <option value="ja">日本語</option>
+          <option value="en">English</option>
+          <option value="zh">中文（简体）</option>
+          <option value="ko">한국어</option>
         </select></label
       >
     </div>

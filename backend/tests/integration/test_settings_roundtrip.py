@@ -148,3 +148,15 @@ def select_job(video_pk):
     from sqlalchemy import select
     from app.models import ProcessingJob
     return select(ProcessingJob).where(ProcessingJob.video_id == video_pk)
+
+
+@pytest.mark.integration
+def test_summary_language_roundtrips_without_calling_provider(client, monkeypatch):
+    from app.services import summarization
+    monkeypatch.setattr(summarization, "check_provider",
+                        lambda **_target: pytest.fail("provider must not be called"))
+    assert client.get("/api/settings/summary").json()["summary_language"] == "auto"
+    response = client.put("/api/settings/summary", json={"summary_language": "ja"})
+    assert response.status_code == 200, response.text
+    assert client.get("/api/settings/summary").json()["summary_language"] == "ja"
+    assert client.put("/api/settings/summary", json={"summary_language": "xx"}).status_code == 422

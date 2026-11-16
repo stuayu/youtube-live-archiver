@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     summary_enabled: bool = False
     summary_chunk_minutes: int = 30
+    # 要約の出力言語（auto / ja / en / zh / ko）。auto は文字起こしと同じ言語。
+    summary_language: str = "auto"
     openrouter_max_concurrency: int = 1
     openrouter_max_attempts: int = 5
 

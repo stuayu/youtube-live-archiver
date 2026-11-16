@@ -29,7 +29,7 @@ OUTPUT_RULES = (
     "without # or other symbols.\n"
     "- Use an empty list [] when there is nothing to report. Never use null.\n")
 CHUNK_INSTRUCTIONS = (
-    "Summarize this part of a live stream transcript. Write in the same language as the transcript. "
+    "Summarize this part of a live stream transcript. {language_rule} "
     "Timestamps are seconds from the start of the stream, taken from the [HH:MM:SS - HH:MM:SS] markers "
     "(for example [00:12:34 - 00:12:40] starts at 754). "
     "Return a JSON object with exactly these keys:\n"
@@ -39,8 +39,8 @@ CHUNK_INSTRUCTIONS = (
     '"important_moments": [{"timestamp": number, "description": string}]}\n'
     + OUTPUT_RULES + "\nTranscript:\n")
 FINAL_INSTRUCTIONS = (
-    "Combine these per-section summaries of one live stream into a final summary. Write in the same "
-    "language as the summaries. Timestamps are seconds from the start of the stream; reuse the supplied "
+    "Combine these per-section summaries of one live stream into a final summary. {language_rule} "
+    "Timestamps are seconds from the start of the stream; reuse the supplied "
     "timestamps instead of inventing new ones. "
     "Return a JSON object with exactly these keys:\n"
     '{"summary": string, '
@@ -52,8 +52,8 @@ FINAL_INSTRUCTIONS = (
     "(at most 15), highlights for the most notable moments (at most 10), and at most 15 keywords.\n"
     + OUTPUT_RULES + "\nSection summaries (JSON):\n")
 MERGE_INSTRUCTIONS = (
-    "Combine these adjacent section summaries into one intermediate summary. Preserve the supplied timestamps, "
-    "retain important facts and topic titles, and write in the same language as the summaries. "
+    "Combine these adjacent section summaries into one intermediate summary. Preserve the supplied timestamps "
+    "and retain important facts and topic titles. {language_rule} "
     "Do not invent facts or timestamps. Return a JSON object with exactly these keys:\n"
     '{"summary": string, "topics": [{"start": number, "end": number, "title": string, "summary": string}], '
     '"keywords": [string], "important_moments": [{"timestamp": number, "description": string}]}\n'
@@ -66,16 +66,33 @@ FINAL_TOPIC_LIMIT = 8
 FINAL_MOMENT_LIMIT = 8
 
 
-def chunk_messages(transcript_text: str) -> list[dict]:
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": CHUNK_INSTRUCTIONS + transcript_text}]
+# 要約の出力言語。"auto" は入力（文字起こし）と同じ言語で書かせる。
+SUMMARY_LANGUAGES = {"auto": None, "ja": "Japanese", "en": "English", "zh": "Simplified Chinese", "ko": "Korean"}
 
 
-def final_messages(summaries_json: str) -> list[dict]:
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": FINAL_INSTRUCTIONS + summaries_json}]
+def _language_rule(language: str, source: str) -> str:
+    name = SUMMARY_LANGUAGES.get(language or "auto")
+    if not name:
+        return f"Write in the same language as the {source}."
+    return (f"Write every text value (summary, title, description, keywords) in {name}, "
+            f"even when the {source} is in another language.")
 
 
-def intermediate_messages(summaries_json: str) -> list[dict]:
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": MERGE_INSTRUCTIONS + summaries_json}]
+def _messages(instructions: str, body: str, language: str, source: str) -> list[dict]:
+    content = instructions.replace("{language_rule}", _language_rule(language, source)) + body
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}]
+
+
+def chunk_messages(transcript_text: str, language: str = "auto") -> list[dict]:
+    return _messages(CHUNK_INSTRUCTIONS, transcript_text, language, "transcript")
+
+
+def final_messages(summaries_json: str, language: str = "auto") -> list[dict]:
+    return _messages(FINAL_INSTRUCTIONS, summaries_json, language, "summaries")
+
+
+def intermediate_messages(summaries_json: str, language: str = "auto") -> list[dict]:
+    return _messages(MERGE_INSTRUCTIONS, summaries_json, language, "summaries")
 
 
 def compact_final_chunks(chunks: list[dict]) -> list[dict]:
@@ -454,8 +471,10 @@ def call_openrouter(messages, *, api_key, model, base_url, attempts=5, opener=No
             if attempt + 1 >= max(1, attempts): raise
             sleeper(min(86400, 60 * (2 ** attempt)))
 
-def cache_key(transcript, model):
-    return hashlib.sha256((transcript + "\0" + PROMPT_VERSION + "\0" + model).encode()).hexdigest()
+def cache_key(transcript, model, language="auto"):
+    # "auto" は従来どおりのキーにして、既存のキャッシュを使い続けられるようにする。
+    suffix = "" if (language or "auto") == "auto" else "\0" + language
+    return hashlib.sha256((transcript + "\0" + PROMPT_VERSION + "\0" + model + suffix).encode()).hexdigest()
 
 
 class ProviderCheckError(RuntimeError):

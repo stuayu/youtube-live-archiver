@@ -507,6 +507,7 @@ class TranscriptionSettingsIn(StrictInput):
 class SummarySettingsIn(StrictInput):
     summary_enabled: bool | None = None
     summary_chunk_minutes: int | None = None
+    summary_language: Literal["auto", "ja", "en", "zh", "ko"] | None = None
     openrouter_max_concurrency: int | None = Field(default=None, ge=1, le=4)
     openrouter_max_attempts: int | None = Field(default=None, ge=1, le=10)
     openrouter_model: str | None = Field(default=None, max_length=500)
