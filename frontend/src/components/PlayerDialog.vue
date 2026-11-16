@@ -5,6 +5,7 @@ import type { ChatPage, Transcript, Video } from '../api/types'
 import { installDPlayerSettings } from '../lib/dplayerSettings'
 import type { DPlayerSettingsHandle } from '../lib/dplayerSettings'
 import { readDanmakuPreferences, writeDanmakuPreferences } from '../lib/playerSettings'
+import { loadPanelsIndependently, panel } from '../lib/panelLoading'
 import { chatReplayRange, danmakuRange } from '../lib/playerPlayback'
 import { choosePlayback, type PlaybackRendition } from '../lib/playback'
 import PlayerHeader from './player/PlayerHeader.vue'
@@ -230,23 +231,28 @@ watch(syncTranscript, (enabled) => {
   if (!enabled) transcriptSyncError.value = ''
 })
 async function loadPanels() {
-  const [chatResult, transcriptResult, timelineResult, summaryResult] = await Promise.allSettled([
-    loadChat(),
-    loadTranscript(),
-    request<{
-      items: Array<{
-        start: number
-        title: string
-        time: string
-      }>
-    }>(`/videos/${props.video.id}/timeline`),
-    request<Record<string, unknown>>(`/videos/${props.video.id}/summary`),
-  ])
-  if (timelineResult.status === 'fulfilled') timeline.value = timelineResult.value.items
-  if (summaryResult.status === 'fulfilled') summary.value = summaryResult.value
-  for (const result of [chatResult, transcriptResult])
-    if (result.status === 'rejected')
-      error.value = result.reason instanceof Error ? result.reason.message : '情報を取得できません'
+  await loadPanelsIndependently(
+    [
+      panel(() => loadChat(), undefined, true),
+      panel(() => loadTranscript(), undefined, true),
+      panel(
+        () =>
+          request<{
+            items: Array<{
+              start: number
+              title: string
+              time: string
+            }>
+          }>(`/videos/${props.video.id}/timeline`),
+        (result) => (timeline.value = result.items),
+      ),
+      panel(
+        () => request<Record<string, unknown>>(`/videos/${props.video.id}/summary`),
+        (result) => (summary.value = result),
+      ),
+    ],
+    (message) => (error.value = message),
+  )
 }
 function followLive() {
   const el = videoEl.value

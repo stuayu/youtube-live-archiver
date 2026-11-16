@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, BigInteger, String, Text, Float, JSON, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, BigInteger, String, Text, Float, JSON, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
@@ -198,6 +198,9 @@ class SummaryCache(Base):
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
+    # 動画単位の min/max(offset_ms) や offset_ms 順の取得で、offset_ms 単独索引を
+    # 全件走査しないよう複合索引を持つ。
+    __table_args__ = (Index("ix_chat_messages_video_offset", "video_id", "offset_ms"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     video_id: Mapped[int] = mapped_column(ForeignKey("videos.id", ondelete="CASCADE"), index=True)
     message_id: Mapped[str] = mapped_column(String(200), unique=True, index=True)
