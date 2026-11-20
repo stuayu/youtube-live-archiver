@@ -61,3 +61,42 @@ export function gbToBytes(value: number | '' | null): number | null {
 export function bytesToGb(value: number | null): number | '' {
   return value === null ? '' : Number((value / 1024 ** 3).toFixed(2))
 }
+const codecNames: Record<string, string> = {
+  hevc: 'HEVC (H.265)',
+  h264: 'H.264 (AVC)',
+  av1: 'AV1',
+  vp9: 'VP9',
+  vp8: 'VP8',
+  aac: 'AAC',
+  opus: 'Opus',
+  mp3: 'MP3',
+  vorbis: 'Vorbis',
+}
+const containerNames: Record<string, string> = {
+  matroska: 'MKV',
+  mp4: 'MP4',
+  mov: 'MP4',
+  webm: 'WebM',
+  mpegts: 'TS',
+}
+/** 録画の形式。HEVC / AV1 などで再生互換が変わるため、コーデックを人が読める名前で出す。 */
+export function formatMedia(
+  media:
+    | {
+        container: string
+        video_codec: string | null
+        audio_codec: string | null
+        width: number | null
+        height: number | null
+      }
+    | null
+    | undefined,
+): string {
+  if (!media) return '不明（解析待ち）'
+  const codecs = [media.video_codec, media.audio_codec]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => codecNames[value.toLowerCase()] ?? value.toUpperCase())
+  const parts = [codecs.join(' / '), containerNames[media.container] ?? media.container.toUpperCase()]
+  if (media.width && media.height) parts.push(`${media.width}×${media.height}`)
+  return parts.filter(Boolean).join(' · ')
+}

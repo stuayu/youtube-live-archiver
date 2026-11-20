@@ -646,3 +646,81 @@ describe('PlayerPanels chat rendering', () => {
     expect(wrapper.get('.superchat-totals').text()).toContain('$5.00')
   })
 })
+
+describe('PlayerPanels edit locations and format', () => {
+  const base = {
+    chat: emptyChat,
+    transcript,
+    timeline: [],
+    summary: null,
+    error: '',
+    busy: false,
+    videoId: video.id,
+    chatPage: 0,
+    transcriptPage: 0,
+    chatQuery: '',
+    chatKind: '',
+    includeDeleted: true,
+    transcriptQuery: '',
+    playbackSeconds: 0,
+    following: true,
+  }
+
+  it('opens the edit locations of an archive protected for a YouTube edit', async () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        ...base,
+        tab: 'timeline',
+        video: {
+          ...video,
+          status: 'PROTECTED',
+          protected: true,
+          protection_reason: 'REMOTE_DURATION_CHANGED',
+        },
+        editAnalysis: {
+          status: 'completed',
+          error: null,
+          updated_at: null,
+          result: {
+            local_duration: 100,
+            remote_duration: 80,
+            matched_ratio: 1,
+            removed: [{ start: 10, end: 30, remote_at: 10 }],
+            added: [],
+            segments: [],
+          },
+        },
+      },
+    })
+    expect(wrapper.find('[role=tab][aria-selected=true]').text()).toBe('編集箇所')
+    await wrapper.find('button.edit-region-seek').trigger('click')
+    expect(wrapper.emitted('seek')).toEqual([[10]])
+    await wrapper.find('button.edit-analysis-run').trigger('click')
+    expect(wrapper.emitted('runEditAnalysis')).toHaveLength(1)
+  })
+
+  it('shows the recorded codecs and the protection reason in the info tab', () => {
+    const wrapper = mount(PlayerPanels, {
+      props: {
+        ...base,
+        tab: 'info',
+        video: {
+          ...video,
+          status: 'PROTECTED',
+          protected: true,
+          protection_reason: 'REMOTE_DURATION_CHANGED',
+          media: {
+            container: 'matroska',
+            video_codec: 'av1',
+            audio_codec: 'opus',
+            width: 1920,
+            height: 1080,
+          },
+        },
+      },
+    })
+    expect(wrapper.text()).toContain('AV1 / Opus · MKV · 1920×1080')
+    expect(wrapper.text()).toContain('YouTube 側で編集（長さが変化）')
+    expect(wrapper.text()).toContain('保護解除')
+  })
+})

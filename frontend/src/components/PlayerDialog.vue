@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { apiUrl, request } from '../api/client'
-import type { ChatPage, Transcript, Video } from '../api/types'
+import type { ChatPage, EditAnalysis, Transcript, Video } from '../api/types'
 import { installDPlayerSettings } from '../lib/dplayerSettings'
+import { editMarkers, renderEditMarkers } from '../lib/editMarkers'
+import { installSkipButtons } from '../lib/playerSkip'
 import type { DPlayerSettingsHandle } from '../lib/dplayerSettings'
 import { readDanmakuPreferences, writeDanmakuPreferences } from '../lib/playerSettings'
 import { loadPanelsIndependently, panel } from '../lib/panelLoading'
@@ -34,6 +36,7 @@ const timeline = ref<
   }>
 >([])
 const summary = ref<Record<string, unknown> | null>(null)
+const editAnalysis = ref<EditAnalysis>({ status: 'none', error: null, result: null, updated_at: null })
 const chatQuery = ref('')
 const transcriptQuery = ref('')
 const chatKind = ref('')
@@ -127,6 +130,9 @@ let player: import('dplayer').default | undefined
 let hls: import('hls.js').default | undefined
 let hlsRetryTimer: ReturnType<typeof setTimeout> | undefined
 let playerSettings: DPlayerSettingsHandle | undefined
+let disposeSkipButtons = () => {}
+let disposeEditMarkers = () => {}
+let editAnalysisTimer = 0
 let chatTimer = 0
 let chatRequestSequence = 0
 let transcriptRequestSequence = 0
@@ -250,10 +256,45 @@ async function loadPanels() {
         () => request<Record<string, unknown>>(`/videos/${props.video.id}/summary`),
         (result) => (summary.value = result),
       ),
+      panel(() => loadEditAnalysis()),
     ],
     (message) => (error.value = message),
   )
 }
+async function loadEditAnalysis() {
+  if (props.live) return
+  const result = await request<EditAnalysis>(`/videos/${props.video.id}/edit-analysis`)
+  editAnalysis.value = result
+  // 解析は数十分かかることがあるので、終わるまで状態だけを見に行く。
+  window.clearTimeout(editAnalysisTimer)
+  if (['pending', 'processing', 'retry_wait'].includes(result.status)) {
+    editAnalysisTimer = window.setTimeout(() => void loadEditAnalysis().catch(() => {}), 15_000)
+  }
+}
+async function runEditAnalysis() {
+  busy.value = true
+  try {
+    editAnalysis.value = await request<EditAnalysis>(`/videos/${props.video.id}/edit-analysis`, {
+      method: 'POST',
+      body: '{}',
+    })
+    void loadEditAnalysis().catch(() => {})
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '解析を開始できません'
+  } finally {
+    busy.value = false
+  }
+}
+function drawEditMarkers() {
+  if (!mount.value || props.live || !player) return
+  const el = videoEl.value
+  const duration =
+    el && Number.isFinite(el.duration) && el.duration > 0
+      ? el.duration
+      : (editAnalysis.value.result?.local_duration ?? 0)
+  disposeEditMarkers = renderEditMarkers(mount.value, editMarkers(editAnalysis.value.result, duration))
+}
+watch(editAnalysis, drawEditMarkers)
 function followLive() {
   const el = videoEl.value
   if (el?.seekable.length) {
@@ -392,6 +433,9 @@ async function makePlayer(renditionName?: PlaybackRendition['name'], startTime =
     highlight: [],
   })
   videoEl.value = player.video
+  disposeSkipButtons = installSkipButtons(mount.value, player.video)
+  drawEditMarkers()
+  player.video.addEventListener('loadedmetadata', drawEditMarkers)
   videoEl.value.playbackRate = playbackRate.value
   videoEl.value.loop = loop.value
   playerSettings = installDPlayerSettings({
@@ -670,6 +714,10 @@ function destroy() {
   hlsRetryTimer = undefined
   playerSettings?.dispose()
   playerSettings = undefined
+  disposeSkipButtons()
+  disposeSkipButtons = () => {}
+  disposeEditMarkers()
+  disposeEditMarkers = () => {}
   player?.destroy()
   player = undefined
   videoEl.value = null
@@ -786,6 +834,7 @@ onBeforeUnmount(() => {
   document.body.classList.remove('dialog-open')
   document.removeEventListener('keydown', onKey)
   backgroundSequence += 1
+  window.clearTimeout(editAnalysisTimer)
   destroy()
   focusBefore?.focus()
 })
@@ -856,6 +905,7 @@ onBeforeUnmount(() => {
           :capture-frame="captureCurrentFrame"
           :storage-name="video.storage_name || ''"
           :conversion-note="conversionNote"
+          :edit-analysis="editAnalysis"
           @search-chat="searchChat"
           @retrieve-chat="retrieveChat"
           @seek-covered="seek"
@@ -871,6 +921,7 @@ onBeforeUnmount(() => {
           @follow-chat="followChat"
           @chat-scrolled="followingChat = false"
           @video-action="runVideoAction"
+          @run-edit-analysis="runEditAnalysis"
         />
       </div>
     </section>

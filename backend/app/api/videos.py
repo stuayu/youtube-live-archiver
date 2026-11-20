@@ -3,6 +3,7 @@ from fastapi import BackgroundTasks
 from sqlalchemy import and_
 
 from ..db import SessionLocal
+from ..models import RemoteCheck
 from ..services.media import inspect_media, source_media, video_playback_metadata
 from ..services.manual_video import parse_video_url, canonical_video_url, action_for_live_status
 from ..services.image_cache import allowed_thumbnail_url, resolve_thumbnail
@@ -868,19 +869,51 @@ def protect_video(video_id: int, db: Session = Depends(get_db)):
         db.commit()
     return {"ok": True, "protected": True}
 
+EDIT_PROTECTION_REASONS = ("REMOTE_DURATION_CHANGED", "REMOTE_CONTENT_CHANGED")
+
+
 @router.delete("/videos/{video_id}/protect")
 def unprotect_video(video_id: int, db: Session = Depends(get_db)):
     video = db.get(Video, video_id)
     if not video: raise HTTPException(404, "動画がありません")
-    if video.protection_reason != "MANUAL": raise HTTPException(409, "手動保護だけ解除できます")
+    if video.protection_reason == "LEGAL_HOLD": raise HTTPException(409, "法的保全中の動画は解除できません")
     if video.status != "PROTECTED": raise HTTPException(409, "保護状態の動画だけ解除できます")
+    reason = video.protection_reason or "MANUAL"
+    if reason in EDIT_PROTECTION_REASONS:
+        # 解除 = この編集を承認した、という意味。次回の確認では承認時の長さと比べ、
+        # さらに編集された場合だけ再び保護する。
+        latest = db.scalar(select(RemoteCheck.remote_duration).where(
+            RemoteCheck.video_id == video.id, RemoteCheck.remote_duration.is_not(None))
+            .order_by(RemoteCheck.checked_at.desc(), RemoteCheck.id.desc()).limit(1))
+        video.raw_metadata = {**(video.raw_metadata or {}),
+                              "edit_accepted": {"reason": reason, "remote_duration": latest, "at": now().isoformat()}}
     video.protected = False
     video.protection_reason = None
     video.protected_at = None
     video.status = "ACTIVE"
-    db.add(AuditLog(video_id=video.id, action="UNPROTECT", reason="MANUAL"))
+    db.add(AuditLog(video_id=video.id, action="UNPROTECT", reason=reason))
     db.commit()
     return {"ok": True, "protected": False}
+
+
+@router.get("/videos/{video_id}/edit-analysis")
+def get_edit_analysis(video_id: int, db: Session = Depends(get_db)):
+    from ..services import edit_analysis
+    _video_or_404(db, video_id)
+    result = edit_analysis.view(db, video_id)
+    db.commit()
+    return result
+
+
+@router.post("/videos/{video_id}/edit-analysis")
+def request_edit_analysis(video_id: int, db: Session = Depends(get_db)):
+    from ..services import edit_analysis
+    video = _video_or_404(db, video_id)
+    if not video.file_path or video.status.startswith("DELETED"):
+        raise HTTPException(409, "録画ファイルがある動画だけ解析できます")
+    edit_analysis.enqueue(db, video_id, force=True)
+    db.commit()
+    return edit_analysis.view(db, video_id)
 
 @router.delete("/videos/{video_id}")
 def delete_video(video_id: int, db: Session = Depends(get_db)):

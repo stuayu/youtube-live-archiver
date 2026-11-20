@@ -18,6 +18,7 @@ from .workers import (channel_monitor, recorder_worker, retention_worker, protec
                       recovery_worker, integrity_worker, derived_cleanup_worker, upcoming_watch_worker)
 from .services.processing import processing_worker, summary_worker
 from .services.chat import chat_replay_worker
+from .services.edit_analysis import worker as edit_analysis_worker
 
 scheduler = BackgroundScheduler(timezone="UTC")
 import shutil
@@ -139,6 +140,8 @@ async def lifespan(app: FastAPI):
                           id="processing-queue", max_instances=1, coalesce=True, misfire_grace_time=5)
         scheduler.add_job(_tracked_job("summary-queue", summary_worker), "interval", seconds=30,
                           id="summary-queue", max_instances=1, coalesce=True, misfire_grace_time=10)
+        scheduler.add_job(_tracked_job("edit-analysis", edit_analysis_worker), "interval", seconds=30,
+                          id="edit-analysis", max_instances=1, coalesce=True, misfire_grace_time=10)
         scheduler.add_job(_tracked_job("chat-replay", chat_replay_worker), "interval", seconds=60,
                           id="chat-replay", max_instances=1, coalesce=True, misfire_grace_time=10)
         from .services.ytdlp_update import check_version

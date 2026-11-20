@@ -947,7 +947,7 @@ def test_derived_cleanup_respects_access_time_and_never_deletes_source(monkeypat
 
 
 @pytest.mark.integration
-def test_protection_state_rules_and_automatic_protection_cannot_be_removed(client):
+def test_protection_state_rules_and_legal_hold_cannot_be_removed(client):
     channel_id = add_channel()
     for status in ("RECORDING", "RECORDING_FAILED"):
         video_id = add_video(channel_id, status=status)
@@ -958,7 +958,7 @@ def test_protection_state_rules_and_automatic_protection_cannot_be_removed(clien
     automatic = add_video(channel_id, status="PROTECTED", protected=True)
     with SessionLocal() as db:
         video = db.get(Video, automatic)
-        video.protection_reason = "PRIVATE"
+        video.protection_reason = "LEGAL_HOLD"
         db.commit()
     assert client.delete(f"/api/videos/{automatic}/protect").status_code == 409
     manual = add_video(channel_id, status="DELETE_ELIGIBLE")

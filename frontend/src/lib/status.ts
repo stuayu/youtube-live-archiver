@@ -25,6 +25,9 @@ const reasons: Record<string, string> = {
   REMOTE_DELETED: 'YouTube 側で削除',
   REMOTE_UNAVAILABLE: 'YouTube 側で視聴不可',
   REMOTE_CONTENT_CHANGED: 'YouTube 側で編集',
+  REMOTE_DURATION_CHANGED: 'YouTube 側で編集（長さが変化）',
+  REMOTE_CHECK_FAILED: 'YouTube の確認に失敗',
+  LEGAL_HOLD: '法的保全',
   MANUAL: '手動保護',
   UNKNOWN: '理由不明',
 }
@@ -142,7 +145,7 @@ export function processingStatus(video: ProcessingTarget): StatusPresentation | 
   )
 }
 
-/** Mirrors the API rules: POST /protect for these statuses, DELETE /protect only for manual protection. */
+/** Mirrors the API rules: POST /protect for these statuses, DELETE /protect for anything but a legal hold. */
 const protectableStatuses = ['ACTIVE', 'DELETE_ELIGIBLE', 'PROTECTION_PENDING', 'VERIFYING_REMOTE']
 export function protectionAction(video: {
   status: string
@@ -150,7 +153,7 @@ export function protectionAction(video: {
   protection_reason?: string | null
 }): 'protect' | 'unprotect' | null {
   if (video.protected) {
-    return video.status === 'PROTECTED' && video.protection_reason === 'MANUAL' ? 'unprotect' : null
+    return video.status === 'PROTECTED' && video.protection_reason !== 'LEGAL_HOLD' ? 'unprotect' : null
   }
   return protectableStatuses.includes(video.status) ? 'protect' : null
 }

@@ -17,6 +17,7 @@ from .models import Channel, Video, RemoteCheck, AuditLog, Storage, Fingerprint,
 from .config import settings
 from .services.policy import classify_remote, compare_fingerprints, has_prior_successful_check, initial_retention_decision, may_delete
 from .services.fingerprints import sample, video_phash, audio_fingerprint, POSITIONS
+from .services import edit_analysis
 from .services.ffmpeg import launch_ffmpeg
 from .services.youtube import inspect, run_ytdlp, popen_ytdlp, ytdlp_command, classify_ytdlp_error
 
@@ -145,9 +146,13 @@ def verify_video(db, video: Video, *, final: bool = False, _lease=None) -> bool:
         return False
     mode = (video.edit_detection_mode or (video.channel.edit_detection_mode if video.channel else "standard")).lower()
     compare_duration = mode != "off"
-    decision = classify_remote(status, error, video.original_duration if compare_duration else (video.original_duration or 1),
-                               duration if compare_duration else (video.original_duration or 1), settings.duration_tolerance_seconds)
-    if decision.status == "DELETE_ELIGIBLE" and mode in ("standard", "strong"):
+    # 保護解除で承認された編集は、承認時の長さを基準にする。録画との指紋比較は
+    # 編集後の位置がずれて常に不一致になるため行わない。
+    accepted = (video.raw_metadata or {}).get("edit_accepted") or {}
+    baseline = accepted.get("remote_duration") or video.original_duration
+    decision = classify_remote(status, error, baseline if compare_duration else (baseline or 1),
+                               duration if compare_duration else (baseline or 1), settings.duration_tolerance_seconds)
+    if decision.status == "DELETE_ELIGIBLE" and mode in ("standard", "strong") and not accepted:
         try:
             db.commit()
             video = db.get(Video, video_id)
@@ -172,6 +177,13 @@ def verify_video(db, video: Video, *, final: bool = False, _lease=None) -> bool:
     video.remote_status = status
     if decision.status == "PROTECTED":
         _protect(db, video, decision.reason or "REMOTE_UNAVAILABLE")
+        if changed:
+            try:
+                # どこが編集されたかは再生画面で確認できるよう、別ジョブで調べる。
+                with db.begin_nested():
+                    edit_analysis.enqueue(db, video.id, force=True)
+            except Exception:
+                log.exception("could not queue edit analysis for video %s", video.id)
         return False
     if decision.status == "PROTECTION_PENDING":
         video.status = "PROTECTION_PENDING"

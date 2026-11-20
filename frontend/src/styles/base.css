@@ -2539,3 +2539,147 @@ legend {
     min-height: 44px !important;
   }
 }
+
+/* 10 秒戻る・進む（DPlayer は矢印キーでしか移動できないため追加） */
+.dplayer-controller .dplayer-icons-left .yla-skip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  opacity: 0.8;
+  cursor: pointer;
+  vertical-align: top;
+}
+.dplayer-controller .dplayer-icons-left .yla-skip:hover,
+.dplayer-controller .dplayer-icons-left .yla-skip:focus-visible {
+  opacity: 1;
+}
+.dplayer-controller .dplayer-icons-left .yla-skip svg text {
+  font-family: system-ui, sans-serif;
+  font-weight: 700;
+}
+
+/* シークバー上の編集箇所。クリックはシークバーへ通す。 */
+.dplayer-controller .dplayer-bar-wrap .yla-edit-marker-layer {
+  position: absolute;
+  inset: 5px 0 auto;
+  height: 3px;
+  pointer-events: none;
+  z-index: 11;
+}
+.dplayer-controller .dplayer-bar-wrap .yla-edit-marker {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 2px;
+}
+.dplayer-controller .dplayer-bar-wrap .yla-edit-marker-removed {
+  background: #ff5c57;
+}
+.dplayer-controller .dplayer-bar-wrap .yla-edit-marker-added {
+  width: 4px !important;
+  top: -2px;
+  height: 7px;
+  border-radius: 2px;
+  background: #ffd23f;
+  transform: translateX(-2px);
+}
+
+.edit-analysis {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.edit-analysis p {
+  margin: 0;
+}
+.edit-analysis-reason {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+.edit-analysis-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+.edit-analysis-warning {
+  color: var(--warning);
+}
+.edit-analysis-heading {
+  margin: 8px 0 0;
+  font-size: 14px;
+}
+.edit-region-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.edit-region {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 0 6px 10px;
+  border-bottom: 1px solid var(--line);
+  border-left: 3px solid #ff5c57;
+}
+.edit-region-added {
+  border-left-color: #e0ad00;
+}
+.edit-region .edit-region-seek,
+.edit-region .edit-region-youtube {
+  display: inline-flex;
+  gap: 8px;
+  align-items: baseline;
+  min-height: 32px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.edit-region-removed .edit-region-seek,
+.edit-region-added .edit-region-youtube {
+  font-weight: 600;
+}
+.edit-region-removed .edit-region-youtube,
+.edit-region-added .edit-region-seek {
+  color: var(--accent);
+  font-size: 13px;
+}
+.edit-region-length {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
+}
+/* 狭い画面では時刻表示が右のアイコンと重なるため、本体ボタンで操作できる音量を隠し、
+   時刻を「現在 / 長さ」の 2 段にして横幅を半分にする。タッチ領域の 44px は保つ。 */
+@media (max-width: 480px) {
+  .dplayer-controller .dplayer-icons-left .dplayer-volume {
+    display: none !important;
+  }
+  .dplayer-mount .dplayer-controller .dplayer-icons-left .dplayer-time {
+    display: inline-flex;
+    flex-direction: column;
+    justify-content: center;
+    height: 100%;
+    font-size: 0;
+    line-height: 1.25;
+    vertical-align: top;
+  }
+  .dplayer-mount .dplayer-controller .dplayer-icons-left .dplayer-time > span {
+    height: auto;
+    font-size: 11px;
+    line-height: 14px;
+  }
+  .dplayer-mount .dplayer-controller .dplayer-icons-left .dplayer-time .dplayer-dtime {
+    opacity: 0.75;
+  }
+}

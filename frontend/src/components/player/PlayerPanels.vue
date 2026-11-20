@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { apiUrl } from '../../api/client'
-import type { ChatMessage, ChatPage, Transcript, Video } from '../../api/types'
-import { formatBytes, formatDate, formatDuration } from '../../lib/format'
-import { videoStatus } from '../../lib/status'
+import type { ChatMessage, ChatPage, EditAnalysis, Transcript, Video } from '../../api/types'
+import { formatBytes, formatDate, formatDuration, formatMedia } from '../../lib/format'
+import { protectionAction, protectionReason, videoStatus } from '../../lib/status'
+import PlayerEditAnalysis from './PlayerEditAnalysis.vue'
 import PlayerSocialTimeline from './PlayerSocialTimeline.vue'
 
 interface TimelineItem {
@@ -42,10 +43,12 @@ const props = withDefaults(
     }>
     storageName?: string
     conversionNote?: string
+    editAnalysis?: EditAnalysis
   }>(),
   {
     syncTranscript: true,
     transcriptSyncError: '',
+    editAnalysis: () => ({ status: 'none', error: null, result: null, updated_at: null }),
   },
 )
 const emit = defineEmits<{
@@ -70,12 +73,17 @@ const emit = defineEmits<{
   followChat: []
   chatScrolled: []
   videoAction: [path: string, method?: string]
+  runEditAnalysis: []
 }>()
 const list = ref<HTMLElement | null>(null)
 const transcriptList = ref<HTMLElement | null>(null)
 const fallback = ref(new Set<string>())
 const mobileSearchOpen = ref(false)
-const timelineMode = ref<'highlights' | 'social'>('highlights')
+// YouTube 側の編集で保護された録画は、まず編集箇所を見せる。
+const editedArchive = ['REMOTE_DURATION_CHANGED', 'REMOTE_CONTENT_CHANGED'].includes(
+  props.video.protection_reason || '',
+)
+const timelineMode = ref<'highlights' | 'social' | 'edits'>(editedArchive ? 'edits' : 'highlights')
 let lastTranscriptSyncRequest = Number.NEGATIVE_INFINITY
 const tabs = [
   ['chat', 'チャット'],
@@ -696,6 +704,15 @@ watch(
         >
           SNS
         </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="timelineMode === 'edits'"
+          :class="{ active: timelineMode === 'edits' }"
+          @click="timelineMode = 'edits'"
+        >
+          編集箇所
+        </button>
       </div>
       <div v-if="timelineMode === 'highlights'" class="timeline-highlights">
         <button
@@ -708,6 +725,15 @@ watch(
         </button>
         <p v-if="!timeline.length" class="empty-state">タイムラインはありません</p>
       </div>
+      <PlayerEditAnalysis
+        v-else-if="timelineMode === 'edits'"
+        :analysis="editAnalysis"
+        :youtube-video-id="video.youtube_video_id"
+        :protection-reason="video.protection_reason"
+        :busy="busy"
+        @seek="emit('seek', $event)"
+        @run="emit('runEditAnalysis')"
+      />
       <PlayerSocialTimeline
         v-else
         :video-id="videoId"
@@ -731,6 +757,10 @@ watch(
           <dd>{{ formatBytes(video.file_size) }}</dd>
         </div>
         <div>
+          <dt>形式</dt>
+          <dd>{{ formatMedia(video.media) }}</dd>
+        </div>
+        <div>
           <dt>保存先</dt>
           <dd>{{ storageName || '未設定' }}</dd>
         </div>
@@ -745,6 +775,10 @@ watch(
               videoStatus(video.status).label
             }}</span>
           </dd>
+        </div>
+        <div v-if="video.protected">
+          <dt>保護理由</dt>
+          <dd>{{ protectionReason(video.protection_reason) || '理由不明' }}</dd>
         </div>
       </dl>
       <div class="actions">
@@ -765,7 +799,7 @@ watch(
         </button>
         <button
           class="button secondary"
-          :disabled="busy"
+          :disabled="busy || !protectionAction(video)"
           @click="emit('videoAction', 'protect', video.protected ? 'DELETE' : 'POST')"
         >
           {{ video.protected ? '保護解除' : '保護' }}

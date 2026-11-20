@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { apiUrl } from '../../api/client'
 import type { Video } from '../../api/types'
-import { formatBytes, formatDate, formatDuration } from '../../lib/format'
-import { videoStatus } from '../../lib/status'
+import { formatBytes, formatDate, formatDuration, formatMedia } from '../../lib/format'
+import { protectionAction, protectionReason, videoStatus } from '../../lib/status'
 
 defineProps<{ video: Video; busy: boolean; note?: string }>()
 const emit = defineEmits<{ action: [path: string, method?: string] }>()
@@ -24,6 +24,10 @@ const emit = defineEmits<{ action: [path: string, method?: string] }>()
         <dd>{{ formatBytes(video.file_size) }}</dd>
       </div>
       <div>
+        <dt>形式</dt>
+        <dd>{{ formatMedia(video.media) }}</dd>
+      </div>
+      <div>
         <dt>保存先</dt>
         <dd>{{ video.storage_name || '未設定' }}</dd>
       </div>
@@ -38,6 +42,10 @@ const emit = defineEmits<{ action: [path: string, method?: string] }>()
             {{ videoStatus(video.status).label }}
           </span>
         </dd>
+      </div>
+      <div v-if="video.protected">
+        <dt>保護理由</dt>
+        <dd>{{ protectionReason(video.protection_reason) || '理由不明' }}</dd>
       </div>
     </dl>
     <div class="actions">
@@ -58,7 +66,7 @@ const emit = defineEmits<{ action: [path: string, method?: string] }>()
       </button>
       <button
         class="button secondary"
-        :disabled="busy"
+        :disabled="busy || !protectionAction(video)"
         @click="emit('action', 'protect', video.protected ? 'DELETE' : 'POST')"
       >
         {{ video.protected ? '保護解除' : '保護' }}

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { bytesToGb, formatBytes, formatDate, formatDuration, gbToBytes, relativeTime } from '../format'
+import {
+  bytesToGb,
+  formatBytes,
+  formatDate,
+  formatDuration,
+  formatMedia,
+  gbToBytes,
+  relativeTime,
+} from '../format'
 describe('format helpers', () => {
   it('formats a local date in 24 hour YYYY/MM/DD HH:mm form', () => {
     expect(formatDate('2026-10-02T13:04:00Z')).toMatch(/^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/)
@@ -21,5 +29,23 @@ describe('format helpers', () => {
     expect(gbToBytes('')).toBeNull()
     expect(bytesToGb(null)).toBe('')
     expect(bytesToGb(1073741824)).toBe(1)
+  })
+  it('names the recorded codecs so HEVC and AV1 recordings can be told apart', () => {
+    expect(
+      formatMedia({
+        container: 'matroska',
+        video_codec: 'hevc',
+        audio_codec: 'aac',
+        width: 1920,
+        height: 1080,
+      }),
+    ).toBe('HEVC (H.265) / AAC · MKV · 1920×1080')
+    expect(
+      formatMedia({ container: 'mp4', video_codec: 'av1', audio_codec: 'opus', width: null, height: null }),
+    ).toBe('AV1 / Opus · MP4')
+    expect(
+      formatMedia({ container: 'webm', video_codec: 'vp9', audio_codec: null, width: 640, height: 360 }),
+    ).toBe('VP9 · WebM · 640×360')
+    expect(formatMedia(null)).toBe('不明（解析待ち）')
   })
 })

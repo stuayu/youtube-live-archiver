@@ -207,6 +207,14 @@ dense_video = Video(
 )
 db.add(dense_video)
 db.flush()
+# 再生画面の「編集箇所」とシークバーの印の確認用。YouTube 版で 30〜60 秒がカットされ、
+# 120 秒の位置に 20 秒の別映像が入った想定。
+db.add(ProcessingJob(video_id=dense_video.id, kind="EDIT_ANALYSIS", status="completed", attempts=1,
+    finished_at=now(), payload={"result": {
+        "local_duration": 180, "remote_duration": 170, "matched_ratio": 0.98,
+        "removed": [{"start": 30, "end": 60, "remote_at": 30}],
+        "added": [{"start": 90, "end": 110, "local_at": 120}],
+        "segments": []}}))
 db.add_all(ChatMessage(
     video_id=dense_video.id, message_id=f"dense-{n}", offset_ms=n * 100,
     author_name=f"視聴者{n % 20}", message_text=f"高密度コメント {n}", message_type="normal",

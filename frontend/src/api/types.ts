@@ -455,3 +455,19 @@ export interface SearchResponse {
   limit: number
   results: SearchResult[]
 }
+export interface EditAnalysisResult {
+  local_duration: number
+  remote_duration: number
+  matched_ratio: number
+  /** 録画にあって YouTube 版にない区間（録画の時刻）。remote_at は YouTube 版でつながる位置。 */
+  removed: Array<{ start: number; end: number; remote_at: number | null }>
+  /** YouTube 版にだけある区間（YouTube 版の時刻）。local_at は録画で対応する位置。 */
+  added: Array<{ start: number; end: number; local_at: number | null }>
+  segments: Array<{ remote_start: number; remote_end: number; local_start: number; local_end: number }>
+}
+export interface EditAnalysis {
+  status: 'none' | 'pending' | 'processing' | 'retry_wait' | 'completed' | 'failed' | 'disabled'
+  error: string | null
+  result: EditAnalysisResult | null
+  updated_at: string | null
+}

@@ -154,16 +154,23 @@ describe('VideoRow', () => {
     }
   })
 
-  it('offers unprotect only for manual protection', async () => {
+  it('offers unprotect for every protection except a legal hold', async () => {
     const manual = mount(VideoRow, {
       props: { video: { ...sample('PROTECTED'), protected: true, protection_reason: 'MANUAL' } },
     })
     await manual.get('summary').trigger('click')
     expect(manual.text()).toContain('保護解除')
     const automatic = mount(VideoRow, {
-      props: { video: { ...sample('PROTECTED'), protected: true, protection_reason: 'REMOTE_PRIVATE' } },
+      props: {
+        video: { ...sample('PROTECTED'), protected: true, protection_reason: 'REMOTE_DURATION_CHANGED' },
+      },
     })
     await automatic.get('summary').trigger('click')
-    expect(automatic.text()).not.toContain('保護解除')
+    expect(automatic.text()).toContain('保護解除')
+    const hold = mount(VideoRow, {
+      props: { video: { ...sample('PROTECTED'), protected: true, protection_reason: 'LEGAL_HOLD' } },
+    })
+    await hold.get('summary').trigger('click')
+    expect(hold.text()).not.toContain('保護解除')
   })
 })
